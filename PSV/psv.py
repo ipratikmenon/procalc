@@ -713,6 +713,68 @@ def _title(ws, ncol, text):
     ws.row_dimensions[1].height = 22
 
 
+# ── live unit labels (track the UNITS sheet) ────────────────────────────────
+# UNITS sheet layout (see common/units.py add_units_sheet): "Unit System" in
+# B3, then one row per quantity code (column A) — in QUANTITY_NAMES order,
+# starting row 6 — with the per-quantity override in column C.
+UNIT_ROWS = {qty: 6 + i for i, qty in enumerate(UN.QUANTITY_NAMES.keys())}
+
+
+class _U:
+    """Marks a `_kv_block`/header unit as a *live* formula referencing the
+    UNITS sheet, rather than literal text fixed at template-creation time.
+
+    ``_U("P")``            → the current label for quantity "P"
+    ``_U("Q", "/", "dT")``  → composite, e.g. "kW/°C" (literals pass through)
+    """
+    __slots__ = ("parts",)
+
+    def __init__(self, *parts):
+        self.parts = parts
+
+
+def _pretty_unit(u: str) -> str:
+    return {"degF": "°F", "degC": "°C"}.get(u, u)
+
+
+def _unit_expr(qty: str) -> str:
+    """Excel expression (no leading '=') for the live label of `qty`:
+    UNITS!C<row> override if set, else the system default for UNITS!B3."""
+    row = UNIT_ROWS.get(qty)
+    if row is None:
+        return f'"{_pretty_unit(UN.SYSTEM_DEFAULTS["FPS"].get(qty, ""))}"'
+    ovr = f"UNITS!$C${row}"
+    fps_def = _pretty_unit(UN.SYSTEM_DEFAULTS["FPS"][qty])
+    si_def = _pretty_unit(UN.SYSTEM_DEFAULTS["SI"][qty])
+    pretty_ovr = f'IF({ovr}="degF","°F",IF({ovr}="degC","°C",{ovr}))'
+    default = f'IF(UNITS!$B$3="SI","{si_def}","{fps_def}")'
+    return f'IF({ovr}<>"",{pretty_ovr},{default})'
+
+
+def _unit_formula(qty: str) -> str:
+    return "=" + _unit_expr(qty)
+
+
+def _unit_formula_parts(parts) -> str:
+    pieces = [_unit_expr(p) if p in UNIT_ROWS else f'"{p}"' for p in parts]
+    return "=" + " & ".join(pieces)
+
+
+def _unit_cell(unit):
+    """Resolve a `_kv_block` unit-hint: `_U(...)` → live formula string,
+    anything else passes through unchanged (literal text)."""
+    if isinstance(unit, _U):
+        if len(unit.parts) == 1:
+            return _unit_formula(unit.parts[0])
+        return _unit_formula_parts(unit.parts)
+    return unit
+
+
+def _hdr_formula(base: str, qty: str) -> str:
+    """Live column-header formula: '<base> (<live unit>)'."""
+    return f'="{base} (" & {_unit_expr(qty)} & ")"'
+
+
 def _kv_block(ws, r, rows, widths=(34, 16, 12, 64)):
     """rows = list of (label, default, unit_hint, note, kind) — kind: in/calc/sec."""
     for col, w in zip("BCDE", widths):
@@ -725,7 +787,7 @@ def _kv_block(ws, r, rows, widths=(34, 16, 12, 64)):
             C(ws, r, 2, label, bg=LGRAY, sz=9, bold=False)
             C(ws, r, 3, default,
               bg=(EGRAY if kind == "calc" else AMBER), sz=9, ha="right")
-            C(ws, r, 4, unit, sz=9, fg="808080")
+            C(ws, r, 4, _unit_cell(unit), sz=9, fg="808080")
             C(ws, r, 5, note, sz=9, fg="808080", wrap=True)
         r += 1
     return r
@@ -735,7 +797,7 @@ def create_input_template(out_path: str = "psv_input.xlsx",
                           unit_system: str = "FPS") -> str:
     usys = UN.UnitSystem(unit_system)
     uio = UIO(usys)
-    L = uio.label
+    L = lambda *parts: _U(*parts)
     wb = Workbook()
 
     # ── GENERAL ────────────────────────────────────────────────────────────
@@ -796,9 +858,9 @@ def create_input_template(out_path: str = "psv_input.xlsx",
     _title(ws, 10, "PROTECTED EQUIPMENT  —  up to 10 items (PSV Inputs plus) "
                    "+ fire geometry of the governing vessel")
     hdrs = ["#", "Equipment Tag", "Type",
-            uio.hdr("Op P", "P"), uio.hdr("Op T", "T"),
-            uio.hdr("Des P", "P"), uio.hdr("Des T", "T"),
-            uio.hdr("MAWP", "P"), uio.hdr("EL from grade", "L"), "Notes"]
+            _hdr_formula("Op P", "P"), _hdr_formula("Op T", "T"),
+            _hdr_formula("Des P", "P"), _hdr_formula("Des T", "T"),
+            _hdr_formula("MAWP", "P"), _hdr_formula("EL from grade", "L"), "Notes"]
     for ci, h in enumerate(hdrs, 2):
         C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[3].height = 26
@@ -922,7 +984,7 @@ STREAM_COLS = [
 
 
 def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
-    L = uio.label
+    L = lambda *parts: _U(*parts)
 
     # ── STREAM_INPUTS ─────────────────────────────────────────────────────
     ws = wb.create_sheet("STREAM_INPUTS")
@@ -935,7 +997,7 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
                 "properties (same convention as the hydraulics input).",
       sz=9, fg="808080")
     for ci, (key, base, qty) in enumerate(STREAM_COLS, 2):
-        h = uio.hdr(base, qty) if qty else base
+        h = _hdr_formula(base, qty) if qty else base
         C(ws, 4, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[4].height = 28
     manual_keys = {"t", "p", "phase", "mw", "z", "k", "x", "rho_v", "rho_l",
@@ -993,7 +1055,7 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
         ("5 · THERMAL EXPANSION", "", "", "", "sec"),
         ("THERM: Heat input rate", None, L("Q"),
          "Exchanger hot-side / tracing / solar duty into the blocked liquid", "in"),
-        ("THERM: Cubic expansion coefficient β", None, "1/" + L("dT"),
+        ("THERM: Cubic expansion coefficient β", None, _U("1/", "dT"),
          "At operating T (water 60°F ≈ 0.000113/°F)", "in"),
         ("6 · TUBE RUPTURE / LEAK — HX data on EQUIPMENT sheet", "", "", "", "sec"),
         ("TUBE: Number of tube failures", 1, "",
@@ -1030,7 +1092,7 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
         ("REBOILER PINCH (§5.1) — applied to BOILUP / OVERFILL / ABHEAT",
          "", "", "", "sec"),
         ("PINCH: Apply pinch credit?", "N", "Y/N", "", "in"),
-        ("PINCH: U × A", None, L("Q") + "/" + L("dT"),
+        ("PINCH: U × A", None, _U("Q", "/", "dT"),
          "Overall coefficient × area (clean U if medium flow rises)", "in"),
         ("PINCH: Heating medium temperature", None, L("T"), "", "in"),
         ("PINCH: Reboiler-feed bubble point at accumulation", None, L("T"),
