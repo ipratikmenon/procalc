@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -45,6 +45,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "common"))
 sys.path.insert(0, os.path.join(_HERE, "..", "Hydraulics"))
 import units as UN                                     # noqa: E402
+from style import (                                    # noqa: E402
+    NAVY, WHITE, LGRAY, AMBER, TEAL, DGRAY, ORANGE, CYAN, C, _title,
+    _U, _hdr_formula, _kv_block, _result_rows,
+)
 
 try:
     import hydraulics as HYD          # HMB stream loading + flash VLE
@@ -68,6 +72,19 @@ API_ORIFICE = {
     "J": 8.303, "K": 12.65, "L": 19.61, "M": 29.03, "N": 41.16,
     "P": 71.00, "Q": 109.7, "R": 167.7, "T": 258.1,
 }
+
+# Fittings catalogue (K-table) — reuse the Hydraulics tool's list so
+# INLET/OUTLET piping fittings match the hydraulics engine exactly.
+if HYD is not None:
+    FITTING_NAMES = HYD.FITTING_NAMES
+    fitting_k = HYD.fitting_k
+else:                                  # pragma: no cover — HYD unavailable
+    FITTING_NAMES = ["Straight Pipeline", "Elbow 90 Short", "Gate Full Open"]
+
+    def fitting_k(name: str | None) -> float:
+        return 0.0
+
+N_FIT_ROWS = 12                        # fitting entry rows per piping sheet
 
 # Overpressure allowance by contingency class (% of set pressure, gauge)
 OP_PCT = {"DESIGN": 10.0, "DESIGN_MULTI": 16.0, "FIRE": 21.0}
@@ -679,118 +696,9 @@ def latent_from_feed(feed, p_pa: float) -> float | None:
 # ═══════════════════════════════════════════════════════════════════════════
 #  Template builder
 # ═══════════════════════════════════════════════════════════════════════════
-NAVY, WHITE, LGRAY = "1F4973", "FFFFFF", "F2F2F2"
-AMBER, TEAL, EGRAY = "FFF2CC", "DDEBF7", "E0E0E0"
-GRNHDR, DGRAY, ORANGE = "375623", "404040", "C55A11"
-
-
-def _fillc(h):
-    return PatternFill("solid", fgColor=h)
-
-
-def _bord():
-    s = Side(style="thin", color="CCCCCC")
-    return Border(left=s, right=s, top=s, bottom=s)
-
-
-def C(ws, r, c, v=None, bg=None, fg=DGRAY, sz=10, bold=False, wrap=False,
-      ha="left"):
-    x = ws.cell(row=r, column=c)
-    if v is not None:
-        x.value = v
-    x.font = Font(name="Calibri", size=sz, bold=bold, color=fg)
-    if bg:
-        x.fill = _fillc(bg)
-    x.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=wrap)
-    x.border = _bord()
-    return x
-
-
-def _title(ws, ncol, text):
-    ws.sheet_view.showGridLines = False
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=1 + ncol)
-    C(ws, 1, 2, text, bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
-
-
-# ── live unit labels (track the UNITS sheet) ────────────────────────────────
-# UNITS sheet layout (see common/units.py add_units_sheet): "Unit System" in
-# B3, then one row per quantity code (column A) — in QUANTITY_NAMES order,
-# starting row 6 — with the per-quantity override in column C.
-UNIT_ROWS = {qty: 6 + i for i, qty in enumerate(UN.QUANTITY_NAMES.keys())}
-
-
-class _U:
-    """Marks a `_kv_block`/header unit as a *live* formula referencing the
-    UNITS sheet, rather than literal text fixed at template-creation time.
-
-    ``_U("P")``            → the current label for quantity "P"
-    ``_U("Q", "/", "dT")``  → composite, e.g. "kW/°C" (literals pass through)
-    """
-    __slots__ = ("parts",)
-
-    def __init__(self, *parts):
-        self.parts = parts
-
-
-def _pretty_unit(u: str) -> str:
-    return {"degF": "°F", "degC": "°C"}.get(u, u)
-
-
-def _unit_expr(qty: str) -> str:
-    """Excel expression (no leading '=') for the live label of `qty`:
-    UNITS!C<row> override if set, else the system default for UNITS!B3."""
-    row = UNIT_ROWS.get(qty)
-    if row is None:
-        return f'"{_pretty_unit(UN.SYSTEM_DEFAULTS["FPS"].get(qty, ""))}"'
-    ovr = f"UNITS!$C${row}"
-    fps_def = _pretty_unit(UN.SYSTEM_DEFAULTS["FPS"][qty])
-    si_def = _pretty_unit(UN.SYSTEM_DEFAULTS["SI"][qty])
-    pretty_ovr = f'IF({ovr}="degF","°F",IF({ovr}="degC","°C",{ovr}))'
-    default = f'IF(UNITS!$B$3="SI","{si_def}","{fps_def}")'
-    return f'IF({ovr}<>"",{pretty_ovr},{default})'
-
-
-def _unit_formula(qty: str) -> str:
-    return "=" + _unit_expr(qty)
-
-
-def _unit_formula_parts(parts) -> str:
-    pieces = [_unit_expr(p) if p in UNIT_ROWS else f'"{p}"' for p in parts]
-    return "=" + " & ".join(pieces)
-
-
-def _unit_cell(unit):
-    """Resolve a `_kv_block` unit-hint: `_U(...)` → live formula string,
-    anything else passes through unchanged (literal text)."""
-    if isinstance(unit, _U):
-        if len(unit.parts) == 1:
-            return _unit_formula(unit.parts[0])
-        return _unit_formula_parts(unit.parts)
-    return unit
-
-
-def _hdr_formula(base: str, qty: str) -> str:
-    """Live column-header formula: '<base> (<live unit>)'."""
-    return f'="{base} (" & {_unit_expr(qty)} & ")"'
-
-
-def _kv_block(ws, r, rows, widths=(34, 16, 12, 64)):
-    """rows = list of (label, default, unit_hint, note, kind) — kind: in/calc/sec."""
-    for col, w in zip("BCDE", widths):
-        ws.column_dimensions[col].width = w
-    for label, default, unit, note, kind in rows:
-        if kind == "sec":
-            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
-            C(ws, r, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-        else:
-            C(ws, r, 2, label, bg=LGRAY, sz=9, bold=False)
-            C(ws, r, 3, default,
-              bg=(EGRAY if kind == "calc" else AMBER), sz=9, ha="right")
-            C(ws, r, 4, _unit_cell(unit), sz=9, fg="808080")
-            C(ws, r, 5, note, sz=9, fg="808080", wrap=True)
-        r += 1
-    return r
+# Palette, C()/_title()/_kv_block()/_result_rows() and the live unit-label
+# helpers (_U, _unit_*, _hdr_formula, UNIT_ROWS) are shared with the CV tool
+# via ../common/style.py — imported at the top of this file.
 
 
 def create_input_template(out_path: str = "psv_input.xlsx",
@@ -862,12 +770,12 @@ def create_input_template(out_path: str = "psv_input.xlsx",
             _hdr_formula("Des P", "P"), _hdr_formula("Des T", "T"),
             _hdr_formula("MAWP", "P"), _hdr_formula("EL from grade", "L"), "Notes"]
     for ci, h in enumerate(hdrs, 2):
-        C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        C(ws, 3, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[3].height = 26
     for i in range(10):
         C(ws, 4 + i, 2, i + 1, bg=LGRAY, sz=9, ha="center")
         for ci in range(3, 12):
-            C(ws, 4 + i, ci, None, bg=AMBER, sz=9)
+            C(ws, 4 + i, ci, None, bg=AMBER, fg=CYAN, sz=9)
     widths = [4, 16, 14, 10, 10, 10, 10, 10, 14, 28]
     for ci, w in enumerate(widths, 2):
         ws.column_dimensions[get_column_letter(ci)].width = w
@@ -998,7 +906,7 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
       sz=9, fg="808080")
     for ci, (key, base, qty) in enumerate(STREAM_COLS, 2):
         h = _hdr_formula(base, qty) if qty else base
-        C(ws, 4, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        C(ws, 4, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[4].height = 28
     manual_keys = {"t", "p", "phase", "mw", "z", "k", "x", "rho_v", "rho_l",
                    "mu_v", "mu_l", "latent", "cp_l", "sg"}
@@ -1009,12 +917,12 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
             elif key == "name":
                 C(ws, ri, ci, name, bg=LGRAY, sz=9)
             elif key == "active":
-                C(ws, ri, ci, "N", bg=AMBER, sz=9, ha="center")
+                C(ws, ri, ci, "N", bg=AMBER, fg=CYAN, sz=9, ha="center")
             elif key == "klass":
                 default = ("Fire" if code == "FIRE" else "Design")
-                C(ws, ri, ci, default, bg=AMBER, sz=9, ha="center")
+                C(ws, ri, ci, default, bg=AMBER, fg=CYAN, sz=9, ha="center")
             elif key in manual_keys:
-                C(ws, ri, ci, None, bg=AMBER, sz=9, ha="right")
+                C(ws, ri, ci, None, bg=AMBER, fg=CYAN, sz=9, ha="right")
             else:
                 C(ws, ri, ci, None, bg=TEAL, sz=9)
     dv = DataValidation(type="list", formula1='"Design,Remote,Fire"',
@@ -1173,23 +1081,54 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
     _kv_block(ws, 3, rows)
 
     # ── INLET / OUTLET piping ─────────────────────────────────────────────
+    # Shared dropdown source for the fittings tables (hidden sheet, mirrors
+    # the Hydraulics tool's "_FittingList" convention).
+    ws_fit = wb.create_sheet("_FittingList")
+    ws_fit.sheet_state = "hidden"
+    for i, fn in enumerate(FITTING_NAMES, 1):
+        ws_fit.cell(row=i, column=1, value=fn)
+    n_fit = len(FITTING_NAMES)
+
     for nm, ttl in (("INLET_PIPING", "INLET PIPING — 3% rule check"),
                     ("OUTLET_PIPING", "OUTLET PIPING — built-up back pressure")):
         ws = wb.create_sheet(nm)
-        _title(ws, 4, ttl + "  (simple line model; for complex circuits run "
-                            "the hydraulics engine and enter the result)")
+        _title(ws, 4, ttl + "  (define once — per-case velocity/Re/dP results "
+                            "appear on each CASE sheet)")
         rows = [
             ("Geometry", "", "", "", "sec"),
             ("Line inside diameter", None, "in", "Always inches", "in"),
             ("Straight length", None, L("L"), "", "in"),
-            ("Total fittings K", 0, "", "ΣK from Crane/engine", "in"),
             ("Elevation change", 0, L("L"), "+ up", "in"),
+            ("Fittings", "", "", "", "sec"),
+        ]
+        r = _kv_block(ws, 3, rows)
+        C(ws, r, 2, "Fitting type (Hydraulics catalogue)", bg=NAVY, fg=DGRAY,
+          sz=9, bold=True, ha="center", wrap=True)
+        C(ws, r, 3, "Quantity", bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center")
+        C(ws, r, 4, "", bg=NAVY)
+        C(ws, r, 5, "K-each and ΣK are looked up and totalled per case by "
+                     "the engine from the Hydraulics fittings catalogue.",
+          sz=9, fg="808080", wrap=True)
+        dv_fit = DataValidation(type="list",
+                                 formula1=f"_FittingList!$A$1:$A${n_fit}",
+                                 allow_blank=True, showErrorMessage=True,
+                                 error="Choose a fitting from the list",
+                                 errorTitle="Invalid Fitting")
+        ws.add_data_validation(dv_fit)
+        fit_first = r + 1
+        for i in range(N_FIT_ROWS):
+            rr = fit_first + i
+            C(ws, rr, 2, None, bg=AMBER, fg=CYAN, sz=9)
+            C(ws, rr, 3, None, bg=AMBER, fg=CYAN, sz=9, ha="right")
+        dv_fit.add(f"B{fit_first}:B{fit_first + N_FIT_ROWS - 1}")
+        rows2 = [
             ("Override", "", "", "", "sec"),
             ("Manual dP override at relief flow", None, L("dP"),
-             "From the hydraulics engine (recommended for circuits).  "
-             "Blank → engine simple line model", "in"),
+             "From the hydraulics engine (recommended for complex circuits).  "
+             "Blank → engine line model from the geometry & fittings above",
+             "in"),
         ]
-        _kv_block(ws, 3, rows)
+        _kv_block(ws, fit_first + N_FIT_ROWS, rows2)
 
     # ── DISPOSAL ──────────────────────────────────────────────────────────
     ws = wb.create_sheet("DISPOSAL")
@@ -1233,6 +1172,29 @@ def _read_kv(ws) -> dict:
             continue
         out[str(lbl).strip()] = ws.cell(r, 3).value
     return out
+
+
+def _read_piping(ws) -> dict:
+    """Read an INLET/OUTLET_PIPING sheet: geometry/override key-values plus
+    the fittings table (rows ``fit_first .. fit_first + N_FIT_ROWS - 1``,
+    columns B = fitting name, C = quantity).  Adds ``"Total fittings K"``
+    (ΣK over the table, via the Hydraulics catalogue) and ``"_fittings"``
+    (non-zero ``(name, qty, k)`` rows, for per-case result display)."""
+    kv = _read_kv(ws)
+    fit_first = 3 + 5 + 1          # geometry block (5 rows) + table header
+    fittings, ktot = [], 0.0
+    for i in range(N_FIT_ROWS):
+        rr = fit_first + i
+        name = txt(ws.cell(rr, 2).value)
+        qty = num(ws.cell(rr, 3).value) or 0.0
+        if not name or qty == 0:
+            continue
+        k = fitting_k(name)
+        fittings.append((name, qty, k))
+        ktot += k * qty
+    kv["Total fittings K"] = ktot
+    kv["_fittings"] = fittings
+    return kv
 
 
 @dataclass
@@ -1368,8 +1330,8 @@ def read_model(path: str) -> Model:
     m.scen = _read_kv(wb["SCENARIOS"])
     m.cv = _read_kv(wb["CV_DATA"])
     m.gas = _read_kv(wb["GAS_DATA"])
-    m.inlet = _read_kv(wb["INLET_PIPING"])
-    m.outlet = _read_kv(wb["OUTLET_PIPING"])
+    m.inlet = _read_piping(wb["INLET_PIPING"])
+    m.outlet = _read_piping(wb["OUTLET_PIPING"])
     m.disposal = _read_kv(wb["DISPOSAL"])
     wb.close()
     return m
@@ -1944,7 +1906,8 @@ def simple_line_dp(kv: dict, uio: UIO, w_kgs: float, rho: float,
                                + 5.74 / re ** 0.9)) ** 2
     dp = max(0.0, (f * length / d + ktot) * 0.5 * rho * v * v + rho * G_STD * dz)
     return dp, {"mode": "calc", "d_in": d_in, "v": v, "re": re, "f": f,
-                "length": length, "ktot": ktot, "dz": dz, "rho": rho}
+                "length": length, "ktot": ktot, "dz": dz, "rho": rho,
+                "fittings": kv.get("_fittings", [])}
 
 
 def size_case(s: Scen, m: Model, super_g: float, remote_allow_g: float) -> None:
@@ -2135,31 +2098,6 @@ def run_model(m: Model) -> RunResult:
 # ═══════════════════════════════════════════════════════════════════════════
 #  Output workbook
 # ═══════════════════════════════════════════════════════════════════════════
-def _result_rows(ws, r0, rows, widths=(34, 30, 10, 56)):
-    """Render a key/value result block.
-
-    ``rows`` = list of ``(label, value, unit, note)``; ``note == "sec"``
-    marks a section-header row.  ``value`` of literal ``"PASS"``/``"FAIL"``
-    is colour-coded as a compliance result.
-    """
-    for col, w in zip("BCDE", widths):
-        ws.column_dimensions[col].width = w
-    for label, val, unit, note in rows:
-        if note == "sec":
-            ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=5)
-            C(ws, r0, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-        else:
-            pf = val in ("PASS", "FAIL")
-            bg = "C6EFCE" if val == "PASS" else "FFC7CE" if val == "FAIL" else TEAL
-            C(ws, r0, 2, label, bg=LGRAY, sz=9)
-            C(ws, r0, 3, "—" if val is None else val, bg=bg, sz=9, bold=pf,
-              ha="center" if pf else "right")
-            C(ws, r0, 4, unit, sz=9, fg="808080")
-            C(ws, r0, 5, note, sz=9, fg="808080", wrap=True)
-        r0 += 1
-    return r0
-
-
 def _sizing_rows(s: Scen, m: Model) -> list:
     """Phase-specific API 520 sizing-detail rows for a per-case sheet."""
     uio, cfg = m.uio, m.cfg
@@ -2215,7 +2153,7 @@ def _line_rows(prefix: str, info: dict) -> list:
         return [(f"{prefix} line dP", "manual override", "",
                  "from the piping sheet's override cell")]
     if info.get("mode") == "calc":
-        return [
+        rows = [
             (f"{prefix} line inside diameter", info.get("d_in"), "in", ""),
             (f"{prefix} line velocity", round(info["v"], 3), "m/s", ""),
             (f"{prefix} line Reynolds number", f"{info['re']:.0f}", "", ""),
@@ -2224,6 +2162,13 @@ def _line_rows(prefix: str, info: dict) -> list:
              f"{info['length']:.2f} m / {info['ktot']:.2f} / {info['dz']:.2f} m",
              "", ""),
         ]
+        fittings = info.get("fittings") or []
+        if fittings:
+            rows.append((f"{prefix} line fittings breakdown", "", "", "sec"))
+            for name, qty, k in fittings:
+                rows.append((f"  {name} (qty {qty:g}, K = {k:g} each)",
+                              round(k * qty, 3), "K", ""))
+        return rows
     return [(f"{prefix} line dP", "not evaluated", "",
              f"no line size or no flow — {prefix.upper()}_PIPING incomplete")]
 
@@ -2362,7 +2307,7 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
             "Orifice", "Case Sheet", "Notes"]
     _title(ws, len(hdrs), "SCENARIO RESULTS — all contingencies")
     for ci, h in enumerate(hdrs, 2):
-        C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center",
+        C(ws, 3, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center",
           wrap=True)
     ws.row_dimensions[3].height = 26
     rr = 4
@@ -2407,7 +2352,7 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
                 uio.hdr("EL", "L"), "Design P ≥ Set P?", "Notes"]
         _title(ws, len(hdrs), "PROTECTED EQUIPMENT CHECK")
         for ci, h in enumerate(hdrs, 2):
-            C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center")
+            C(ws, 3, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center")
         for i, e in enumerate(m.equip_rows):
             ok = (e.get("des_p") or 0) >= (m.gen.get("set_p") or 0)
             vals = [e["tag"], e.get("type"), U("P", e.get("des_p")),
@@ -2458,7 +2403,7 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
         ws.cell(i, 1).value = t
         ws.cell(i, 1).font = Font(name="Calibri", size=9,
                                   bold=t.isupper() and len(t) > 3,
-                                  color=NAVY if t.isupper() else DGRAY)
+                                  color=DGRAY)
     wb.save(out_path)
     return out_path
 

@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -51,6 +51,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "common"))
 sys.path.insert(0, os.path.join(_HERE, "..", "Hydraulics"))
 import units as UN                                     # noqa: E402
+from style import (                                    # noqa: E402
+    NAVY, WHITE, LGRAY, AMBER, TEAL, DGRAY, ORANGE, CYAN, C, _title,
+    _U, _hdr_formula, _kv_block, _result_rows,
+)
 
 try:
     import hydraulics as HYD          # HMB stream loading + flash VLE
@@ -64,12 +68,26 @@ except Exception as _exc:             # pragma: no cover
 #  Constants
 # ═══════════════════════════════════════════════════════════════════════════
 R_UNIV   = 8314.462618        # J/(kmol·K)
+G_STD    = 9.80665            # m/s²
 ATM_PA   = 101_325.0
 BTU_LB_TO_JKG = 2326.0
 PSI_TO_PA = 6894.757293
 
 M3S_TO_GPM = 15850.323         # m3/s -> US gpm
 KGS_TO_LBH = 7936.6414         # kg/s -> lb/h
+
+# Fittings catalogue (K-table) — reuse the Hydraulics tool's list so the
+# INLET/OUTLET piping fittings match the hydraulics engine exactly.
+if HYD is not None:
+    FITTING_NAMES = HYD.FITTING_NAMES
+    fitting_k = HYD.fitting_k
+else:                                  # pragma: no cover — HYD unavailable
+    FITTING_NAMES = ["Straight Pipeline", "Elbow 90 Short", "Gate Full Open"]
+
+    def fitting_k(name: str | None) -> float:
+        return 0.0
+
+N_FIT_ROWS = 12                        # fitting entry rows per piping sheet
 
 CASE_CODES = [
     ("MIN", "Minimum Flow"),
@@ -546,118 +564,9 @@ def flash_adiabatic(feed, p_pa: float):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Template builder — styling helpers (shared Procalc palette/conventions)
 # ═══════════════════════════════════════════════════════════════════════════
-NAVY, WHITE, LGRAY = "1F4973", "FFFFFF", "F2F2F2"
-AMBER, TEAL, EGRAY = "FFF2CC", "DDEBF7", "E0E0E0"
-GRNHDR, DGRAY, ORANGE = "375623", "404040", "C55A11"
-
-
-def _fillc(h):
-    return PatternFill("solid", fgColor=h)
-
-
-def _bord():
-    s = Side(style="thin", color="CCCCCC")
-    return Border(left=s, right=s, top=s, bottom=s)
-
-
-def C(ws, r, c, v=None, bg=None, fg=DGRAY, sz=10, bold=False, wrap=False,
-      ha="left"):
-    x = ws.cell(row=r, column=c)
-    if v is not None:
-        x.value = v
-    x.font = Font(name="Calibri", size=sz, bold=bold, color=fg)
-    if bg:
-        x.fill = _fillc(bg)
-    x.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=wrap)
-    x.border = _bord()
-    return x
-
-
-def _title(ws, ncol, text):
-    ws.sheet_view.showGridLines = False
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=1 + ncol)
-    C(ws, 1, 2, text, bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
-
-
-# ── live unit labels (track the UNITS sheet) ────────────────────────────────
-# UNITS sheet layout (see common/units.py add_units_sheet): "Unit System" in
-# B3, then one row per quantity code (column A) — in QUANTITY_NAMES order,
-# starting row 6 — with the per-quantity override in column C.
-UNIT_ROWS = {qty: 6 + i for i, qty in enumerate(UN.QUANTITY_NAMES.keys())}
-
-
-class _U:
-    """Marks a `_kv_block`/header unit as a *live* formula referencing the
-    UNITS sheet, rather than literal text fixed at template-creation time.
-
-    ``_U("P")``            → the current label for quantity "P"
-    ``_U("Q", "/", "dT")``  → composite, e.g. "kW/°C" (literals pass through)
-    """
-    __slots__ = ("parts",)
-
-    def __init__(self, *parts):
-        self.parts = parts
-
-
-def _pretty_unit(u: str) -> str:
-    return {"degF": "°F", "degC": "°C"}.get(u, u)
-
-
-def _unit_expr(qty: str) -> str:
-    """Excel expression (no leading '=') for the live label of `qty`:
-    UNITS!C<row> override if set, else the system default for UNITS!B3."""
-    row = UNIT_ROWS.get(qty)
-    if row is None:
-        return f'"{_pretty_unit(UN.SYSTEM_DEFAULTS["FPS"].get(qty, ""))}"'
-    ovr = f"UNITS!$C${row}"
-    fps_def = _pretty_unit(UN.SYSTEM_DEFAULTS["FPS"][qty])
-    si_def = _pretty_unit(UN.SYSTEM_DEFAULTS["SI"][qty])
-    pretty_ovr = f'IF({ovr}="degF","°F",IF({ovr}="degC","°C",{ovr}))'
-    default = f'IF(UNITS!$B$3="SI","{si_def}","{fps_def}")'
-    return f'IF({ovr}<>"",{pretty_ovr},{default})'
-
-
-def _unit_formula(qty: str) -> str:
-    return "=" + _unit_expr(qty)
-
-
-def _unit_formula_parts(parts) -> str:
-    pieces = [_unit_expr(p) if p in UNIT_ROWS else f'"{p}"' for p in parts]
-    return "=" + " & ".join(pieces)
-
-
-def _unit_cell(unit):
-    """Resolve a `_kv_block` unit-hint: `_U(...)` → live formula string,
-    anything else passes through unchanged (literal text)."""
-    if isinstance(unit, _U):
-        if len(unit.parts) == 1:
-            return _unit_formula(unit.parts[0])
-        return _unit_formula_parts(unit.parts)
-    return unit
-
-
-def _hdr_formula(base: str, qty: str) -> str:
-    """Live column-header formula: '<base> (<live unit>)'."""
-    return f'="{base} (" & {_unit_expr(qty)} & ")"'
-
-
-def _kv_block(ws, r, rows, widths=(34, 16, 12, 64)):
-    """rows = list of (label, default, unit_hint, note, kind) — kind: in/calc/sec."""
-    for col, w in zip("BCDE", widths):
-        ws.column_dimensions[col].width = w
-    for label, default, unit, note, kind in rows:
-        if kind == "sec":
-            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
-            C(ws, r, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-        else:
-            C(ws, r, 2, label, bg=LGRAY, sz=9, bold=False)
-            C(ws, r, 3, default,
-              bg=(EGRAY if kind == "calc" else AMBER), sz=9, ha="right")
-            C(ws, r, 4, _unit_cell(unit), sz=9, fg="808080")
-            C(ws, r, 5, note, sz=9, fg="808080", wrap=True)
-        r += 1
-    return r
+# Palette, C()/_title()/_kv_block()/_result_rows() and the live unit-label
+# helpers (_U, _unit_*, _hdr_formula, UNIT_ROWS) are shared with the PSV tool
+# via ../common/style.py — imported at the top of this file.
 
 
 # ── CASES table columns (mirrors PSV's STREAM_INPUTS convention) ───────────
@@ -785,7 +694,7 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
       sz=9, fg="808080")
     for ci, (key, base, qty) in enumerate(CASE_COLS, 2):
         h = _hdr_formula(base, qty) if qty else base
-        C(ws, 4, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        C(ws, 4, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[4].height = 28
     manual_keys = {"p1", "p2", "t1", "w", "phase", "x1", "mw", "z", "k",
                     "rho_l", "rho_v", "mu_l", "mu_v", "pv", "pc", "sg"}
@@ -796,9 +705,9 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
             elif key == "name":
                 C(ws, ri, ci, name, bg=LGRAY, sz=9)
             elif key == "active":
-                C(ws, ri, ci, "N", bg=AMBER, sz=9, ha="center")
+                C(ws, ri, ci, "N", bg=AMBER, fg=CYAN, sz=9, ha="center")
             elif key in manual_keys:
-                C(ws, ri, ci, None, bg=AMBER, sz=9, ha="right")
+                C(ws, ri, ci, None, bg=AMBER, fg=CYAN, sz=9, ha="right")
             else:
                 C(ws, ri, ci, None, bg=TEAL, sz=9)
     last_row = 4 + len(CASE_CODES)
@@ -811,6 +720,63 @@ def _finish_template(wb: Workbook, uio: UIO, out_path: str) -> str:
     dv2.add(f"L5:L{last_row}")
     for ci, w in enumerate(CASE_COL_WIDTHS, 2):
         ws.column_dimensions[get_column_letter(ci)].width = w
+
+    # ── INLET / OUTLET piping (hydraulic circuit around the valve) ─────────
+    # Shared dropdown source for the fittings tables (hidden sheet, mirrors
+    # the Hydraulics tool's "_FittingList" convention used by PSV too).
+    ws_fit = wb.create_sheet("_FittingList")
+    ws_fit.sheet_state = "hidden"
+    for i, fn in enumerate(FITTING_NAMES, 1):
+        ws_fit.cell(row=i, column=1, value=fn)
+    n_fit = len(FITTING_NAMES)
+
+    for nm, ttl in (
+            ("INLET_PIPING",
+             "INLET PIPING — source to valve  (define once — per-case "
+             "velocity/Re/dP results, evaluated at each case's own flow "
+             "and properties, appear on each CASE sheet)"),
+            ("OUTLET_PIPING",
+             "OUTLET PIPING — valve to destination  (define once — "
+             "per-case velocity/Re/dP results, evaluated at each case's "
+             "own flow and properties, appear on each CASE sheet)")):
+        ws = wb.create_sheet(nm)
+        _title(ws, 4, ttl)
+        rows = [
+            ("Geometry", "", "", "", "sec"),
+            ("Line inside diameter", None, "in", "Always inches", "in"),
+            ("Straight length", None, L("L"), "", "in"),
+            ("Elevation change", 0, L("L"), "+ up", "in"),
+            ("Fittings", "", "", "", "sec"),
+        ]
+        r = _kv_block(ws, 3, rows)
+        C(ws, r, 2, "Fitting type (Hydraulics catalogue)", bg=NAVY, fg=DGRAY,
+          sz=9, bold=True, ha="center", wrap=True)
+        C(ws, r, 3, "Quantity", bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center")
+        C(ws, r, 4, "", bg=NAVY)
+        C(ws, r, 5, "K-each and ΣK are looked up and totalled per case by "
+                     "the engine from the Hydraulics fittings catalogue.",
+          sz=9, fg="808080", wrap=True)
+        dv_fit = DataValidation(type="list",
+                                 formula1=f"_FittingList!$A$1:$A${n_fit}",
+                                 allow_blank=True, showErrorMessage=True,
+                                 error="Choose a fitting from the list",
+                                 errorTitle="Invalid Fitting")
+        ws.add_data_validation(dv_fit)
+        fit_first = r + 1
+        for i in range(N_FIT_ROWS):
+            rr = fit_first + i
+            C(ws, rr, 2, None, bg=AMBER, fg=CYAN, sz=9)
+            C(ws, rr, 3, None, bg=AMBER, fg=CYAN, sz=9, ha="right")
+        dv_fit.add(f"B{fit_first}:B{fit_first + N_FIT_ROWS - 1}")
+        rows2 = [
+            ("Override", "", "", "", "sec"),
+            ("Manual dP override at case flow", None, L("dP"),
+             "From the hydraulics engine (recommended for complex "
+             "circuits).  Blank → engine line model from the geometry & "
+             "fittings above, evaluated at each case's own flow/properties",
+             "in"),
+        ]
+        _kv_block(ws, fit_first + N_FIT_ROWS, rows2)
 
     # ── GASBB ────────────────────────────────────────────────────────────
     ws = wb.create_sheet("GASBB")
@@ -876,6 +842,29 @@ def _read_kv(ws) -> dict:
     return out
 
 
+def _read_piping(ws) -> dict:
+    """Read an INLET/OUTLET_PIPING sheet: geometry/override key-values plus
+    the fittings table (rows ``fit_first .. fit_first + N_FIT_ROWS - 1``,
+    columns B = fitting name, C = quantity).  Adds ``"Total fittings K"``
+    (ΣK over the table, via the Hydraulics catalogue) and ``"_fittings"``
+    (non-zero ``(name, qty, k)`` rows, for per-case result display)."""
+    kv = _read_kv(ws)
+    fit_first = 3 + 5 + 1          # geometry block (5 rows) + table header
+    fittings, ktot = [], 0.0
+    for i in range(N_FIT_ROWS):
+        rr = fit_first + i
+        name = txt(ws.cell(rr, 2).value)
+        qty = num(ws.cell(rr, 3).value) or 0.0
+        if not name or qty == 0:
+            continue
+        k = fitting_k(name)
+        fittings.append((name, qty, k))
+        ktot += k * qty
+    kv["Total fittings K"] = ktot
+    kv["_fittings"] = fittings
+    return kv
+
+
 @dataclass
 class Case:
     code: str
@@ -901,6 +890,12 @@ class Case:
     feed: object | None = None
     notes: list = field(default_factory=list)
     res: dict = field(default_factory=dict)
+    p1_source: float | None = None     # source P1 before inlet-line dP
+    p2_dest: float | None = None       # destination P2 before outlet-line dP
+    inlet_dp_pa: float = 0.0
+    outlet_dp_pa: float = 0.0
+    inlet_info: dict = field(default_factory=dict)
+    outlet_info: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -909,6 +904,8 @@ class Model:
     gen: dict = field(default_factory=dict)
     cases: list = field(default_factory=list)
     gasbb: dict = field(default_factory=dict)
+    inlet: dict = field(default_factory=dict)
+    outlet: dict = field(default_factory=dict)
     base_dir: str = "."
 
 
@@ -1002,8 +999,70 @@ def read_model(path: str) -> Model:
             "mw": sd.mw, "z": sd.z, "k": sd.k,
             "p2": uio.si("P", num(gb.get("Downstream pressure P2"))),
         })
+
+    m.inlet = _read_piping(wb["INLET_PIPING"])
+    m.outlet = _read_piping(wb["OUTLET_PIPING"])
     wb.close()
     return m
+
+
+def simple_line_dp(kv: dict, uio: UIO, w_kgs: float, rho: float,
+                   mu_cp: float) -> tuple[float, dict]:
+    """Darcy single-line dP [Pa] from an INLET/OUTLET piping sheet,
+    evaluated at one case's own flow rate and line-fluid properties.
+
+    Returns ``(dp_pa, info)``.  ``info["mode"]`` is ``"manual"`` (override
+    cell used), ``"calc"`` (line model — info carries v/Re/f/geometry for
+    display), or ``"none"`` (no line diameter / no flow — dP = 0).
+    """
+    manual = uio.si("dP", num(kv.get("Manual dP override at case flow")))
+    if manual is not None:
+        return manual, {"mode": "manual"}
+    d_in = num(kv.get("Line inside diameter"))
+    if not d_in or w_kgs <= 0 or rho <= 0:
+        return 0.0, {"mode": "none", "d_in": d_in}
+    d = d_in * 0.0254
+    a = math.pi / 4.0 * d * d
+    v = w_kgs / (rho * a)
+    length = uio.si("L", num(kv.get("Straight length"))) or 0.0
+    ktot = num(kv.get("Total fittings K")) or 0.0
+    dz = uio.si("L", num(kv.get("Elevation change"))) or 0.0
+    re = rho * v * d / ((mu_cp or 0.3) * 1e-3)
+    if re < 2100:
+        f = 64.0 / max(1.0, re)
+    else:
+        f = 0.25 / (math.log10(1.524e-3 / (3.7 * d * 1000.0)
+                               + 5.74 / re ** 0.9)) ** 2
+    dp = max(0.0, (f * length / d + ktot) * 0.5 * rho * v * v + rho * G_STD * dz)
+    return dp, {"mode": "calc", "d_in": d_in, "v": v, "re": re, "f": f,
+                "length": length, "ktot": ktot, "dz": dz, "rho": rho,
+                "fittings": kv.get("_fittings", [])}
+
+
+def _line_rho_mu(c: Case) -> tuple[float, float]:
+    """Density [kg/m3] / viscosity [cP] for the inlet & outlet line dP
+    calcs — taken from this case's own reported phase/properties at its
+    upstream conditions (single-pass; same fluid state used for both
+    lines, consistent with this tool's screening-level scope)."""
+    ph = (c.phase or "").strip().lower()
+    if "two" in ph or "mixed" in ph:
+        x = c.x1 if c.x1 is not None else 0.5
+        rho_l, rho_v = c.rho_l or 999.0, c.rho_v or 1.2
+        rho = 1.0 / (x / rho_v + (1.0 - x) / rho_l)
+        mu = (1.0 - x) * (c.mu_l or 1.0) + x * (c.mu_v or 0.012)
+    elif "liq" in ph:
+        rho, mu = c.rho_l or 999.0, c.mu_l or 1.0
+    elif "vap" in ph or "gas" in ph:
+        rho = c.rho_v
+        if not rho and c.p1 and c.t1:
+            rho = c.p1 * (c.mw or 28.96) / ((c.z or 1.0) * R_UNIV * c.t1)
+        mu = c.mu_v or 0.012
+    elif c.rho_l and not c.rho_v:
+        rho, mu = c.rho_l, (c.mu_l or 1.0)
+    else:
+        rho = c.rho_v or 1.2
+        mu = c.mu_v or 0.012
+    return rho or 1.2, mu or 0.012
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1013,6 +1072,15 @@ def compute_case(c: Case, m: Model) -> None:
     if not c.active:
         return
     res = c.res
+    c.p1_source, c.p2_dest = c.p1, c.p2
+    if c.w and c.p1 and c.p2:
+        rho_line, mu_line = _line_rho_mu(c)
+        c.inlet_dp_pa, c.inlet_info = simple_line_dp(m.inlet, m.uio, c.w,
+                                                       rho_line, mu_line)
+        c.outlet_dp_pa, c.outlet_info = simple_line_dp(m.outlet, m.uio, c.w,
+                                                         rho_line, mu_line)
+        c.p1 = c.p1 - c.inlet_dp_pa
+        c.p2 = c.p2 + c.outlet_dp_pa
     p1, p2 = c.p1 or 0.0, c.p2 or 0.0
     if p1 <= 0 or p2 <= 0 or p2 >= p1:
         c.notes.append("P1/P2 missing or P2 ≥ P1 — case not evaluated")
@@ -1133,34 +1201,36 @@ def compute_gasbb(m: Model) -> dict:
     return res
 
 
+def _line_rows(prefix: str, info: dict) -> list:
+    """Render velocity/Re/f/geometry rows for a calculated INLET/OUTLET line,
+    or a note when an override was used / the line is unsized."""
+    if info.get("mode") == "manual":
+        return [(f"{prefix} line dP", "manual override", "",
+                 "from the piping sheet's override cell")]
+    if info.get("mode") == "calc":
+        rows = [
+            (f"{prefix} line inside diameter", info.get("d_in"), "in", ""),
+            (f"{prefix} line velocity", round(info["v"], 3), "m/s", ""),
+            (f"{prefix} line Reynolds number", f"{info['re']:.0f}", "", ""),
+            (f"{prefix} line friction factor f", round(info["f"], 5), "", ""),
+            (f"{prefix} line length / ΣK / Δz",
+             f"{info['length']:.2f} m / {info['ktot']:.2f} / {info['dz']:.2f} m",
+             "", ""),
+        ]
+        fittings = info.get("fittings") or []
+        if fittings:
+            rows.append((f"{prefix} line fittings breakdown", "", "", "sec"))
+            for name, qty, k in fittings:
+                rows.append((f"  {name} (qty {qty:g}, K = {k:g} each)",
+                              round(k * qty, 3), "K", ""))
+        return rows
+    return [(f"{prefix} line dP", "not evaluated", "",
+             f"no line size or no flow — {prefix.upper()}_PIPING incomplete")]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Output workbook
 # ═══════════════════════════════════════════════════════════════════════════
-def _result_rows(ws, r0, rows, widths=(34, 30, 10, 56)):
-    """Render a key/value result block.
-
-    ``rows`` = list of ``(label, value, unit, note)``; ``note == "sec"``
-    marks a section-header row.  ``value`` of literal ``"PASS"``/``"FAIL"``
-    is colour-coded as a compliance result.
-    """
-    for col, w in zip("BCDE", widths):
-        ws.column_dimensions[col].width = w
-    for label, val, unit, note in rows:
-        if note == "sec":
-            ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=5)
-            C(ws, r0, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-        else:
-            pf = val in ("PASS", "FAIL")
-            bg = "C6EFCE" if val == "PASS" else "FFC7CE" if val == "FAIL" else TEAL
-            C(ws, r0, 2, label, bg=LGRAY, sz=9)
-            C(ws, r0, 3, "—" if val is None else val, bg=bg, sz=9, bold=pf,
-              ha="center" if pf else "right")
-            C(ws, r0, 4, unit, sz=9, fg="808080")
-            C(ws, r0, 5, note, sz=9, fg="808080", wrap=True)
-        r0 += 1
-    return r0
-
-
 def _write_case_sheet(wb, m: Model, c: Case) -> None:
     uio = m.uio
     U, L = uio.user, uio.label
@@ -1168,11 +1238,30 @@ def _write_case_sheet(wb, m: Model, c: Case) -> None:
     ws = wb.create_sheet(f"CASE_{c.code}"[:31])
     _title(ws, 4, f"{c.code} — {c.name}   |   units: {uio.system}")
 
-    rows = [("Upstream / Flow Conditions", "", "", "sec"),
-            ("Source", c.source, "", ""),
-            ("Phase (upstream)", c.phase, "", ""),
-            ("P1 — upstream pressure", U("P", c.p1), L("P"), ""),
-            ("P2 — downstream pressure", U("P", c.p2), L("P"), "")]
+    rows = []
+    if c.inlet_info or c.outlet_info:
+        rows.append(("Hydraulic Circuit — Source → Valve → Destination",
+                      "", "", "sec"))
+        rows.append(("Source pressure (upstream of inlet line)",
+                      U("P", c.p1_source), L("P"), ""))
+        rows += _line_rows("Inlet", c.inlet_info)
+        rows.append(("Inlet line dP (this case's flow)",
+                      U("dP", c.inlet_dp_pa), L("dP"), ""))
+        rows.append(("Valve inlet pressure P1 (after inlet line)",
+                      U("P", c.p1), L("P"), ""))
+        rows.append(("Valve outlet pressure P2 (before outlet line)",
+                      U("P", c.p2), L("P"), ""))
+        rows += _line_rows("Outlet", c.outlet_info)
+        rows.append(("Outlet line dP (this case's flow)",
+                      U("dP", c.outlet_dp_pa), L("dP"), ""))
+        rows.append(("Destination pressure (downstream of outlet line)",
+                      U("P", c.p2_dest), L("P"), ""))
+
+    rows.append(("Upstream / Flow Conditions", "", "", "sec"))
+    rows += [("Source", c.source, "", ""),
+             ("Phase (upstream)", c.phase, "", ""),
+             ("P1 — valve inlet pressure", U("P", c.p1), L("P"), ""),
+             ("P2 — valve outlet pressure", U("P", c.p2), L("P"), "")]
     if "dp" in res:
         rows.append(("Differential pressure ΔP", U("dP", res["dp"]), L("dP"), ""))
     rows.append(("T1 — upstream temperature", U("T", c.t1, 1), L("T"), ""))
@@ -1411,7 +1500,7 @@ def write_output(m: Model, out_path: str) -> str:
             "Choked?", "σ", "β (in)", "Noise", "Case Sheet", "Notes"]
     _title(ws, len(hdrs), "CASE RESULTS — all flow cases")
     for ci, h in enumerate(hdrs, 2):
-        C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        C(ws, 3, ci, h, bg=NAVY, fg=DGRAY, sz=9, bold=True, ha="center", wrap=True)
     ws.row_dimensions[3].height = 26
     rr = 4
     for c in m.cases:
@@ -1523,7 +1612,7 @@ def write_output(m: Model, out_path: str) -> str:
         ws.cell(i, 1).value = t
         ws.cell(i, 1).font = Font(name="Calibri", size=9,
                                   bold=t.isupper() and len(t) > 3,
-                                  color=NAVY if t.isupper() else DGRAY)
+                                  color=DGRAY)
     wb.save(out_path)
     return out_path
 
