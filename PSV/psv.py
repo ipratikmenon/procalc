@@ -1340,7 +1340,24 @@ class Scen:
     area: float = 0.0               # m² required
     area_mult: float = 1.0
     omega: float | None = None
+    kv_visc: float = 1.0            # liquid viscosity correction (display)
+    kw_bp: float = 1.0              # liquid back-pressure factor (display)
     notes: list = field(default_factory=list)
+    # per-case back-pressure / inlet-line results (filled by size_case)
+    kb: float = 1.0
+    builtup_pa: float = 0.0         # built-up back pressure, this case's flow
+    total_bp_g: float = 0.0         # super + built-up, Pa gauge
+    bp_pct: float = 0.0             # total BP as % of set pressure
+    bp_lim_pct: float = 10.0        # allowable BP per PSV type
+    bp_ok: bool = True
+    inlet_dp_pa: float = 0.0        # inlet-line dP, this case's flow
+    in_pct: float = 0.0             # inlet dP as % of set pressure
+    in_ok: bool = True
+    accum_ok: bool = True
+    orifice: str = ""
+    orifice_area: float = 0.0       # m²
+    outlet_info: dict = field(default_factory=dict)
+    inlet_info: dict = field(default_factory=dict)
 
 
 def _remote_allowable_g(gen: dict) -> tuple[float, str]:
@@ -1817,6 +1834,7 @@ def size_scenario(s: Scen, m: Model, kb: float) -> float:
         kv = kv_viscosity(a0, s.rho_l or 800.0, s.mu or 1.0, s.w)
         s.area = size_liquid(s.w, s.rho_l or 800.0, s.p1, s.p2,
                              cfg["kd_l"], kw, cfg["kc"], kv)
+        s.kw_bp, s.kv_visc = kw, kv
         if kv < 0.999:
             s.notes.append(f"Kv (viscosity) = {kv:.3f}")
     elif ph.startswith("TWO"):
@@ -1837,14 +1855,19 @@ def size_scenario(s: Scen, m: Model, kb: float) -> float:
 
 
 def simple_line_dp(kv: dict, uio: UIO, w_kgs: float, rho: float,
-                   mu_cp: float, prefix_note: list) -> float:
-    """Darcy single-line dP [Pa] from the INLET/OUTLET piping sheets."""
+                   mu_cp: float) -> tuple[float, dict]:
+    """Darcy single-line dP [Pa] from an INLET/OUTLET piping sheet.
+
+    Returns ``(dp_pa, info)``.  ``info["mode"]`` is ``"manual"`` (override
+    cell used), ``"calc"`` (line model — info carries v/Re/f/geometry for
+    display), or ``"none"`` (no line diameter / no flow — dP = 0).
+    """
     manual = uio.si("dP", num(kv.get("Manual dP override at relief flow")))
     if manual is not None:
-        return manual
+        return manual, {"mode": "manual"}
     d_in = num(kv.get("Line inside diameter"))
     if not d_in or w_kgs <= 0 or rho <= 0:
-        return 0.0
+        return 0.0, {"mode": "none", "d_in": d_in}
     d = d_in * 0.0254
     a = math.pi / 4.0 * d * d
     v = w_kgs / (rho * a)
@@ -1857,9 +1880,64 @@ def simple_line_dp(kv: dict, uio: UIO, w_kgs: float, rho: float,
     else:
         f = 0.25 / (math.log10(1.524e-3 / (3.7 * d * 1000.0)
                                + 5.74 / re ** 0.9)) ** 2
-    dp = (f * length / d + ktot) * 0.5 * rho * v * v + rho * G_STD * dz
-    prefix_note.append(f"line model: v={v:.1f} m/s, Re={re:.2e}, f={f:.4f}")
-    return max(0.0, dp)
+    dp = max(0.0, (f * length / d + ktot) * 0.5 * rho * v * v + rho * G_STD * dz)
+    return dp, {"mode": "calc", "d_in": d_in, "v": v, "re": re, "f": f,
+                "length": length, "ktot": ktot, "dz": dz, "rho": rho}
+
+
+def size_case(s: Scen, m: Model, super_g: float, remote_allow_g: float) -> None:
+    """Full per-case sizing: iterate built-up back pressure from the OUTLET
+    line at THIS case's relief load/properties, then evaluate the INLET
+    line at the same flow.  Populates the case-result fields on ``s`` so
+    every active scenario gets its own back-pressure + inlet/outlet line
+    sizing (written to its own CASE sheet)."""
+    cfg, gen, press = m.cfg, m.gen, m.press
+    set_g = (gen.get("set_p") or ATM_PA) - ATM_PA
+    op_pct = gen.get("op_pct") or 10.0
+    kb_user = press.get("kb_user")
+
+    kb = kb_factor(cfg["type"], 100.0 * super_g / max(1.0, set_g), op_pct, kb_user)
+    s.p2 = ATM_PA + super_g
+    size_scenario(s, m, kb)
+
+    bp_g, outlet_info = super_g, {"mode": "none"}
+    if s.w > 0 and s.area > 0:
+        for _ in range(8):
+            rho_out = (_rho_v_ideal(s) if not s.phase.startswith("Liq")
+                       else (s.rho_l or 800.0))
+            dp_out, outlet_info = simple_line_dp(m.outlet, m.uio, s.w, rho_out, s.mu)
+            bp_g = super_g + dp_out
+            kb_new = kb_factor(cfg["type"], 100.0 * bp_g / max(1.0, set_g),
+                               op_pct, kb_user)
+            s.p2 = ATM_PA + bp_g
+            size_scenario(s, m, kb_new)
+            if abs(kb_new - kb) < 1e-4:
+                kb = kb_new
+                break
+            kb = kb_new
+    s.kb, s.builtup_pa, s.total_bp_g = kb, bp_g - super_g, bp_g
+    s.outlet_info = outlet_info
+
+    if s.w > 0:
+        rho_in = (_rho_v_ideal(s) if not s.phase.startswith("Liq")
+                  else (s.rho_l or 800.0))
+        s.inlet_dp_pa, s.inlet_info = simple_line_dp(m.inlet, m.uio, s.w, rho_in, s.mu)
+    else:
+        s.inlet_dp_pa, s.inlet_info = 0.0, {"mode": "none"}
+
+    s.orifice, s.orifice_area = (select_orifice(s.area) if s.area > 0
+                                  else ("—", 0.0))
+
+    s.bp_lim_pct = (press["bp_pilot"] if "pilot" in cfg["type"].lower() else
+                    press["bp_bell"] if "bellow" in cfg["type"].lower() else
+                    press["bp_conv"])
+    s.bp_pct = 100.0 * s.total_bp_g / set_g if set_g > 0 else 0.0
+    s.in_pct = 100.0 * s.inlet_dp_pa / set_g if set_g > 0 else 0.0
+    s.bp_ok = s.bp_pct <= s.bp_lim_pct
+    s.in_ok = s.in_pct <= 3.0
+    mawp_g = (gen.get("mawp") or 0.0) - ATM_PA
+    s.accum_ok = (s.allowable_g <= max(remote_allow_g, 1.21 * mawp_g) + 1.0
+                  if mawp_g > 0 else True)
 
 
 def static_head_correction(gen: dict) -> tuple[float | None, float | None, list]:
@@ -1942,46 +2020,22 @@ def run_model(m: Model) -> RunResult:
     scens = compute_scenarios(m)
     r.scens = scens
 
-    # superimposed BP first guess
+    # per-case sizing: every active scenario gets its own built-up
+    # back-pressure iteration (own outlet-line dP) and inlet-line dP
     super_g = press["super_const"]
-    kb = kb_factor(cfg["type"], 100.0 * super_g / max(1.0, set_g),
-                   gen.get("op_pct") or 10.0, press.get("kb_user"))
-    r.kb = kb
     active = [s for s in scens if s.active]
     for s in active:
-        s.p2 = ATM_PA + super_g
-        size_scenario(s, m, kb)
+        size_case(s, m, super_g, r.remote_allow_g)
 
     gov = max(active, key=lambda s: s.area, default=None)
     r.governing = gov
     if gov and gov.area > 0:
-        # iterate built-up BP on the governing flow
-        builtup = 0.0
-        for _ in range(4):
-            note = []
-            rho_out = (_rho_v_ideal(gov)
-                       if not gov.phase.startswith("Liq") else (gov.rho_l or 800.0))
-            builtup = simple_line_dp(m.outlet, m.uio, gov.w, rho_out,
-                                     gov.mu, note)
-            bp_g = super_g + builtup
-            kb_new = kb_factor(cfg["type"], 100.0 * bp_g / max(1.0, set_g),
-                               gen.get("op_pct") or 10.0, press.get("kb_user"))
-            for s in active:
-                s.p2 = ATM_PA + bp_g
-                size_scenario(s, m, kb_new)
-            gov2 = max(active, key=lambda s: s.area)
-            if abs(kb_new - kb) < 1e-3 and gov2 is gov:
-                kb = kb_new
-                break
-            kb, gov = kb_new, gov2
-        r.kb, r.builtup_pa, r.governing = kb, builtup, gov
-        r.total_bp_g = super_g + builtup
-        note = []
-        rho_in = (_rho_v_ideal(gov)
-                  if not gov.phase.startswith("Liq") else (gov.rho_l or 800.0))
-        r.inlet_dp_pa = simple_line_dp(m.inlet, m.uio, gov.w, rho_in,
-                                       gov.mu, note)
-        r.orifice, r.orifice_area = select_orifice(gov.area)
+        r.kb, r.builtup_pa, r.total_bp_g = gov.kb, gov.builtup_pa, gov.total_bp_g
+        r.inlet_dp_pa = gov.inlet_dp_pa
+        r.orifice, r.orifice_area = gov.orifice, gov.orifice_area
+    else:
+        r.kb = kb_factor(cfg["type"], 100.0 * super_g / max(1.0, set_g),
+                         gen.get("op_pct") or 10.0, press.get("kb_user"))
 
     # ── compliance checks ─────────────────────────────────────────────────
     mawp_g = (gen.get("mawp") or 0.0) - ATM_PA
@@ -1992,21 +2046,18 @@ def run_model(m: Model) -> RunResult:
                    f"{m.uio.user('P', gen['mawp'])} {m.uio.label('P')}"))
     for s in active:
         if mawp_g > 0:
-            ok = s.allowable_g <= max(r.remote_allow_g, 1.21 * mawp_g) + 1.0
-            ck.append((f"{s.code}: allowable within class limit", ok,
+            ck.append((f"{s.code}: allowable within class limit", s.accum_ok,
                        f"{s.klass}: {m.uio.user('dP', s.allowable_g)} "
                        f"{m.uio.label('dP')} (g)"))
-    bp_lim_pct = (press["bp_pilot"] if "pilot" in cfg["type"].lower() else
-                  press["bp_bell"] if "bellow" in cfg["type"].lower() else
-                  press["bp_conv"])
-    if set_g > 0:
-        bp_pct = 100.0 * r.total_bp_g / set_g
+    bp_lim_pct = gov.bp_lim_pct if gov else (
+        press["bp_pilot"] if "pilot" in cfg["type"].lower() else
+        press["bp_bell"] if "bellow" in cfg["type"].lower() else
+        press["bp_conv"])
+    if set_g > 0 and gov:
         ck.append((f"Total BP ≤ {bp_lim_pct:.0f}% of set ({cfg['type']})",
-                   bp_pct <= bp_lim_pct,
-                   f"total BP = {bp_pct:.1f}% of set"))
-        in_pct = 100.0 * r.inlet_dp_pa / set_g
-        ck.append(("Inlet dP ≤ 3% of set", in_pct <= 3.0,
-                   f"inlet dP = {in_pct:.2f}% of set"))
+                   gov.bp_ok, f"total BP = {gov.bp_pct:.1f}% of set"))
+        ck.append(("Inlet dP ≤ 3% of set", gov.in_ok,
+                   f"inlet dP = {gov.in_pct:.2f}% of set"))
     if r.corrected_set_pa is not None:
         des_ps = [e["des_p"] for e in m.equip_rows if e.get("des_p")]
         if des_ps:
@@ -2022,6 +2073,171 @@ def run_model(m: Model) -> RunResult:
 # ═══════════════════════════════════════════════════════════════════════════
 #  Output workbook
 # ═══════════════════════════════════════════════════════════════════════════
+def _result_rows(ws, r0, rows, widths=(34, 30, 10, 56)):
+    """Render a key/value result block.
+
+    ``rows`` = list of ``(label, value, unit, note)``; ``note == "sec"``
+    marks a section-header row.  ``value`` of literal ``"PASS"``/``"FAIL"``
+    is colour-coded as a compliance result.
+    """
+    for col, w in zip("BCDE", widths):
+        ws.column_dimensions[col].width = w
+    for label, val, unit, note in rows:
+        if note == "sec":
+            ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=5)
+            C(ws, r0, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
+        else:
+            pf = val in ("PASS", "FAIL")
+            bg = "C6EFCE" if val == "PASS" else "FFC7CE" if val == "FAIL" else TEAL
+            C(ws, r0, 2, label, bg=LGRAY, sz=9)
+            C(ws, r0, 3, "—" if val is None else val, bg=bg, sz=9, bold=pf,
+              ha="center" if pf else "right")
+            C(ws, r0, 4, unit, sz=9, fg="808080")
+            C(ws, r0, 5, note, sz=9, fg="808080", wrap=True)
+        r0 += 1
+    return r0
+
+
+def _sizing_rows(s: Scen, m: Model) -> list:
+    """Phase-specific API 520 sizing-detail rows for a per-case sheet."""
+    uio, cfg = m.uio, m.cfg
+    U, L = uio.user, uio.label
+    rows = []
+    ph = (s.phase or "Vapor").upper()
+    if ph.startswith("LIQ"):
+        rows += [
+            ("Differential pressure (P1 − P2)", U("dP", s.p1 - s.p2), L("dP"), ""),
+            ("Liquid density", U("rho", s.rho_l), L("rho"), ""),
+            ("Viscosity", round(s.mu, 4), L("visc"), ""),
+            ("Kd (discharge coeff., liquid)", cfg["kd_l"], "", ""),
+            ("Kw (back-pressure factor)", round(s.kw_bp, 4), "", ""),
+            ("Kv (viscosity correction)", round(s.kv_visc, 4), "", ""),
+            ("Kc (combination factor)", cfg["kc"], "", ""),
+        ]
+    elif ph.startswith("TWO"):
+        rho_v = _rho_v_ideal(s)
+        rows += [
+            ("Quality x (mass vapor fraction)", round(s.quality, 4), "", ""),
+            ("Vapor density (relieving)", U("rho", rho_v), L("rho"), ""),
+            ("Liquid density", U("rho", s.rho_l), L("rho"), ""),
+            ("Latent heat", U("h", s.latent), L("h"), "" if s.latent
+             else "not provided — default used"),
+            ("Leung ω (Annex C)",
+             round(s.omega, 4) if s.omega is not None else None, "", ""),
+            ("Kd (discharge coeff., two-phase)", cfg["kd_2"], "", ""),
+            ("Kc (combination factor)", cfg["kc"], "", ""),
+        ]
+    else:
+        g, choked = gas_mass_flux(s.p1, s.p2, s.t, s.mw, s.z, s.k)
+        rows += [
+            ("Molecular weight", round(s.mw, 2), L("MW"), ""),
+            ("Compressibility Z", round(s.z, 3), "", ""),
+            ("k = Cp/Cv", round(s.k, 3), "", ""),
+            ("Mass flux G", round(g, 2), "kg/(m²·s)", ""),
+            ("Flow regime", "Choked (critical)" if choked else "Subcritical",
+             "", f"P2/P1 = {(s.p2 / s.p1):.3f}" if s.p1 > 0 else ""),
+            ("Kd (discharge coeff., vapor)", cfg["kd_v"], "", ""),
+            ("Kb (back-pressure correction)", round(s.kb, 4), "", ""),
+            ("Kc (combination factor)", cfg["kc"], "", ""),
+        ]
+    if s.area_mult != 1.0:
+        rows.append(("Area multiplier (two-phase swell, §3.10)",
+                      f"×{s.area_mult:g}", "", ""))
+    return rows
+
+
+def _line_rows(prefix: str, info: dict) -> list:
+    """Render velocity/Re/f/geometry rows for a calculated INLET/OUTLET line,
+    or a note when an override was used / the line is unsized."""
+    if info.get("mode") == "manual":
+        return [(f"{prefix} line dP", "manual override", "",
+                 "from the piping sheet's override cell")]
+    if info.get("mode") == "calc":
+        return [
+            (f"{prefix} line inside diameter", info.get("d_in"), "in", ""),
+            (f"{prefix} line velocity", round(info["v"], 3), "m/s", ""),
+            (f"{prefix} line Reynolds number", f"{info['re']:.0f}", "", ""),
+            (f"{prefix} line friction factor f", round(info["f"], 5), "", ""),
+            (f"{prefix} line length / ΣK / Δz",
+             f"{info['length']:.2f} m / {info['ktot']:.2f} / {info['dz']:.2f} m",
+             "", ""),
+        ]
+    return [(f"{prefix} line dP", "not evaluated", "",
+             f"no line size or no flow — {prefix.upper()}_PIPING incomplete")]
+
+
+def _write_case_sheet(wb, m: Model, r: RunResult, s: Scen) -> None:
+    """One results sheet per active scenario: relieving conditions, sizing,
+    back-pressure (this case's own outlet-line dP/Kb iteration) and inlet-line
+    sizing (this case's own flow through the shared INLET_PIPING line)."""
+    uio = m.uio
+    U, L = uio.user, uio.label
+    ws = wb.create_sheet(f"CASE_{s.code}"[:31])
+    title = f"{s.code} — {s.name}"
+    if r.governing is s:
+        title += "   ★ GOVERNING CASE"
+    _title(ws, 4, f"{title}   |   units: {uio.system}")
+
+    rows = [("Relieving Conditions", "", "", "sec"),
+            ("Class", s.klass, "", ""),
+            ("Allowable accumulation pressure (g)",
+             U("dP", s.allowable_g), L("dP"), ""),
+            ("Relieving pressure P1 (abs)", U("P", s.p1), L("P"), ""),
+            ("Relieving temperature", U("T", s.t, 1), L("T"), ""),
+            ("Phase", s.phase, "", "")]
+    if (s.phase or "").upper().startswith("TWO"):
+        rows.append(("Quality x", round(s.quality, 4), "",
+                      "mass vapor fraction"))
+    rows.append(("Molecular weight", round(s.mw, 2), L("MW"), ""))
+    rows.append(("Compressibility Z", round(s.z, 3), "", ""))
+    rows.append(("k = Cp/Cv", round(s.k, 3), "", ""))
+    if s.rho_v:
+        rows.append(("Vapor density", U("rho", s.rho_v), L("rho"), ""))
+    if s.rho_l:
+        rows.append(("Liquid density", U("rho", s.rho_l), L("rho"), ""))
+    rows.append(("Viscosity", round(s.mu, 4), L("visc"), ""))
+    if s.latent:
+        rows.append(("Latent heat", U("h", s.latent), L("h"), ""))
+
+    rows.append(("Relief Load", "", "", "sec"))
+    rows.append(("Relieving mass flow W", U("mflow", s.w, 2), L("mflow"), ""))
+
+    rows.append(("Sizing (API 520 Part I)", "", "", "sec"))
+    rows += _sizing_rows(s, m)
+    rows.append(("Required orifice area", U("Ain", s.area, 5), L("Ain"), ""))
+    rows.append(("Selected orifice (API 526)", s.orifice, "",
+                  f"actual {U('Ain', s.orifice_area, 4)} {L('Ain')}"))
+
+    rows.append((f"Back Pressure — Outlet Line ({s.code} flow)", "", "", "sec"))
+    rows.append(("Superimposed back pressure (constant)",
+                  U("dP", m.press["super_const"]), L("dP"), ""))
+    rows += _line_rows("Outlet", s.outlet_info)
+    rows.append(("Built-up back pressure (this case)",
+                  U("dP", s.builtup_pa), L("dP"), ""))
+    rows.append(("Total back pressure (g)", U("dP", s.total_bp_g), L("dP"), ""))
+    rows.append(("Kb (back-pressure correction)", round(s.kb, 4), "", ""))
+    rows.append((f"Total BP vs {s.bp_lim_pct:.0f}% limit ({m.cfg['type']})",
+                  "PASS" if s.bp_ok else "FAIL", "", f"{s.bp_pct:.1f}% of set"))
+
+    rows.append((f"Inlet Line ({s.code} flow) — 3% Rule", "", "", "sec"))
+    rows += _line_rows("Inlet", s.inlet_info)
+    rows.append(("Inlet line pressure drop", U("dP", s.inlet_dp_pa), L("dP"), ""))
+    rows.append(("Inlet dP vs 3% limit", "PASS" if s.in_ok else "FAIL", "",
+                  f"{s.in_pct:.2f}% of set"))
+
+    rows.append(("Accumulation Check", "", "", "sec"))
+    rows.append(("Allowable within class limit",
+                  "PASS" if s.accum_ok else "FAIL", "",
+                  f"{s.klass}: {U('dP', s.allowable_g)} {L('dP')} (g)"))
+
+    if s.notes:
+        rows.append(("Notes / Basis", "", "", "sec"))
+        for n in s.notes:
+            rows.append((n, "", "", ""))
+
+    _result_rows(ws, 3, rows, widths=(36, 24, 10, 56))
+
+
 def write_output(m: Model, r: RunResult, out_path: str) -> str:
     uio = m.uio
     U = uio.user
@@ -2065,28 +2281,12 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
         ("Recommended destination", r.disposal, "",
          "; ".join(r.disposal_reasons)),
     ]
-    for col, w in zip("BCDE", (34, 30, 10, 56)):
-        ws.column_dimensions[col].width = w
-    for label, val, unit, note in rows:
-        if note == "sec":
-            ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=5)
-            C(ws, r0, 2, label, bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-        else:
-            C(ws, r0, 2, label, bg=LGRAY, sz=9)
-            C(ws, r0, 3, "—" if val is None else val, bg=TEAL, sz=9, ha="right")
-            C(ws, r0, 4, unit, sz=9, fg="808080")
-            C(ws, r0, 5, note, sz=9, fg="808080", wrap=True)
-        r0 += 1
+    r0 = _result_rows(ws, r0, rows, widths=(34, 30, 10, 56))
     r0 += 1
-    ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=5)
-    C(ws, r0, 2, "COMPLIANCE CHECKS", bg=GRNHDR, fg=WHITE, sz=10, bold=True)
-    r0 += 1
+    check_rows = [("COMPLIANCE CHECKS", "", "", "sec")]
     for name, ok, note in r.checks:
-        C(ws, r0, 2, name, bg=LGRAY, sz=9)
-        C(ws, r0, 3, "PASS" if ok else "FAIL",
-          bg=("C6EFCE" if ok else "FFC7CE"), sz=9, bold=True, ha="center")
-        C(ws, r0, 5, note, sz=9, fg="808080")
-        r0 += 1
+        check_rows.append((name, "PASS" if ok else "FAIL", "", note))
+    r0 = _result_rows(ws, r0, check_rows, widths=(34, 30, 10, 56))
     for n in r.head_notes:
         C(ws, r0, 2, "⚠ " + n, sz=9, fg=ORANGE, wrap=True)
         r0 += 1
@@ -2097,7 +2297,7 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
             uio.hdr("Allowable (g)", "dP"), uio.hdr("Relieving P", "P"),
             uio.hdr("Relieving T", "T"), "Phase", "Quality x",
             uio.hdr("Relief rate", "mflow"), uio.hdr("Required area", "Ain"),
-            "Orifice", "Notes"]
+            "Orifice", "Case Sheet", "Notes"]
     _title(ws, len(hdrs), "SCENARIO RESULTS — all contingencies")
     for ci, h in enumerate(hdrs, 2):
         C(ws, 3, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center",
@@ -2109,6 +2309,7 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
         bg = ("FFF2CC" if s.code == gov_code and s.active else
               WHITE if s.active else LGRAY)
         letter = select_orifice(s.area)[0] if s.area > 0 else "—"
+        case_sheet = f"CASE_{s.code}"[:31] if s.active else None
         vals = [s.code, s.name, "Y" if s.active else "N", s.klass,
                 U("dP", s.allowable_g) if s.active else None,
                 U("P", s.p1) if s.active else None,
@@ -2118,14 +2319,24 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
                 U("mflow", s.w, 1) if s.active else None,
                 U("Ain", s.area, 4) if s.active else None,
                 letter if s.active else None,
+                case_sheet,
                 "; ".join(s.notes)]
         for ci, v in enumerate(vals, 2):
-            C(ws, rr, ci, "—" if v is None else v, bg=bg, sz=8,
-              ha="right" if isinstance(v, (int, float)) else "left",
-              wrap=(ci == len(hdrs) + 1))
+            cell = C(ws, rr, ci, "—" if v is None else v, bg=bg, sz=8,
+                     ha="right" if isinstance(v, (int, float)) else "left",
+                     wrap=(ci == len(hdrs) + 1))
+            if case_sheet and v is case_sheet:
+                cell.hyperlink = f"#'{case_sheet}'!A1"
+                cell.font = Font(name="Calibri", size=8, underline="single",
+                                  color="0563C1")
         rr += 1
-    for ci, w in enumerate([8, 26, 7, 9, 12, 11, 10, 10, 8, 12, 12, 8, 70], 2):
+    for ci, w in enumerate([8, 26, 7, 9, 12, 11, 10, 10, 8, 12, 12, 8, 12, 70], 2):
         ws.column_dimensions[get_column_letter(ci)].width = w
+
+    # ── per-case sheets ──────────────────────────────────────────────────
+    for s in r.scens:
+        if s.active:
+            _write_case_sheet(wb, m, r, s)
 
     # ── EQUIPMENT_CHECK ──────────────────────────────────────────────────
     if m.equip_rows:
@@ -2172,6 +2383,10 @@ def write_output(m: Model, r: RunResult, out_path: str) -> str:
         "  composition (hydraulics flash engine) where available.",
         "· INLET/OUTLET piping use a single-line Darcy model — for relief circuits",
         "  run the hydraulics engine and paste the dP into the override cells.",
+        "· Every active scenario gets its own CASE_<code> sheet with a full",
+        "  back-pressure iteration (Kb, built-up BP, outlet-line v/Re/f at that",
+        "  case's relief rate/properties) and inlet-line dP through the shared",
+        "  INLET/OUTLET piping geometry — see SCENARIO_RESULTS 'Case Sheet' links.",
         "",
         "VERIFY all results against API 520/521 and the corporate practice before",
         "issuing for design.  This workbook is a calculation aid, not a substitute",
