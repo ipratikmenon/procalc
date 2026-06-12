@@ -3464,6 +3464,7 @@ def build_profile_flash_noiso(
         flash_mode: str = "isothermal",
         default_sp: HE.StreamProps | None = None,
         injections: dict | None = None,
+        cv_overrides: dict | None = None,
 ) -> tuple[list[HE.Station], list, list, dict]:
     """
     March pressure along ``block_rows`` with flash-coupled VLE.
@@ -3662,8 +3663,16 @@ def build_profile_flash_noiso(
             # Base ΔP: flow control floats to the downstream Destination P;
             # otherwise a fixed design ΔP (Fixed dP, else Darcy with Fixed K).
             if dest_p is not None:
-                base_dp = max(0.0, p - dest_p)
-                src_tag = f"flow control → ΔP floats to Destination {dest_p:.1f} psia"
+                ov = (cv_overrides or {}).get(ridx)
+                if ov is not None:
+                    base_dp = ov
+                    src_tag = (f"flow control → ΔP solved for arrival at "
+                               f"Destination {dest_p:.1f} psia (incl. downstream "
+                               f"losses)")
+                else:
+                    base_dp = max(0.0, p - dest_p)
+                    src_tag = (f"flow control → ΔP floats to Destination "
+                               f"{dest_p:.1f} psia")
             elif fixed_dp:
                 base_dp = fixed_dp
                 src_tag = f"fixed design ΔP = {fixed_dp:.3f} psi"
@@ -3758,6 +3767,83 @@ def build_profile_flash_noiso(
         p = p_out
 
     return stations, flashes, comps, mw_map
+
+
+def build_profile_solved(
+        block_rows: list[dict],
+        resolver,
+        p_start: float,
+        p_floor: float = 0.05,
+        flash_mode: str = "isothermal",
+        default_sp: HE.StreamProps | None = None,
+        injections: dict | None = None,
+        max_pass: int = 24,
+        tol: float = 0.01,
+) -> tuple[list[HE.Station], list, list, dict]:
+    """March a block, solving flow-control Control Valves to their Destination.
+
+    A flow-control valve must absorb only the *residual* ΔP so that, AFTER the
+    downstream line/fitting losses between the valve and its Destination, the
+    pressure arrives at the target.  Those downstream losses depend (via
+    density / flash) on the valve's outlet pressure, so we iterate: march,
+    recompute each valve's required ΔP from the realised downstream losses,
+    re-march, until the ΔP settles (< ``tol`` psi) or ``max_pass`` is reached.
+
+    With no flow-control valve that has a downstream Destination this is a
+    single pass — identical to ``build_profile_flash_noiso`` directly."""
+    # Pre-scan two-pass targets: valve row index → (Destination index, dest P).
+    targets: dict[int, tuple[int, float]] = {}
+    for ri, row in enumerate(block_rows):
+        if (_is_control_valve(row.get("Fitting Name"))
+                and _cv_control_type(row) == "F"):
+            di = next((j for j in range(ri + 1, len(block_rows))
+                       if _is_destination(block_rows[j].get("Fitting Name"))
+                       and num(block_rows[j].get("Set P (psia)")) is not None),
+                      None)
+            if di is not None:
+                targets[ri] = (di, num(block_rows[di].get("Set P (psia)")))
+
+    common = dict(p_floor=p_floor, flash_mode=flash_mode,
+                  default_sp=default_sp, injections=injections)
+    if not targets:
+        return build_profile_flash_noiso(block_rows, resolver, p_start, **common)
+
+    # Pass 0: valves drop straight to their Destination P (no override) — this
+    # over-drops by the downstream losses, giving the lower bracket on arrival.
+    result = build_profile_flash_noiso(block_rows, resolver, p_start, **common)
+    stations = result[0]
+
+    # The arrival pressure at a Destination is monotonically DECREASING in its
+    # valve's ΔP (more drop → lower outlet AND higher downstream loss).  So
+    # bisect each valve's ΔP between 0 (fully open) and p_in − dest_p (drop
+    # straight to target) — robust even when the compressible downstream loss
+    # is strongly pressure-dependent (plain substitution oscillates there).
+    overrides: dict[int, float] = {}
+    brackets: dict[int, list[float]] = {}
+    for vri, (di, dest_p) in targets.items():
+        hi = max(0.0, stations[vri].p_in_psia - dest_p)
+        brackets[vri] = [0.0, hi]
+        overrides[vri] = hi / 2.0
+
+    for _ in range(max_pass):
+        result = build_profile_flash_noiso(block_rows, resolver, p_start,
+                                           cv_overrides=overrides, **common)
+        stations = result[0]
+        converged = True
+        for vri, (di, dest_p) in targets.items():
+            arrival = stations[di].p_out_psia      # Destination ΔP = 0 ⇒ arrival
+            lo, hi = brackets[vri]
+            if abs(arrival - dest_p) > tol and (hi - lo) > tol:
+                converged = False
+                if arrival > dest_p:               # under-dropped → need more ΔP
+                    lo = overrides[vri]
+                else:                              # over-dropped → need less ΔP
+                    hi = overrides[vri]
+                brackets[vri] = [lo, hi]
+                overrides[vri] = 0.5 * (lo + hi)
+        if converged:
+            break
+    return result
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -4485,7 +4571,7 @@ def run_noiso(
         line_branch_count: dict[str, int] = {}
         for bi, block in enumerate(branch_blocks):
             bp = _start_p_of_block(block) or p_start
-            sts, fls, cmps, _bmw = build_profile_flash_noiso(
+            sts, fls, cmps, _bmw = build_profile_solved(
                 block, resolver, bp, flash_mode=flash_mode, default_sp=sp)
             b_lns = [r["Line No"] for r in block]
             label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
@@ -4516,7 +4602,7 @@ def run_noiso(
                       f"Tee Join Branch Flow {join_n}.")
 
         # ── March the Main with branch injections ────────────────────────
-        main_stations, main_flashes, main_comps, main_mw = build_profile_flash_noiso(
+        main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
             main_rows, resolver, p_start, flash_mode=flash_mode,
             default_sp=sp, injections=injections)
 
