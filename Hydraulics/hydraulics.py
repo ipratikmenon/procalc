@@ -2367,6 +2367,10 @@ FITTING_NAMES: list[str] = [
     "Orifice",
     "Straight Pipeline",
     "Venturi",
+    # Boundaries / control devices
+    "Source",
+    "Control Valve",
+    "Destination",
 ]
 
 # K values — Crane TP-410 / Darby representative values
@@ -2426,6 +2430,9 @@ _K_TABLE: dict[str, float] = {
     "venturi":                                0.10,
     "fix pressure":                           0.00,   # dP from Fixed dP column
     "fix k":                                  0.00,   # K from Fixed K column
+    "source":                                 0.00,   # boundary — anchors Set P
+    "control valve":                          0.00,   # dP from control type / Fix K / Fix dP
+    "destination":                            0.00,   # boundary — target Set P
 }
 
 
@@ -2445,9 +2452,18 @@ _CLR_DOWN      = "FFC7CE"  # light-red   — DOWN direction
 _CLR_BRANCH    = "DEEAF1"  # same as elbow — Branch run-type label
 
 
+_CLR_SOURCE    = "C6EFCE"  # light-green — Source boundary (circuit inlet)
+_CLR_DEST      = "FFC7CE"  # light-red   — Destination boundary (circuit outlet)
+
+
 def fitting_bg(name: str | None) -> str:
     """Return the PCF-palette hex fill for a fitting name."""
     f = (name or "").lower()
+    # Control / boundary devices first (before the generic 'valve' match,
+    # since 'control valve' also contains 'valve').
+    if "control valve" in f:                     return _CLR_CV
+    if "source" in f:                            return _CLR_SOURCE
+    if "destination" in f:                       return _CLR_DEST
     if "entrance" in f or "exit" in f:           return _CLR_ENTRANCE
     if "elbow" in f or "return" in f:            return _CLR_ELBOW
     if ("gate" in f or "globe" in f or "ball" in f
@@ -2490,6 +2506,42 @@ def _is_orifice(fitting: str | None, instr_type: str | None) -> bool:
     return f == "orifice" or it in ("FO", "ORIFICE", "FLOW ORIFICE")
 
 
+def _is_source(fitting: str | None) -> bool:
+    return (fitting or "").lower().strip() == "source"
+
+
+def _is_destination(fitting: str | None) -> bool:
+    return (fitting or "").lower().strip() == "destination"
+
+
+def _is_control_valve(fitting: str | None) -> bool:
+    return (fitting or "").lower().strip() == "control valve"
+
+
+def _cv_control_type(row: dict) -> str:
+    """Normalise the per-row 'Control Valve Type' to one of P/T/F/L.
+
+    P = pressure control, T = temperature, F = flow, L = level.  Blank or
+    unrecognised defaults to F (flow) — the only mode whose ΔP floats with the
+    fixed downstream Destination pressure; P/T/L use a fixed design ΔP."""
+    v = (txt(row.get("Control Valve Type")) or "").strip().upper()
+    return v[0] if v and v[0] in ("P", "T", "F", "L") else "F"
+
+
+def _downstream_dest_p(block_rows: list[dict], start_idx: int) -> float | None:
+    """First downstream ``Destination`` row's ``Set P`` (internal psia), or None.
+
+    Used by a flow-control ``Control Valve`` to size its ΔP so the running
+    pressure lands on the fixed Destination pressure (typical topology places
+    the valve immediately upstream of the Destination)."""
+    for r in block_rows[start_idx + 1:]:
+        if _is_destination(r.get("Fitting Name")):
+            sp = num(r.get("Set P (psia)"))
+            if sp is not None:
+                return sp
+    return None
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Input-template column definitions
 # ════════════════════════════════════════════════════════════════════════
@@ -2525,14 +2577,18 @@ INPUT_HEADERS: list[str] = [
     "Length (ft)",            # pipe run or equivalent length
     "Elev Change (ft)",       # elevation rise (+) or fall (-) in ft
     "Direction",              # N / S / E / W / UP / DOWN (informational)
-    "Fixed K",                # resistance K override (Fix K fitting only)
-    "Fixed dP (psi)",         # fixed pressure drop (Fix Pressure fitting only)
+    "Fixed K",                # resistance K override (Fix K / Control Valve)
+    "Fixed dP (psi)",         # fixed pressure drop (Fix Pressure / Control Valve)
     "Instr Type",             # FO = Flow Orifice; blank for non-instruments
     "Instr Tag",              # instrument tag number (e.g. FI-101)
     "Instr dP (psi)",         # rated / manual pressure drop for instrument
+    # ── Boundaries / control valves ─────────────────────────────────────────
+    "Set P (psia)",           # boundary pressure for Source / Destination rows
+    "Control Valve Type",     # P | T | F | L  (Control Valve rows only)
+    "Exch Max Allow dP (psi)",  # T-control floor: max allowable dP across exchanger
     "Notes",                  # free notes
 ]
-_NCOL = len(INPUT_HEADERS)   # 34
+_NCOL = len(INPUT_HEADERS)   # 37
 
 # Manual stream-property columns (styled yellow in the template; used when no stream)
 _MANUAL_PROP_COLS = [
@@ -2570,6 +2626,9 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Fixed dP (psi)": ("Fixed dP", "dP"),
     "Instr Type": ("Instr Type", None), "Instr Tag": ("Instr Tag", None),
     "Instr dP (psi)": ("Instr dP", "dP"),
+    "Set P (psia)": ("Set P", "P"),
+    "Control Valve Type": ("Control Valve Type", None),
+    "Exch Max Allow dP (psi)": ("Exch Max Allow dP", "dP"),
     "Notes": ("Notes", None),
 }
 # display base name → canonical key (for unit-suffix-tolerant header matching)
@@ -2681,7 +2740,8 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         "Fitting Name": 32, "Bore (in)": 9, "Piping Spec": 11, "Length (ft)": 11,
         "Elev Change (ft)": 13, "Direction": 10, "Fixed K": 9,
         "Fixed dP (psi)": 12, "Instr Type": 10, "Instr Tag": 12,
-        "Instr dP (psi)": 12, "Notes": 30,
+        "Instr dP (psi)": 12, "Set P (psia)": 12, "Control Valve Type": 14,
+        "Exch Max Allow dP (psi)": 16, "Notes": 30,
     }
     for ci, name in enumerate(INPUT_HEADERS, 1):
         cw(ws, ci, width_map.get(name, 12))
@@ -2691,6 +2751,16 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     dv_rt = DataValidation(type="list", formula1='"Main,Branch"', allow_blank=True)
     ws.add_data_validation(dv_rt)
     dv_rt.add(f"{rt_col}3:{rt_col}2000")
+
+    # ── Drop-down: Control Valve Type (P/T/F/L) ───────────────────────
+    cvt_col = _hcol_letter("Control Valve Type")
+    dv_cvt = DataValidation(
+        type="list", formula1='"F,P,T,L"', allow_blank=True,
+        showErrorMessage=True,
+        error="F=flow, P=pressure, T=temperature, L=level control",
+        errorTitle="Control Valve Type")
+    ws.add_data_validation(dv_cvt)
+    dv_cvt.add(f"{cvt_col}3:{cvt_col}2000")
 
     # ── Drop-down: Fitting Name — hidden list sheet ───────────────────
     ws_fit = wb.create_sheet("_FittingList")
@@ -2725,6 +2795,16 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         # ── Circuit C2 — manual properties (no HMB stream) ────────────
         {"Circuit":"C2","Line No":"H-285","Run Type":"Main","Seq":1,"Start P (psia)":80.0,"Temp (degF)":250.0,"Vapor Mass Flow":12000.0,"Vap MW":24.0,"Vap Visc (cP)":0.012,"Vap Z":0.95,"Vap Cp/Cv":1.28,"Vap Density (lb/ft3)":0.45,"Comp ID":"P-003","Fitting Name":"Straight Pipeline","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":20,"Elev Change (ft)":0,"Notes":"Manual props (no stream)"},
         {"Circuit":"C2","Line No":"H-285","Run Type":"Main","Seq":2,"Comp ID":"EL-003","Fitting Name":"Elbow 90 Long","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":0,"Elev Change (ft)":0},
+        # ── Circuit C3 — Source → line → Control Valve (flow control) → Destination ──
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-01","Fitting Name":"Source","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":150.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Upstream source pressure"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":2,"Comp ID":"P-301","Fitting Name":"Straight Pipeline","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":40,"Elev Change (ft)":0,"Notes":"Run to valve"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Length (ft)":0,"Elev Change (ft)":0,"Notes":"Flow control — ΔP floats to Destination P"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":4,"Comp ID":"DST-01","Fitting Name":"Destination","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":60.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Downstream destination pressure"},
+        # ── Circuit C4 — two parallel control valves (Tee split, ratio control) ──
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-02","Fitting Name":"Source","Bore (in)":8,"Piping Spec":"G1A-5","Set P (psia)":200.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Header source"},
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":2,"Comp ID":"TEE-40","Fitting Name":"Tee Split Branch Flow 1","Bore (in)":8,"Piping Spec":"G1A-5","Flow Fraction from Main":-0.5,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"50% splits to parallel branch"},
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":3,"Comp ID":"FCV-40A","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Main-leg valve (50% flow)"},
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Branch","Seq":1,"Start P (psia)":200.0,"Comp ID":"FCV-40B","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Parallel-leg valve (other 50% flow)"},
     ]
     manual_idx = {_hcol(n) for n in _MANUAL_PROP_COLS}
     for ri, d in enumerate(_ex_dicts, 3):
@@ -2782,6 +2862,22 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("", False),
         ("FLOW ORIFICE  (Instr Type = FO)", True),
         ("  Set Instr Type = FO.  Enter rated dP in Instr dP (psi).", False),
+        ("", False),
+        ("SOURCE / DESTINATION  (boundary fittings)", True),
+        ("  Source: enter the upstream pressure in 'Set P (psia)' — it anchors the circuit inlet pressure.", False),
+        ("  Destination: enter the downstream pressure in 'Set P (psia)' — the target the circuit must reach.", False),
+        ("  If BOTH are filled, a Control Valve placed between them absorbs the pressure difference.", False),
+        ("  If only one is filled, the pressure is taken from that single value.", False),
+        ("", False),
+        ("CONTROL VALVE  (Fitting = 'Control Valve')", True),
+        ("  Set 'Control Valve Type' = F (flow), P (pressure), T (temperature) or L (level).", False),
+        ("  F (flow): ΔP floats so the running pressure lands on the downstream Destination 'Set P'.", False),
+        ("  P / L: fixed design ΔP — enter it in 'Fixed dP (psi)' (or a resistance in 'Fixed K').", False),
+        ("  T (temperature): like a fixed ΔP, but floored at 'Exch Max Allow dP (psi)' (exchanger limit).", False),
+        ("  β ratio = valve Bore (in) ÷ upstream line bore is reported in the Notes column.", False),
+        ("  SERIES valves: place several Control Valve rows in Seq order on the same run.", False),
+        ("  PARALLEL valves: split flow at a Tee (negative 'Flow Fraction from Main'), put one Control", False),
+        ("    Valve on the Main leg and one on a Branch (Run Type = Branch, with its own Start P).", False),
         ("", False),
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
@@ -2948,6 +3044,10 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Instr Type":       txt(g(rv, "Instr Type")),
             "Instr Tag":        txt(g(rv, "Instr Tag")),
             "Instr dP (psi)":   gnum(rv, "Instr dP (psi)"),
+            # ── Boundaries / control valves ─────────────────────────────
+            "Set P (psia)":     gnum(rv, "Set P (psia)"),
+            "Control Valve Type": txt(g(rv, "Control Valve Type")),
+            "Exch Max Allow dP (psi)": gnum(rv, "Exch Max Allow dP (psi)"),
             "Notes":            txt(g(rv, "Notes")),
         })
     wb.close()
@@ -2988,6 +3088,10 @@ def _group_circuits(rows: list[dict]) -> dict[str, dict]:
             c["case"] = r["Case"]
         if c["start_p"] is None and r.get("Start P (psia)") is not None:
             c["start_p"] = r["Start P (psia)"]
+        # A Source boundary's Set P also seeds the circuit start pressure.
+        if (c["start_p"] is None and _is_source(r.get("Fitting Name"))
+                and r.get("Set P (psia)") is not None):
+            c["start_p"] = r["Set P (psia)"]
 
         ln = r["Line No"]
         if ln not in c["line_order"]:
@@ -3011,6 +3115,9 @@ def _start_p_of_block(block: list[dict]) -> float | None:
     for r in block:
         if r.get("Start P (psia)") is not None:
             return r["Start P (psia)"]
+        if (_is_source(r.get("Fitting Name"))
+                and r.get("Set P (psia)") is not None):
+            return r["Set P (psia)"]
     return None
 
 
@@ -3421,8 +3528,11 @@ def build_profile_flash_noiso(
 
         fitting    = row.get("Fitting Name")
         spec       = row.get("Piping Spec")
+        line_bore_before = last_bore        # upstream line bore (for CV β ratio)
         bore       = row.get("Bore (in)") or last_bore
-        if bore:
+        # A Control Valve's Bore is its own port/seat size, not the line bore —
+        # don't let it overwrite the running line bore used downstream.
+        if bore and not _is_control_valve(fitting):
             last_bore = bore
         length_ft  = num(row.get("Length (ft)")) or 0.0
         dz_ft      = num(row.get("Elev Change (ft)")) or 0.0
@@ -3431,6 +3541,8 @@ def build_profile_flash_noiso(
         instr_dp   = num(row.get("Instr dP (psi)")) or 0.0
         fixed_dp   = num(row.get("Fixed dP (psi)")) or 0.0
         fixed_k    = num(row.get("Fixed K"))
+        set_p      = num(row.get("Set P (psia)"))
+        exch_dp    = num(row.get("Exch Max Allow dP (psi)"))
 
         idr = HE.resolve_id(spec, bore)
         p_eval = max(p, p_floor)
@@ -3519,6 +3631,68 @@ def build_profile_flash_noiso(
             res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
             note  = (f"Orifice {instr_tag or ''}:  −{instr_dp:.3f} psi"
                      f"{flash_tag}")
+
+        elif _is_source(fitting):
+            # Boundary: (re)anchor the running pressure to the Source Set P.
+            tgt   = set_p if set_p is not None else p
+            dp_t  = p - tgt          # negative ⇒ pressure rises to the source
+            dp_f  = dp_k = dp_z = 0.0
+            res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
+            note  = (f"Source: anchor P = {tgt:.3f} psia{flash_tag}"
+                     if set_p is not None else
+                     f"Source (no Set P — using running P){flash_tag}")
+
+        elif _is_destination(fitting):
+            # Boundary: observation point.  Pressure unchanged; report arrival
+            # against the target Set P (does not clamp).
+            dp_t  = 0.0
+            dp_f  = dp_k = dp_z = 0.0
+            res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
+            if set_p is not None:
+                margin = p - set_p
+                note  = (f"Destination: target {set_p:.3f} psia, arrival "
+                         f"{p:.3f} psia (margin {margin:+.3f} psi){flash_tag}")
+            else:
+                note  = f"Destination (no target Set P){flash_tag}"
+
+        elif _is_control_valve(fitting):
+            ctype  = _cv_control_type(row)
+            dest_p = (_downstream_dest_p(block_rows, ridx)
+                      if ctype == "F" else None)
+            # Base ΔP: flow control floats to the downstream Destination P;
+            # otherwise a fixed design ΔP (Fixed dP, else Darcy with Fixed K).
+            if dest_p is not None:
+                base_dp = max(0.0, p - dest_p)
+                src_tag = f"flow control → ΔP floats to Destination {dest_p:.1f} psia"
+            elif fixed_dp:
+                base_dp = fixed_dp
+                src_tag = f"fixed design ΔP = {fixed_dp:.3f} psi"
+            elif fixed_k is not None and idr.id_in and idr.id_in > 0 and fr is not None:
+                d     = idr.id_in * IN_TO_M
+                area  = math.pi / 4.0 * d * d
+                g_obj = HE.Geom(d, area, 0.0, 0.0, fixed_k, ROUGH_STEEL_M / d)
+                rk    = _dp_flashed(g_obj, sp, fr)
+                base_dp = (rk["dp_f"] + rk["dp_k"] + rk["dp_z"]) * PA_TO_PSI
+                src_tag = f"K = {fixed_k} resistance"
+            else:
+                base_dp = 0.0
+                src_tag = "no ΔP basis (set Control Valve Type / Fixed dP / Fixed K)"
+            # Temperature control: ΔP floored at the exchanger max-allowable ΔP.
+            floor_tag = ""
+            if ctype == "T" and exch_dp is not None and exch_dp > base_dp:
+                floor_tag = (f"; T-control floor → exchanger max-allow "
+                             f"ΔP {exch_dp:.3f} psi")
+                base_dp = exch_dp
+            # β ratio = valve port bore / upstream line bore
+            v_bore = num(row.get("Bore (in)"))
+            beta_tag = ""
+            if v_bore and line_bore_before and line_bore_before > 0:
+                beta_tag = f"; β = {v_bore / line_bore_before:.3f}"
+            dp_t  = base_dp
+            dp_f  = dp_k = dp_z = 0.0
+            res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
+            note  = (f"Control Valve [{ctype}]: −{dp_t:.3f} psi "
+                     f"({src_tag}{floor_tag}{beta_tag}){flash_tag}")
 
         else:
             # Standard Darcy-Weisbach  (includes Fix K)

@@ -620,9 +620,16 @@ def create_input_template(out_path: str = "cv_input.xlsx",
         ("Service / fluid description", "", "", "", "in"),
         ("Valve Data", "", "", "", "sec"),
         ("Valve type", "Globe", "",
-         "Globe | Ball | Butterfly | Angle | ...", "in"),
+         "Globe | Gate | Ball | Butterfly | Angle", "in"),
         ("Trim characteristic", "Equal Percentage", "",
          "Linear | Equal Percentage | Quick Opening", "in"),
+        ("Control action type", "F", "",
+         "F = flow | P = pressure | T = temperature | L = level.  Only F floats "
+         "ΔP to the destination pressure; P/T/L use a fixed design ΔP", "in"),
+        ("Fixed design ΔP across valve (P/T/L control)", None, L("dP"),
+         "Used when control action is P, T or L (valve ΔP is set, not floated)", "in"),
+        ("Exchanger / equipment max allowable ΔP (T control)", None, L("dP"),
+         "Temperature control: the valve ΔP is floored at this exchanger limit", "in"),
         ("Rated Cv @ 100% travel (Cv100)", None, "",
          "US customary Cv (gpm·√SG/√psi liquid basis)", "in"),
         ("Rangeability R (equal-% trim)", 50, "",
@@ -661,6 +668,17 @@ def create_input_template(out_path: str = "cv_input.xlsx",
                               allow_blank=True)
     ws.add_data_validation(dv_trim)
     dv_trim.add(f"C{_row_of('Trim characteristic')}")
+
+    dv_vtype = DataValidation(type="list",
+                               formula1='"Globe,Gate,Ball,Butterfly,Angle"',
+                               allow_blank=True)
+    ws.add_data_validation(dv_vtype)
+    dv_vtype.add(f"C{_row_of('Valve type')}")
+
+    dv_action = DataValidation(type="list", formula1='"F,P,T,L"',
+                                allow_blank=True)
+    ws.add_data_validation(dv_action)
+    dv_action.add(f"C{_row_of('Control action type')}")
 
     dv_class = DataValidation(type="list", formula1='"II,III,IV,V,VI"',
                                allow_blank=True)
@@ -927,6 +945,9 @@ def read_model(path: str) -> Model:
         "service": sg_("Service / fluid description"),
         "valve_type": sg_("Valve type") or "Globe",
         "trim_char": sg_("Trim characteristic") or "Linear",
+        "action": (sg_("Control action type") or "F").strip().upper()[:1] or "F",
+        "design_dp": sn("Fixed design ΔP across valve (P/T/L control)", "dP"),
+        "exch_dp": sn("Exchanger / equipment max allowable ΔP (T control)", "dP"),
         "cv100": sn("Rated Cv @ 100% travel (Cv100)"),
         "rangeability": sn("Rangeability R (equal-% trim)") or 50.0,
         "valve_nps": sn("Valve size (NPS)"),
@@ -1081,6 +1102,26 @@ def compute_case(c: Case, m: Model) -> None:
                                                          rho_line, mu_line)
         c.p1 = c.p1 - c.inlet_dp_pa
         c.p2 = c.p2 + c.outlet_dp_pa
+
+    # ── Control action → valve ΔP basis ─────────────────────────────────
+    # F (flow): ΔP floats — P2 stays the fixed destination pressure (above).
+    # P/L: fixed design ΔP across the valve.  T: fixed ΔP floored at the
+    # exchanger/equipment max-allowable ΔP.
+    action = (m.gen.get("action") or "F").upper()[:1]
+    res["action"] = action
+    if action in ("P", "T", "L") and c.p1:
+        design_dp = m.gen.get("design_dp") or 0.0
+        eff_dp = design_dp
+        if action == "T":
+            eff_dp = max(design_dp, m.gen.get("exch_dp") or 0.0)
+            res["exch_floor"] = m.gen.get("exch_dp")
+        if eff_dp > 0:
+            res["design_dp"] = eff_dp
+            c.p2 = c.p1 - eff_dp     # fixed-ΔP control overrides destination P2
+        else:
+            c.notes.append(f"{action}-control selected but no fixed design ΔP "
+                            "given — falling back to source/destination ΔP")
+
     p1, p2 = c.p1 or 0.0, c.p2 or 0.0
     if p1 <= 0 or p2 <= 0 or p2 >= p1:
         c.notes.append("P1/P2 missing or P2 ≥ P1 — case not evaluated")
@@ -1264,6 +1305,16 @@ def _write_case_sheet(wb, m: Model, c: Case) -> None:
              ("P2 — valve outlet pressure", U("P", c.p2), L("P"), "")]
     if "dp" in res:
         rows.append(("Differential pressure ΔP", U("dP", res["dp"]), L("dP"), ""))
+    _action_lbl = {"F": "Flow", "P": "Pressure", "T": "Temperature",
+                    "L": "Level"}.get(res.get("action", "F"), "Flow")
+    if res.get("design_dp"):
+        basis = (f"fixed design ΔP{', floored at exchanger limit' if res.get('exch_floor') and res['exch_floor'] >= res['design_dp'] else ''}")
+        rows.append((f"Control action ({_action_lbl})", basis, "",
+                      "ΔP set by control type, not floated to destination"))
+    elif res.get("dp") is not None:
+        rows.append((f"Control action ({_action_lbl})",
+                      "ΔP floats to destination", "",
+                      "valve absorbs source−destination pressure difference"))
     rows.append(("T1 — upstream temperature", U("T", c.t1, 1), L("T"), ""))
     rows.append(("Mass flow W", U("mflow", c.w, 2), L("mflow"), ""))
     rows.append(("MW", round(c.mw, 2) if c.mw else None, L("MW"), ""))

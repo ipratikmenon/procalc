@@ -74,3 +74,18 @@ Nozzle
 Orifice
 Straight Pipeline
 Venturi
+
+Source
+	Boundary fitting — enter the upstream pressure in 'Set P (psia)'; anchors the circuit inlet.
+
+Control Valve
+	Control Valve Type: F (flow) | P (pressure) | T (temperature) | L (level)
+	F  — ΔP floats so the running pressure lands on the downstream Destination 'Set P'.
+	P/L — fixed design ΔP from 'Fixed dP (psi)' (or resistance K in 'Fixed K').
+	T  — fixed ΔP floored at 'Exch Max Allow dP (psi)' (exchanger/equipment limit).
+	β ratio = valve Bore (in) / upstream line bore, reported in Notes.
+	Series: consecutive Control Valve rows.  Parallel: Tee-split + Branch legs (Flow Fraction from Main).
+
+Destination
+	Boundary fitting — enter the downstream pressure in 'Set P (psia)'; the target the circuit reaches.
+	Source + Destination both filled → the Control Valve between them absorbs the difference.
