@@ -1,18 +1,22 @@
 # HyTrays Tray Selection Study -- Numerical Comparison Across Services
 
-Five tray families -- **Sieve, HyTrays Ripple, Valve, Dualflow and a generic High-Performance tray** -- are sized and rated with the Fair-correlation tray-hydraulics engine in `column_hydraulics.py` across five representative distillation services. The goal is to make the trade-offs that drive tray selection (capacity, pressure drop, downcomer backup, turndown and fouling resistance) explicit and reproducible.
+The conventional **Sieve** baseline and the six HyTrays HT-series contacting decks -- **HT-01A Hinge, HT-01B Spring, HT-01C LipSeal, HT-02 CVS, HT-03 GRADEX and HT-05 PULSAR** -- are sized and rated with the Fair-correlation tray-hydraulics engine in `column_hydraulics.py` across five representative distillation services. The goal is to make the trade-offs that drive tray selection (capacity, pressure drop, downcomer backup, turndown and fouling resistance) explicit and reproducible.
+
+> The DCX (HT-04 downcomer module), VortiValve (HT-06 inlet device) and AEGIS (HT-07 structural overlay) HT-series members are not standalone contacting decks and so are not sized by this 1-D engine -- see `tray_library.NON_DECK_MODULES`.
 
 ## 1. Tray types compared
 
 | Tray | f_active | f_hole | h_weir (in) | C0 | Aeration factor | Capacity factor | Efficiency factor | Min load frac | Fouling open-area retention |
 |---|---|---|---|---|---|---|---|---|---|
 | Sieve | 0.78 | 0.10 | 2.0 | 0.73 | 0.55 | 1.00 | 1.00 | 0.50 | 0.75 |
-| HyTrays Ripple | 0.80 | 0.11 | 1.5 | 0.74 | 0.50 | 1.10 | 1.08 | 0.35 | 0.85 |
-| Valve | 0.78 | 0.13 | 2.0 | 0.85 | 0.55 | 1.00 | 1.00 | 0.30 | 0.70 |
-| Dualflow | 1.00 | 0.20 | 0.0 | 0.73 | 0.40 | 1.15 | 0.85 | 0.65 | 0.92 |
-| High-Performance | 0.85 | 0.14 | 1.0 | 0.80 | 0.50 | 1.25 | 0.97 | 0.40 | 0.80 |
+| HT-01A Hinge | 0.80 | 0.14 | 2.0 | 0.73 | 0.55 | 1.05 | 1.05 | 0.08 | 0.70 |
+| HT-01B Spring | 0.80 | 0.13 | 2.0 | 0.73 | 0.55 | 1.05 | 1.05 | 0.09 | 0.78 |
+| HT-01C LipSeal | 0.82 | 0.13 | 1.5 | 0.78 | 0.52 | 1.08 | 1.02 | 0.38 | 0.78 |
+| HT-02 CVS | 0.75 | 0.15 | 2.0 | 0.80 | 0.50 | 1.65 | 1.00 | 0.40 | 0.80 |
+| HT-03 GRADEX | 0.82 | 0.11 | 1.5 | 0.82 | 0.50 | 1.20 | 1.12 | 0.30 | 0.75 |
+| HT-05 PULSAR | 0.80 | 0.12 | 2.0 | 0.71 | 0.55 | 1.05 | 1.10 | 0.25 | 0.95 |
 
-> *HyTrays Ripple parameters are placeholders pending the datasheets in `HyTrays/Datasheets/` -- update and re-run once available.*
+> *HT-series parameters are derived from the datasheets in `HyTrays/Datasheets/` and are engineering estimates for relative screening -- refine against detailed vendor/test data before absolute design.*
 
 ## 2. Services evaluated
 
@@ -49,70 +53,82 @@ Five tray families -- **Sieve, HyTrays Ripple, Valve, Dualflow and a generic Hig
 | Tray | Diameter (ft) | u_nf (ft/s) | dP/tray (psi) | DC backup (% lim) | Operating window (% design) | Turndown | Eff (%) | N_actual | Height (ft) | Total dP (psi) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Sieve | 4.39 | 1.52 | 0.0557 | 34 | 62-125 | 2.00:1 | 76.2 | 27 | 64.0 | 1.503 |
-| HyTrays Ripple | 4.13 | 1.67 | 0.0484 | 30 | 44-125 | 2.86:1 | 82.3 | 25 | 60.0 | 1.211 |
-| Valve | 4.39 | 1.52 | 0.0386 | 26 | 38-125 | 3.33:1 | 76.2 | 27 | 64.0 | 1.042 |
-| Dualflow | 3.61 | 1.75 | 0.0170 | n/a | 81-125 | 1.54:1 | 64.8 | 31 | 72.0 | 0.526 |
-| High-Performance | 3.76 | 1.90 | 0.0351 | 23 | 50-125 | 2.50:1 | 73.9 | 28 | 66.0 | 0.983 |
+| HT-01A Hinge | 4.23 | 1.59 | 0.0426 | 28 | 10-125 | 12.50:1 | 80.0 | 26 | 62.0 | 1.107 |
+| HT-01B Spring | 4.23 | 1.59 | 0.0453 | 29 | 11-125 | 11.11:1 | 80.0 | 26 | 62.0 | 1.178 |
+| HT-01C LipSeal | 4.12 | 1.64 | 0.0380 | 25 | 48-125 | 2.63:1 | 77.7 | 26 | 62.0 | 0.989 |
+| HT-02 CVS | 3.48 | 2.50 | 0.0545 | 35 | 50-125 | 2.50:1 | 76.2 | 27 | 64.0 | 1.473 |
+| HT-03 GRADEX | 3.91 | 1.82 | 0.0478 | 30 | 38-125 | 3.33:1 | 85.3 | 24 | 58.0 | 1.146 |
+| HT-05 PULSAR | 4.23 | 1.59 | 0.0500 | 31 | 31-125 | 4.00:1 | 83.8 | 24 | 58.0 | 1.201 |
 
-FLV = 0.052 (vapor-dominated). HyTrays Ripple gives the smallest shell of the conventional weired trays (4.13 ft vs 4.39 ft for Sieve/Valve) **and** the highest efficiency (82.3%), giving the shortest column (60 ft, 25 trays) and the lowest total dP after Dualflow/High-Performance (1.21 psi vs 1.50 psi for Sieve). Dualflow needs the most trays (31) due to its lower contacting efficiency.
+FLV = 0.052 (vapor-dominated). The smallest shell is **HT-02 CVS** (3.48 ft vs 4.39 ft for the Sieve baseline), and the highest efficiency is **HT-03 GRADEX** (85.3%), giving the shortest column (HT-03 GRADEX: 58 ft, 24 trays). The lowest total column dP is **HT-01C LipSeal** (0.99 psi vs 1.50 psi for Sieve). Across the HT-series decks the efficiency uplift (HT-03 GRADEX / HT-05 PULSAR) and capacity (HT-02 CVS) are the main levers in this clean, vapor-dominated service.
 
 ### 4.2 Fouling / Heavy-Ends Service
 
 | Tray | Diameter (ft) | u_nf (ft/s) | dP/tray (psi) | DC backup (% lim) | Operating window (% design) | Turndown | Eff (%) | N_actual | Height (ft) | Total dP (psi) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Sieve | 5.42 | 2.67 | 0.0905 | 41 | 77-154 | 2.00:1 | 33.5 | 45 | 100.0 | 4.070 |
-| HyTrays Ripple | 5.10 | 2.94 | 0.0703 | 35 | 54-154 | 2.86:1 | 36.2 | 42 | 94.0 | 2.954 |
-| Valve | 5.42 | 2.67 | 0.0688 | 34 | 46-154 | 3.33:1 | 33.5 | 45 | 100.0 | 3.096 |
-| Dualflow | 4.46 | 3.08 | 0.0193 | n/a | 100-154 | 1.54:1 | 28.5 | 53 | 116.0 | 1.021 |
-| High-Performance | 4.64 | 3.34 | 0.0579 | 31 | 62-154 | 2.50:1 | 32.5 | 47 | 104.0 | 2.723 |
+| HT-01A Hinge | 5.22 | 2.81 | 0.0756 | 37 | 12-154 | 12.50:1 | 35.2 | 43 | 96.0 | 3.250 |
+| HT-01B Spring | 5.22 | 2.81 | 0.0737 | 36 | 14-154 | 11.11:1 | 35.2 | 43 | 96.0 | 3.171 |
+| HT-01C LipSeal | 5.08 | 2.89 | 0.0632 | 33 | 58-154 | 2.63:1 | 34.2 | 44 | 98.0 | 2.783 |
+| HT-02 CVS | 4.30 | 4.41 | 0.0843 | 42 | 62-154 | 2.50:1 | 33.5 | 45 | 100.0 | 3.792 |
+| HT-03 GRADEX | 4.82 | 3.21 | 0.0791 | 38 | 46-154 | 3.33:1 | 37.5 | 40 | 90.0 | 3.165 |
+| HT-05 PULSAR | 5.22 | 2.81 | 0.0694 | 35 | 38-154 | 4.00:1 | 36.9 | 41 | 92.0 | 2.847 |
 
 Sized at 65% of flood (margin for deposit buildup) with each tray's hole area derated by `fouling_open_area_retention`. The standalone fouling-sensitivity result (Fig. 15, independent of flow rates) shows the underlying mechanism -- for a tray whose open area survives at fraction *r* of as-new, dry-tray dP rises by (1/r)^2 - 1:
 
 | Tray | Open-area retention | Dry-tray dP increase |
 |---|---|---|
 | Sieve | 0.75 | +78% |
-| HyTrays Ripple | 0.85 | +38% |
-| Valve | 0.70 | +104% |
-| Dualflow | 0.92 | +18% |
-| High-Performance | 0.80 | +56% |
+| HT-01A Hinge | 0.70 | +104% |
+| HT-01B Spring | 0.78 | +64% |
+| HT-01C LipSeal | 0.78 | +64% |
+| HT-02 CVS | 0.80 | +56% |
+| HT-03 GRADEX | 0.75 | +78% |
+| HT-05 PULSAR | 0.95 | +11% |
 
-Dualflow's large, simple perforations lose the least relative open area (+18% dP), keeping it usable far longer between cleanings, while a plain Sieve tray's dry-tray dP rises by roughly 78% and a Valve tray's by 104% (small holes/slots, moving parts), signaling much faster fouling-driven capacity loss. HyTrays Ripple (+38%, placeholder) sits between the two extremes.
+The most fouling-tolerant tray here is **HT-05 PULSAR** (retention 0.95, only +11% dry-tray dP as deposits build), keeping it usable far longer between cleanings -- by design for HT-05 PULSAR, whose self-sweeping jet and lack of moving parts resist plugging. The least tolerant is **HT-01A Hinge** (+104%; crevices/moving parts), while the plain Sieve baseline rises by roughly 78%. The adaptive HT-01 hinge/lip decks sit lower than PULSAR because their moving flaps and lips offer more crevices for deposits.
 
 ### 4.3 Vacuum Tower Section
 
 | Tray | Diameter (ft) | u_nf (ft/s) | dP/tray (psi) | DC backup (% lim) | Operating window (% design) | Turndown | Eff (%) | N_actual | Height (ft) | Total dP (psi) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Sieve | 8.84 | 9.67 | 0.1050 | 37 | 62-125 | 2.00:1 | 45.9 | 18 | 55.0 | 1.891 |
-| HyTrays Ripple | 8.32 | 10.64 | 0.0950 | 34 | 44-125 | 2.86:1 | 49.5 | 17 | 52.5 | 1.614 |
-| Valve | 8.84 | 9.67 | 0.0641 | 26 | 38-125 | 3.33:1 | 45.9 | 18 | 55.0 | 1.154 |
-| Dualflow | 7.28 | 11.13 | 0.0328 | n/a | 81-125 | 1.54:1 | 39.0 | 21 | 62.5 | 0.689 |
-| High-Performance | 7.57 | 12.09 | 0.0675 | 25 | 50-125 | 2.50:1 | 44.5 | 18 | 55.0 | 1.215 |
+| HT-01A Hinge | 8.52 | 10.16 | 0.0735 | 28 | 10-125 | 12.50:1 | 48.1 | 17 | 52.5 | 1.249 |
+| HT-01B Spring | 8.52 | 10.16 | 0.0800 | 30 | 11-125 | 11.11:1 | 48.1 | 17 | 52.5 | 1.360 |
+| HT-01C LipSeal | 8.29 | 10.45 | 0.0692 | 27 | 48-125 | 2.63:1 | 46.8 | 18 | 55.0 | 1.245 |
+| HT-02 CVS | 7.02 | 15.96 | 0.1039 | 38 | 50-125 | 2.50:1 | 45.9 | 18 | 55.0 | 1.870 |
+| HT-03 GRADEX | 7.87 | 11.61 | 0.0931 | 34 | 38-125 | 3.33:1 | 51.4 | 16 | 50.0 | 1.489 |
+| HT-05 PULSAR | 8.52 | 10.16 | 0.0914 | 34 | 31-125 | 4.00:1 | 50.4 | 16 | 50.0 | 1.463 |
 
-With rho_V = 0.06 lb/ft3, superficial velocities and diameters are large for all trays (7.3-8.8 ft). Per-tray dP is what matters most here: Dualflow is lowest (32.8 mpsi), Valve and High-Performance follow (64.1 and 67.5 mpsi) on the strength of their higher discharge coefficients (C0 = 0.85 / 0.80 vs 0.73-0.74 for Sieve/Ripple), while Sieve and Ripple run highest at 95-105 mpsi/tray -- multiplied over a real vacuum tower's tray count this difference is what drives vacuum-service designs toward higher-C0 or grid/high-capacity internals.
+With rho_V = 0.06 lb/ft3, superficial velocities and diameters are large for all trays (7.0-8.8 ft). Per-tray dP is what matters most here, because every inch of tray dP raises the flash-zone temperature. The lowest per-tray dP is **HT-01C LipSeal** (69.2 mpsi, C0 = 0.78) and the highest is **Sieve** (105 mpsi, C0 = 0.73). The HT-series decks with higher discharge coefficients (HT-02 CVS swirl tubes, HT-03 GRADEX push valves) hold the per-tray dP down, while low-C0 sieve-like decks run highest -- multiplied over a real vacuum tower's tray count, that gap is what drives vacuum-service designs toward higher-C0 or high-capacity internals.
 
 ### 4.4 High-Pressure / High-Liquid-Load Service (C3/C4 splitter)
 
 | Tray | Diameter (ft) | u_nf (ft/s) | dP/tray (psi) | DC backup (% lim) | Operating window (% design) | Turndown | Eff (%) | N_actual | Height (ft) | Total dP (psi) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Sieve | 9.38 | 0.48 | 0.0513 | 43 | 62-125 | 2.00:1 | 84.7 | 48 | 106.0 | 2.463 |
-| HyTrays Ripple | 8.83 | 0.53 | 0.0440 | 41 | 44-125 | 2.86:1 | 91.5 | 44 | 98.0 | 1.937 |
-| Valve | 9.38 | 0.48 | 0.0518 | 43 | 38-125 | 3.33:1 | 84.7 | 48 | 106.0 | 2.485 |
-| Dualflow | 7.72 | 0.56 | 0.0085 | n/a | 81-125 | 1.54:1 | 72.0 | 56 | 122.0 | 0.475 |
-| High-Performance | 8.03 | 0.60 | 0.0398 | 40 | 50-125 | 2.50:1 | 82.1 | 49 | 108.0 | 1.949 |
+| HT-01A Hinge | 9.04 | 0.51 | 0.0494 | 42 | 10-125 | 12.50:1 | 88.9 | 45 | 100.0 | 2.221 |
+| HT-01B Spring | 9.04 | 0.51 | 0.0499 | 43 | 11-125 | 11.11:1 | 88.9 | 45 | 100.0 | 2.246 |
+| HT-01C LipSeal | 8.80 | 0.52 | 0.0434 | 40 | 48-125 | 2.63:1 | 86.4 | 47 | 104.0 | 2.038 |
+| HT-02 CVS | 7.45 | 0.80 | 0.0514 | 47 | 50-125 | 2.50:1 | 84.7 | 48 | 106.0 | 2.467 |
+| HT-03 GRADEX | 8.35 | 0.58 | 0.0448 | 42 | 38-125 | 3.33:1 | 94.8 | 43 | 96.0 | 1.927 |
+| HT-05 PULSAR | 9.04 | 0.51 | 0.0509 | 43 | 31-125 | 4.00:1 | 93.1 | 43 | 96.0 | 2.187 |
 
-FLV = 0.535 (high, liquid-dominated). Downcomer backup margins shrink markedly versus the General case (43% vs 34% for Sieve) because the smaller diameters needed for high-capacity trays shorten the weir, increasing the Francis-weir crest (h_ow) for the same liquid rate. All weired trays here still sit under the 50% limit, but with much less margin than the General case -- a real design at this FLV would likely need wider downcomers or a larger diameter than the flood-only sizing shown. **Dualflow is flagged as not recommended** for this service regardless of the numbers: with no downcomer, all the liquid must counter-flow through the same perforations as the vapor, which becomes the limiting mechanism at high liquid rates (Kister, *Distillation Operation*).
+FLV = 0.535 (high, liquid-dominated). Downcomer backup margins shrink markedly versus the General case (43% vs 34% for the Sieve baseline) because the smaller diameters needed for high-capacity trays shorten the weir, increasing the Francis-weir crest (h_ow) for the same liquid rate. The tightest downcomer margin here is **HT-02 CVS** (47% of the 50% limit) -- the high-capacity HT-series decks (e.g. HT-02 CVS) buy the smallest shell but pay for it in downcomer loading at high FLV. A real design at this FLV would likely need wider downcomers or a larger diameter than the flood-only sizing shown; the HT-04 DCX active downcomer module (see `NON_DECK_MODULES`) is aimed squarely at this high-weir-loading regime.
 
 ### 4.5 Foaming Service
 
 | Tray | Diameter (ft) | u_nf (ft/s) | dP/tray (psi) | DC backup (% lim) | Operating window (% design) | Turndown | Eff (%) | N_actual | Height (ft) | Total dP (psi) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Sieve | 5.07 | 1.14 | 0.0418 | 28 | 62-125 | 2.00:1 | 76.2 | 27 | 64.0 | 1.130 |
-| HyTrays Ripple | 4.77 | 1.25 | 0.0350 | 24 | 44-125 | 2.86:1 | 82.3 | 25 | 60.0 | 0.875 |
-| Valve | 5.07 | 1.14 | 0.0322 | 23 | 38-125 | 3.33:1 | 76.2 | 27 | 64.0 | 0.870 |
-| Dualflow | 4.17 | 1.31 | 0.0126 | n/a | 81-125 | 1.54:1 | 64.8 | 31 | 72.0 | 0.390 |
-| High-Performance | 4.34 | 1.42 | 0.0257 | 19 | 50-125 | 2.50:1 | 73.9 | 28 | 66.0 | 0.721 |
+| HT-01A Hinge | 4.88 | 1.19 | 0.0345 | 24 | 10-125 | 12.50:1 | 80.0 | 26 | 62.0 | 0.898 |
+| HT-01B Spring | 4.88 | 1.19 | 0.0361 | 25 | 11-125 | 11.11:1 | 80.0 | 26 | 62.0 | 0.937 |
+| HT-01C LipSeal | 4.75 | 1.23 | 0.0295 | 21 | 48-125 | 2.63:1 | 77.7 | 26 | 62.0 | 0.766 |
+| HT-02 CVS | 4.02 | 1.88 | 0.0406 | 28 | 50-125 | 2.50:1 | 76.2 | 27 | 64.0 | 1.095 |
+| HT-03 GRADEX | 4.51 | 1.37 | 0.0347 | 24 | 38-125 | 3.33:1 | 85.3 | 24 | 58.0 | 0.833 |
+| HT-05 PULSAR | 4.88 | 1.19 | 0.0387 | 26 | 31-125 | 4.00:1 | 83.8 | 24 | 58.0 | 0.930 |
 
-Applying Kister's moderate-foam system factor (Fp = 0.75) derates every tray's flooding velocity equally, so diameters grow by 1/sqrt(Fp) = 1.15x relative to the General case (e.g. Sieve 4.39 -> 5.07 ft) for every tray type -- the relative ranking by capacity is unchanged. The differentiator in foaming service is froth intensity: trays with a lower aeration factor (Dualflow 0.40, HyTrays Ripple/High-Performance 0.50) generate less aerated froth for the same clear-liquid height and are generally more foam-tolerant than Sieve/Valve (0.55).
+Applying Kister's moderate-foam system factor (Fp = 0.75) derates every tray's flooding velocity equally, so diameters grow by 1/sqrt(Fp) = 1.15x relative to the General case (e.g. Sieve 4.39 -> 5.07 ft) for every tray type -- the relative ranking by capacity is unchanged. The differentiator in foaming service is froth intensity: trays with a lower aeration factor generate less aerated froth for the same clear-liquid height and are generally more foam-tolerant. The lowest here is **HT-02 CVS** (aeration 0.50) and the highest is **Sieve** (0.55); the capacity-oriented HT-series decks (HT-02 CVS, HT-03 GRADEX) run leaner froth than the adaptive sieve-like HT-01 decks.
 
 ## 5. Tray selection guidance matrix
 
@@ -120,31 +136,35 @@ Rank 1 = best, 5 = worst, by the metric noted for each service (footnotes below)
 
 | Tray | General [1] | Fouling [2] | Vacuum [3] | High-P/High-L [4] | Foaming [5] |
 |---|---|---|---|---|---|
-| Sieve | 5 (1.5) | 4 (0.75) | 5 (0.105) | 3 (42.7) | 4 (0.55) |
-| HyTrays Ripple | 4 (1.21) | 2 (0.85) | 4 (0.095) | 2 (40.9) | 2 (0.5) |
-| Valve | 3 (1.04) | 5 (0.7) | 2 (0.0641) | 4 (42.9) | 5 (0.55) |
-| Dualflow | 1 (0.526) | 1 (0.92) | 1 (0.0328) | 5 (n/a) | 1 (0.4) |
-| High-Performance | 2 (0.983) | 3 (0.8) | 3 (0.0675) | 1 (40.3) | 3 (0.5) |
+| Sieve | 7 (1.5) | 5 (0.75) | 7 (0.105) | 5 (42.7) | 4 (0.55) |
+| HT-01A Hinge | 2 (1.11) | 7 (0.7) | 2 (0.0735) | 2 (42.3) | 5 (0.55) |
+| HT-01B Spring | 4 (1.18) | 3 (0.78) | 3 (0.08) | 4 (42.5) | 6 (0.55) |
+| HT-01C LipSeal | 1 (0.989) | 4 (0.78) | 1 (0.0692) | 1 (40.1) | 3 (0.52) |
+| HT-02 CVS | 6 (1.47) | 2 (0.8) | 6 (0.104) | 7 (47.3) | 1 (0.5) |
+| HT-03 GRADEX | 3 (1.15) | 6 (0.75) | 5 (0.0931) | 3 (42.4) | 2 (0.5) |
+| HT-05 PULSAR | 5 (1.2) | 1 (0.95) | 4 (0.0914) | 6 (43) | 7 (0.55) |
 
 [1] **General** (General Rectification (T801 basis)): Lower total column dP across the N_actual trays needed for the target separation (psi).
 [2] **Fouling** (Fouling / Heavy-Ends Service): Higher fouling open-area retention -> smaller dry-tray dP increase as deposits build up (see fouling sensitivity figure).
 [3] **Vacuum** (Vacuum Tower Section): Lower per-tray dP -- directly limits flash-zone temperature rise in vacuum service.
-[4] **High-P/High-L** (High-Pressure / High-Liquid-Load Service (C3/C4 splitter)): Lower downcomer backup (% of the 50%-of-spacing limit) at high FLV. Dualflow has no downcomer and is generally not recommended for high-liquid-rate services (Kister, Distillation Operation) -- ranked last regardless of the hydraulic numbers.
+[4] **High-P/High-L** (High-Pressure / High-Liquid-Load Service (C3/C4 splitter)): Lower downcomer backup (% of the 50%-of-spacing limit) at high FLV. All HT-series decks here are weired; the HT-04 DCX active-downcomer module (not rated by this engine) is the family's dedicated answer to high weir loading.
 [5] **Foaming** (Foaming Service): Lower aeration factor -> less intense froth generation -> generally more foam-tolerant.
 
 ## 6. Conclusions & limitations
 
-- **HyTrays Ripple** is competitive or best-in-class for General Rectification (smallest shell among weired trays, highest efficiency, shortest column) and has a favorable fouling profile between Sieve/Valve and Dualflow/High-Performance -- a good general-purpose upgrade from plain Sieve. *Its parameters are placeholders; replace them from the HyTrays datasheets once added to `HyTrays/Datasheets/` and re-run.*
-- **Dualflow** wins on raw capacity and per-tray dP (General, Vacuum, Fouling) but loses on efficiency/turndown and is not recommended for high-liquid-rate service.
-- **High-Performance** gives the smallest shell across the board and the lowest per-tray dP alongside Dualflow, with efficiency much closer to Sieve -- a strong default where shell diameter/capex dominates.
-- **Valve** matches Sieve's capacity but offers the widest turndown of the conventional designs -- preferred where the column must run efficiently over a wide load range, at the cost of being the most fouling-sensitive (smallest open area, moving parts).
-- **Sieve** remains the simplest/cheapest baseline but is dominated by HyTrays Ripple on every metric computed here.
+- **HT-02 CVS** (centrifugal swirl) wins on raw capacity -- the smallest shell across services and capacity decoupled from tray spacing -- making it the pick where shell diameter / plot space is the controlling constraint, at the cost of narrower turndown and tighter downcomer margins at high FLV.
+- **HT-03 GRADEX** (radially-graded push valves) is the efficiency lever, especially on large-diameter trays (Peclet/plug-flow gain), shortening the column where many stages are needed.
+- **HT-05 PULSAR** (fluidic oscillator) is the fouling specialist: the best open-area retention in the family with no moving parts, plus a useful efficiency bump -- the choice for deposit-forming service.
+- **HT-01A Hinge / HT-01B Spring** (adaptive flap decks) deliver the widest turndown in the family for columns that must run efficiently over a very wide load range; the spring variant trades a little turndown for robustness and better fouling resistance.
+- **HT-01C LipSeal** (check-valve lips) is the straightforward weep-resistant upgrade from plain sieve where mild turndown is the issue.
+- **Sieve** remains the simplest/cheapest baseline, included here only as the reference the HT-series factors are measured against.
+- The **DCX (HT-04)**, **VortiValve (HT-06)** and **AEGIS (HT-07)** family members are not standalone decks and are not rated here; DCX in particular targets the high-weir-loading regime exposed by the High-P/High-L service above.
 
 **Model limitations** -- read before using these numbers for anything beyond relative tray-type screening:
 - Fair's C_SBF curve fit is valid for FLV = 0.01-1.0 and tray spacing 6-24 in (the Vacuum case uses 30 in, slightly outside the fitted range, and the High-P/High-L case has FLV at the top of the range).
-- Turndown/weep is represented by each tray's literature-typical `min_load_frac`, not a first-principles weep-point correlation; entrainment is not explicitly modeled.
-- Dualflow's clear-liquid height is a fixed 1 in. placeholder (no overflow weir to apply the Francis equation to) -- its dP and downcomer-backup columns should be read as indicative only.
-- All `HyTrays Ripple` and `fouling_open_area_retention` values are engineering placeholders pending vendor/manufacturer data.
+- Turndown/weep is represented by each tray's datasheet-derived `min_load_frac`, not a first-principles weep-point correlation; entrainment is not explicitly modeled.
+- The HT-series decks are modeled as single bubbling decks on a standard weir/downcomer layout; device-specific physics (centrifugal swirl, fluidic oscillation, adaptive-flap dynamics) are folded into the capacity / efficiency / turndown / open-area factors rather than resolved mechanistically.
+- All HT-series parameters are engineering estimates derived from the datasheets in `HyTrays/Datasheets/` for *relative* screening -- refine against detailed vendor/test data before absolute design.
 
 ---
 *Generated by `HyTrays/run_service_comparison.py`. Edit `service_cases.py` (operating conditions per service) or `tray_library.py` (tray parameters) and re-run to update every table, figure and number in this report.*

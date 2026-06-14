@@ -2,9 +2,10 @@
 """HyTrays — numerical distillation-column tray comparison.
 
 Runs ``column_hydraulics.design_tray`` for each tray family in
-``tray_library.ALL_TRAYS`` (Sieve, HyTrays Ripple, Valve, Dualflow,
-High-Performance) on a single representative column section, then prints a
-comparison table and writes:
+``tray_library.ALL_TRAYS`` (the conventional Sieve baseline plus the six
+HT-series contacting decks: HT-01A Hinge, HT-01B Spring, HT-01C LipSeal,
+HT-02 CVS, HT-03 GRADEX and HT-05 PULSAR) on a single representative column
+section, then prints a comparison table and writes:
 
     HyTrays/output/tray_comparison.csv
     HyTrays/output/01_capacity_and_sizing.png
@@ -233,8 +234,23 @@ def make_plots(results: list[TrayDesignResult], out_dir: str) -> None:
 # ── markdown report ──────────────────────────────────────────────────────
 def write_report(results: list[TrayDesignResult], path: str) -> None:
     r_by_name = {r.tray.name: r for r in results}
-    sieve = r_by_name["Sieve"]
-    ripple = r_by_name["HyTrays Ripple"]
+    # Sieve is the conventional baseline (always present); the rest are the
+    # HT-series contacting decks. Everything below is derived from the results,
+    # so it adapts automatically if the tray list changes.
+    sieve = r_by_name.get("Sieve", results[0])
+    hytrays = [r for r in results if r is not sieve]
+
+    def best(rs, key, lowest=True):
+        return min(rs, key=key) if lowest else max(rs, key=key)
+
+    smallest = best(results, lambda r: r.diameter_ft, lowest=True)
+    biggest = best(results, lambda r: r.diameter_ft, lowest=False)
+    most_eff = best(results, lambda r: r.e_tray_pct, lowest=False)
+    widest = best(results, lambda r: r.turndown_ratio, lowest=False)
+    lowest_dp = best(results, lambda r: r.total_dp_psi, lowest=True)
+    hy_smallest = best(hytrays, lambda r: r.diameter_ft, lowest=True)
+    hy_most_eff = best(hytrays, lambda r: r.e_tray_pct, lowest=False)
+    hy_widest = best(hytrays, lambda r: r.turndown_ratio, lowest=False)
 
     lines = []
     a = lines.append
@@ -279,34 +295,28 @@ def write_report(results: list[TrayDesignResult], path: str) -> None:
 
     a("**Capacity / column diameter.** At the same vapor and liquid traffic"
       " and the same 80% design flood point, the required column diameter"
-      f" ranges from **{min(r.diameter_ft for r in results):.2f} ft**"
-      f" ({min(results, key=lambda r: r.diameter_ft).tray.name}) to"
-      f" **{max(r.diameter_ft for r in results):.2f} ft**"
-      f" ({max(results, key=lambda r: r.diameter_ft).tray.name})."
-      f" High-Performance and Dualflow trays need the least active area per"
-      " unit of vapor handled (capacity factors of "
-      f"{r_by_name['High-Performance'].tray.capacity_factor:.2f}x and"
-      f" {r_by_name['Dualflow'].tray.capacity_factor:.2f}x the sieve baseline,"
-      " plus little/no downcomer area), so they shrink the shell the most."
-      f" The new HyTrays Ripple deck comes in at"
-      f" {ripple.diameter_ft:.2f} ft -- about"
-      f" {(1 - ripple.diameter_ft / sieve.diameter_ft) * 100:.0f}% smaller"
-      " than a plain sieve tray -- from its"
-      f" {ripple.tray.capacity_factor:.2f}x capacity factor and slightly"
-      " larger active-area fraction.\n")
+      f" ranges from **{smallest.diameter_ft:.2f} ft**"
+      f" ({smallest.tray.name}) to"
+      f" **{biggest.diameter_ft:.2f} ft**"
+      f" ({biggest.tray.name}). The smallest shell belongs to"
+      f" **{smallest.tray.name}**, whose"
+      f" {smallest.tray.capacity_factor:.2f}x capacity factor (on Fair's"
+      " C_SBF) lets it handle the same vapor in the least active area. Among"
+      f" the HT-series decks, **{hy_smallest.tray.name}** gives the smallest"
+      f" shell ({hy_smallest.diameter_ft:.2f} ft -- about"
+      f" {(1 - hy_smallest.diameter_ft / sieve.diameter_ft) * 100:.0f}% smaller"
+      f" than the plain sieve baseline) from its"
+      f" {hy_smallest.tray.capacity_factor:.2f}x capacity factor.\n")
 
     a("**Pressure drop.** Per-tray pressure drop tracks hole velocity"
-      " (u_hole) and the dry-tray discharge coefficient. Valve trays show"
-      " the lowest *clean* dry-tray drop here because of their high"
-      f" discharge coefficient (C0={r_by_name['Valve'].tray.c0:.2f}); in"
-      " practice their floor (closed-valve weight, modeled as"
-      f" {r_by_name['Valve'].tray.dp_dry_floor_in:.2f} in. liquid) dominates"
-      " at low loads instead. Dualflow is lowest overall"
-      f" ({r_by_name['Dualflow'].dp_tray_psi*1000:.1f} mpsi/tray) because it"
-      " has no weir and a large open area. HyTrays Ripple"
-      f" ({ripple.dp_tray_psi*1000:.1f} mpsi/tray) sits in the middle of the"
-      " pack -- a modest premium over Dualflow/High-Performance for the"
-      " efficiency gain described below.\n")
+      " (u_hole) and the dry-tray discharge coefficient (C0). The lowest"
+      f" total column dP here is **{lowest_dp.tray.name}**"
+      f" ({lowest_dp.total_dp_psi:.2f} psi), a product of both its per-tray"
+      " drop and the number of trays its efficiency requires. The plain"
+      f" sieve baseline runs {sieve.dp_tray_psi*1000:.1f} mpsi/tray"
+      f" ({sieve.total_dp_psi:.2f} psi total); decks with higher discharge"
+      " coefficients (valve-/push-valve-style C0) cut the dry-tray component,"
+      " while those that add stages cut the *total* by needing fewer trays.\n")
 
     a("**Downcomer backup.** FLV is low in this case (vapor-dominated), so"
       " every tray with downcomers operates well inside its 50%-of-spacing"
@@ -315,63 +325,65 @@ def write_report(results: list[TrayDesignResult], path: str) -> None:
       " Downcomer area is not the limiting consideration for this section;"
       " flooding/entrainment (Fair capacity) governs sizing instead.\n")
 
-    a("**Turndown / operating window.** Bubble-cap-style decks and the"
-      " corrugated HyTrays Ripple deck retain liquid at low vapor rates and"
-      " resist weeping, giving the widest stable operating windows"
-      f" ({r_by_name['Valve'].turndown_ratio:.2f}:1 for Valve,"
-      f" {ripple.turndown_ratio:.2f}:1 for HyTrays Ripple)."
-      " Dualflow has the narrowest window"
-      f" ({r_by_name['Dualflow'].turndown_ratio:.2f}:1) because its large,"
-      " unweired perforations weep heavily as soon as vapor rate drops --"
-      " it needs a fairly steady load to stay efficient.\n")
+    a("**Turndown / operating window.** The adaptive HT-01 decks (living"
+      " hinge / leaf spring) follow the vapor load by opening and closing"
+      " their flaps, so they resist weeping far below the design rate and"
+      " post the widest stable operating windows. The widest here is"
+      f" **{widest.tray.name}** ({widest.turndown_ratio:.2f}:1); the widest"
+      f" HT-series deck is **{hy_widest.tray.name}**"
+      f" ({hy_widest.turndown_ratio:.2f}:1), versus"
+      f" {sieve.turndown_ratio:.2f}:1 for the plain sieve baseline."
+      " Capacity-oriented decks (centrifugal swirl) need a minimum vapor"
+      " rate to work and so have narrower windows.\n")
 
     a("**Efficiency & actual trays.** The O'Connell baseline efficiency for"
-      f" this system is **{sieve.e_oconnell_pct:.1f}%**. HyTrays Ripple's"
-      f" extra interfacial area from the corrugated deck"
-      f" ({ripple.tray.efficiency_factor:.2f}x factor) raises this to"
-      f" **{ripple.e_tray_pct:.1f}%**, the highest of the five -- for"
+      f" this system is **{sieve.e_oconnell_pct:.1f}%**. The highest"
+      f" effective efficiency here is **{most_eff.tray.name}** at"
+      f" **{most_eff.e_tray_pct:.1f}%** ({most_eff.tray.efficiency_factor:.2f}x"
+      f" factor); the best HT-series deck on this metric is"
+      f" **{hy_most_eff.tray.name}** ({hy_most_eff.e_tray_pct:.1f}%) -- for"
       f" {CASE.n_theoretical} theoretical stages it needs only"
-      f" **{ripple.n_actual_trays} actual trays** (column height"
-      f" {ripple.column_height_ft:.0f} ft), versus"
+      f" **{hy_most_eff.n_actual_trays} actual trays** (column height"
+      f" {hy_most_eff.column_height_ft:.0f} ft), versus"
       f" **{sieve.n_actual_trays} trays** ({sieve.column_height_ft:.0f} ft)"
-      " for a plain sieve tray and"
-      f" **{r_by_name['Dualflow'].n_actual_trays} trays**"
-      f" ({r_by_name['Dualflow'].column_height_ft:.0f} ft) for Dualflow,"
-      " whose lower contacting efficiency"
-      f" ({r_by_name['Dualflow'].tray.efficiency_factor:.2f}x) offsets its"
-      " low per-tray pressure drop once the whole column is added up:"
-      f" total column dP is {r_by_name['Dualflow'].total_dp_psi:.2f} psi for"
-      f" Dualflow vs {ripple.total_dp_psi:.2f} psi for HyTrays Ripple and"
-      f" {sieve.total_dp_psi:.2f} psi for plain sieve.\n")
+      " for a plain sieve tray. Higher contacting efficiency shortens the"
+      " column and, by needing fewer trays, usually lowers the total column"
+      " pressure drop as well.\n")
 
     a("## Summary / selection guidance\n")
-    a("- **Sieve** -- baseline. Cheapest per-tray hardware, but the"
-      " largest shell, the most trays for a given separation and the"
-      " worst turndown of the conventional designs.")
-    a("- **HyTrays Ripple** -- best overall balance in this case: smaller"
-      " shell than sieve/valve, the *highest* efficiency (fewest actual"
-      " trays / shortest column), a wide operating window, and total"
-      " column dP close to the High-Performance tray -- without the cost"
-      " or mechanical complexity of a multi-downcomer/grid design."
-      " *(Parameters are placeholders -- refine once the HyTrays Ripple"
-      " datasheets are added to `HyTrays/Datasheets/`.)*")
-    a("- **Valve** -- same shell diameter as sieve at design, but the"
-      " widest operating window of all five -- the right choice when the"
-      " column must run efficiently over a wide turndown range.")
-    a("- **Dualflow** -- smallest per-tray dP and a compact-ish shell, at"
-      " the cost of the lowest efficiency, the most actual trays/tallest"
-      " column, and a narrow operating window. Best suited to fouling or"
-      " high-liquid-load services that value simplicity over turndown.")
-    a("- **High-Performance** -- the smallest shell of all (lowest capex"
-      " on the column shell) with efficiency close to sieve; a strong"
-      " choice when plot space / shell diameter is the controlling"
-      " constraint.")
+    a("- **Sieve** (baseline, not a HyTrays product) -- cheapest per-tray"
+      " hardware, but the largest shell, the most trays for a given"
+      " separation and the worst turndown. Every HT-series deck below is"
+      " rated relative to it.")
+    a("- **HT-01A Hinge / HT-01B Spring** -- adaptive decks whose flaps"
+      " track the vapor load, giving the widest turndown in the family"
+      " (~12-15:1 / ~11:1); pick these where the column must run efficiently"
+      " across a very wide load range. The spring variant trades a little"
+      " turndown for lower stress and better robustness/fouling resistance.")
+    a("- **HT-01C LipSeal** -- depending check-valve lip deck; a >=30% wider"
+      " stable window than a plain sieve from its weep-sealing lips, a"
+      " straightforward upgrade from sieve where mild turndown is the issue.")
+    a("- **HT-02 CVS** -- centrifugal swirl deck; the highest capacity in"
+      " the family (smallest shell) and capacity decoupled from tray"
+      " spacing -- the choice when shell diameter / plot space dominates,"
+      " at the cost of narrower turndown.")
+    a("- **HT-03 GRADEX** -- radially-graded push-valve deck; the biggest"
+      " efficiency lever on large-diameter trays (Peclet/plug-flow gain),"
+      " shortening the column where many stages are needed.")
+    a("- **HT-05 PULSAR** -- fluidic-oscillator self-sweeping deck; modest"
+      " capacity/turndown but the best fouling resistance in the family and"
+      " a useful efficiency bump -- aimed at fouling-prone service.")
     a("")
+    a("> The DCX (HT-04 downcomer module), VortiValve (HT-06 inlet device)"
+      " and AEGIS (HT-07 structural overlay) family members are not"
+      " standalone contacting decks and so are not sized here -- see"
+      " `tray_library.NON_DECK_MODULES`.\n")
     a("---")
     a("*Generated by `HyTrays/run_tray_comparison.py`. Re-run after editing"
       " `CASE` in that file (operating conditions) or the tray parameters"
-      " in `HyTrays/tray_library.py` (e.g. once HyTrays Ripple datasheets"
-      " are available).*")
+      " in `HyTrays/tray_library.py`. HT-series parameters are derived from"
+      " the datasheets in `HyTrays/Datasheets/` and are engineering"
+      " estimates for relative screening.*")
 
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")

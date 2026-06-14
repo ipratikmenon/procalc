@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """HyTrays — tray selection study across services.
 
-Runs every tray family in ``tray_library.ALL_TRAYS`` (Sieve, HyTrays Ripple,
-Valve, Dualflow, High-Performance) against every service case in
-``service_cases.SERVICES`` (General Rectification, Fouling/Heavy-Ends,
-Vacuum, High-Pressure/High-Liquid-Load, Foaming) and assembles a
-"paper"-style write-up comparing the five tray types service by service.
+Runs every tray family in ``tray_library.ALL_TRAYS`` (the conventional Sieve
+baseline plus the six HT-series contacting decks: HT-01A Hinge, HT-01B
+Spring, HT-01C LipSeal, HT-02 CVS, HT-03 GRADEX and HT-05 PULSAR) against
+every service case in ``service_cases.SERVICES`` (General Rectification,
+Fouling/Heavy-Ends, Vacuum, High-Pressure/High-Liquid-Load, Foaming) and
+assembles a "paper"-style write-up comparing the tray types service by
+service.
 
 Outputs (``HyTrays/output/``)
 ------------------------------
@@ -140,7 +142,7 @@ def make_plots(all_results: dict[str, list[TrayDesignResult]], out_dir: str) -> 
     fig, ax = plt.subplots(figsize=(10, 5.5))
     grouped_bar(ax, all_results, lambda r: r.dc_backup_pct,
                 "Downcomer backup (% of 50% limit)",
-                "Downcomer backup by service & tray type (Dualflow has no downcomer)")
+                "Downcomer backup by service & tray type")
     ax.axhline(100, color="r", ls="--", lw=1)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "13_downcomer_backup_by_service.png"), dpi=140)
@@ -189,9 +191,9 @@ RANKING_SPECS = [
     ("High-Pressure / High-Liquid-Load Service (C3/C4 splitter)",
      lambda r: r.dc_backup_pct, True,
      "Lower downcomer backup (% of the 50%-of-spacing limit) at high FLV. "
-     "Dualflow has no downcomer and is generally not recommended for "
-     "high-liquid-rate services (Kister, Distillation Operation) -- ranked "
-     "last regardless of the hydraulic numbers."),
+     "All HT-series decks here are weired; the HT-04 DCX active-downcomer "
+     "module (not rated by this engine) is the family's dedicated answer to "
+     "high weir loading."),
     ("Foaming Service",
      lambda r: r.tray.aeration_factor, True,
      "Lower aeration factor -> less intense froth generation -> generally "
@@ -241,13 +243,18 @@ def write_report(all_results, matrix, path: str) -> None:
     a = a_lines.append
 
     a("# HyTrays Tray Selection Study -- Numerical Comparison Across Services\n")
-    a("Five tray families -- **Sieve, HyTrays Ripple, Valve, Dualflow and a "
-      "generic High-Performance tray** -- are sized and rated with the Fair"
-      "-correlation tray-hydraulics engine in `column_hydraulics.py` across "
-      "five representative distillation services. The goal is to make the "
-      "trade-offs that drive tray selection (capacity, pressure drop, "
+    a("The conventional **Sieve** baseline and the six HyTrays HT-series "
+      "contacting decks -- **HT-01A Hinge, HT-01B Spring, HT-01C LipSeal, "
+      "HT-02 CVS, HT-03 GRADEX and HT-05 PULSAR** -- are sized and rated with "
+      "the Fair-correlation tray-hydraulics engine in `column_hydraulics.py` "
+      "across five representative distillation services. The goal is to make "
+      "the trade-offs that drive tray selection (capacity, pressure drop, "
       "downcomer backup, turndown and fouling resistance) explicit and "
       "reproducible.\n")
+    a("> The DCX (HT-04 downcomer module), VortiValve (HT-06 inlet device) and "
+      "AEGIS (HT-07 structural overlay) HT-series members are not standalone "
+      "contacting decks and so are not sized by this 1-D engine -- see "
+      "`tray_library.NON_DECK_MODULES`.\n")
 
     a("## 1. Tray types compared\n")
     a("| Tray | f_active | f_hole | h_weir (in) | C0 | Aeration factor |"
@@ -260,8 +267,10 @@ def write_report(all_results, matrix, path: str) -> None:
           f" {t.efficiency_factor:.2f} | {t.min_load_frac:.2f} |"
           f" {t.fouling_open_area_retention:.2f} |")
     a("")
-    a("> *HyTrays Ripple parameters are placeholders pending the datasheets "
-      "in `HyTrays/Datasheets/` -- update and re-run once available.*\n")
+    a("> *HT-series parameters are derived from the datasheets in "
+      "`HyTrays/Datasheets/` and are engineering estimates for relative "
+      "screening -- refine against detailed vendor/test data before absolute "
+      "design.*\n")
 
     a("## 2. Services evaluated\n")
     a("| Service | V (lb/hr) | L (lb/hr) | rho_V (lb/ft3) | rho_L (lb/ft3) |"
@@ -290,20 +299,26 @@ def write_report(all_results, matrix, path: str) -> None:
     # -- General --------------------------------------------------------
     gen = all_results["General Rectification (T801 basis)"]
     by = {r.tray.name: r for r in gen}
+    sieve = by.get("Sieve", gen[0])
+    hy = [r for r in gen if r is not sieve]
+    smallest = min(gen, key=lambda r: r.diameter_ft)
+    most_eff = max(gen, key=lambda r: r.e_tray_pct)
+    fewest = min(gen, key=lambda r: r.n_actual_trays)
+    lowest_total = min(gen, key=lambda r: r.total_dp_psi)
     a("### 4.1 General Rectification (T801 basis)\n")
     a("\n".join(results_table_md(gen)))
     a("")
-    a(f"FLV = {gen[0].flv:.3f} (vapor-dominated). HyTrays Ripple gives the "
-      f"smallest shell of the conventional weired trays ({by['HyTrays Ripple'].diameter_ft:.2f} ft "
-      f"vs {by['Sieve'].diameter_ft:.2f} ft for Sieve/Valve) **and** the "
-      f"highest efficiency ({by['HyTrays Ripple'].e_tray_pct:.1f}%), giving "
-      f"the shortest column ({by['HyTrays Ripple'].column_height_ft:.0f} ft, "
-      f"{by['HyTrays Ripple'].n_actual_trays} trays) and the lowest total dP "
-      f"after Dualflow/High-Performance "
-      f"({by['HyTrays Ripple'].total_dp_psi:.2f} psi vs "
-      f"{by['Sieve'].total_dp_psi:.2f} psi for Sieve). Dualflow needs the "
-      f"most trays ({by['Dualflow'].n_actual_trays}) due to its lower "
-      f"contacting efficiency.\n")
+    a(f"FLV = {gen[0].flv:.3f} (vapor-dominated). The smallest shell is "
+      f"**{smallest.tray.name}** ({smallest.diameter_ft:.2f} ft vs "
+      f"{sieve.diameter_ft:.2f} ft for the Sieve baseline), and the highest "
+      f"efficiency is **{most_eff.tray.name}** ({most_eff.e_tray_pct:.1f}%), "
+      f"giving the shortest column ({fewest.tray.name}: "
+      f"{fewest.column_height_ft:.0f} ft, {fewest.n_actual_trays} trays). The "
+      f"lowest total column dP is **{lowest_total.tray.name}** "
+      f"({lowest_total.total_dp_psi:.2f} psi vs {sieve.total_dp_psi:.2f} psi "
+      f"for Sieve). Across the HT-series decks the efficiency uplift "
+      f"(HT-03 GRADEX / HT-05 PULSAR) and capacity (HT-02 CVS) are the main "
+      f"levers in this clean, vapor-dominated service.\n")
 
     # -- Fouling ----------------------------------------------------------
     foul = all_results["Fouling / Heavy-Ends Service"]
@@ -322,14 +337,21 @@ def write_report(all_results, matrix, path: str) -> None:
         pct = ((1.0 / t.fouling_open_area_retention) ** 2 - 1.0) * 100.0
         a(f"| {t.name} | {t.fouling_open_area_retention:.2f} | +{pct:.0f}% |")
     a("")
-    a(f"Dualflow's large, simple perforations lose the least relative open "
-      f"area (+{((1/0.92)**2-1)*100:.0f}% dP), keeping it usable far longer "
-      f"between cleanings, while a plain Sieve tray's dry-tray dP rises by "
-      f"roughly {((1/0.75)**2-1)*100:.0f}% and a Valve tray's by "
-      f"{((1/0.70)**2-1)*100:.0f}% (small holes/slots, moving parts), "
-      f"signaling much faster fouling-driven capacity loss. HyTrays Ripple "
-      f"(+{((1/0.85)**2-1)*100:.0f}%, placeholder) sits between the two "
-      f"extremes.\n")
+    best_foul = max(ALL_TRAYS, key=lambda t: t.fouling_open_area_retention)
+    worst_foul = min(ALL_TRAYS, key=lambda t: t.fouling_open_area_retention)
+    sieve_t = next((t for t in ALL_TRAYS if t.name == "Sieve"), ALL_TRAYS[0])
+    a(f"The most fouling-tolerant tray here is **{best_foul.name}** "
+      f"(retention {best_foul.fouling_open_area_retention:.2f}, only "
+      f"+{((1/best_foul.fouling_open_area_retention)**2-1)*100:.0f}% dry-tray "
+      f"dP as deposits build), keeping it usable far longer between cleanings "
+      f"-- by design for HT-05 PULSAR, whose self-sweeping jet and lack of "
+      f"moving parts resist plugging. The least tolerant is "
+      f"**{worst_foul.name}** "
+      f"(+{((1/worst_foul.fouling_open_area_retention)**2-1)*100:.0f}%; "
+      f"crevices/moving parts), while the plain Sieve baseline rises by "
+      f"roughly {((1/sieve_t.fouling_open_area_retention)**2-1)*100:.0f}%. "
+      f"The adaptive HT-01 hinge/lip decks sit lower than PULSAR because "
+      f"their moving flaps and lips offer more crevices for deposits.\n")
 
     # -- Vacuum -------------------------------------------------------------
     vac = all_results["Vacuum Tower Section"]
@@ -337,23 +359,21 @@ def write_report(all_results, matrix, path: str) -> None:
     a("### 4.3 Vacuum Tower Section\n")
     a("\n".join(results_table_md(vac)))
     a("")
+    low_dp = min(vac, key=lambda r: r.dp_tray_psi)
+    high_dp = max(vac, key=lambda r: r.dp_tray_psi)
     a(f"With rho_V = {VACUUM_RHO_V} lb/ft3, superficial velocities and "
       f"diameters are large for all trays ({min(r.diameter_ft for r in vac):.1f}-"
       f"{max(r.diameter_ft for r in vac):.1f} ft). Per-tray dP is what "
-      f"matters most here: Dualflow is lowest "
-      f"({by['Dualflow'].dp_tray_psi*1000:.1f} mpsi), Valve and "
-      f"High-Performance follow "
-      f"({by['Valve'].dp_tray_psi*1000:.1f} and "
-      f"{by['High-Performance'].dp_tray_psi*1000:.1f} mpsi) on the strength of "
-      f"their higher discharge coefficients (C0 = {by['Valve'].tray.c0:.2f} / "
-      f"{by['High-Performance'].tray.c0:.2f} vs "
-      f"{by['Sieve'].tray.c0:.2f}-{by['HyTrays Ripple'].tray.c0:.2f} for "
-      f"Sieve/Ripple), while Sieve and Ripple run highest at "
-      f"{by['HyTrays Ripple'].dp_tray_psi*1000:.0f}-"
-      f"{by['Sieve'].dp_tray_psi*1000:.0f} mpsi/tray -- multiplied over a real "
-      f"vacuum tower's tray count this difference is what drives "
-      f"vacuum-service designs toward higher-C0 or grid/high-capacity "
-      f"internals.\n")
+      f"matters most here, because every inch of tray dP raises the flash-zone "
+      f"temperature. The lowest per-tray dP is **{low_dp.tray.name}** "
+      f"({low_dp.dp_tray_psi*1000:.1f} mpsi, C0 = {low_dp.tray.c0:.2f}) and "
+      f"the highest is **{high_dp.tray.name}** "
+      f"({high_dp.dp_tray_psi*1000:.0f} mpsi, C0 = {high_dp.tray.c0:.2f}). The "
+      f"HT-series decks with higher discharge coefficients (HT-02 CVS swirl "
+      f"tubes, HT-03 GRADEX push valves) hold the per-tray dP down, while "
+      f"low-C0 sieve-like decks run highest -- multiplied over a real vacuum "
+      f"tower's tray count, that gap is what drives vacuum-service designs "
+      f"toward higher-C0 or high-capacity internals.\n")
 
     # -- High-P/High-L ------------------------------------------------------
     hpl = all_results["High-Pressure / High-Liquid-Load Service (C3/C4 splitter)"]
@@ -361,20 +381,23 @@ def write_report(all_results, matrix, path: str) -> None:
     a("### 4.4 High-Pressure / High-Liquid-Load Service (C3/C4 splitter)\n")
     a("\n".join(results_table_md(hpl)))
     a("")
+    sieve_hpl = by.get("Sieve", hpl[0])
+    sieve_gen = next((r for r in gen if r.tray.name == "Sieve"), gen[0])
+    worst_dc = max((r for r in hpl if r.dc_backup_pct is not None),
+                   key=lambda r: r.dc_backup_pct)
     a(f"FLV = {hpl[0].flv:.3f} (high, liquid-dominated). Downcomer backup "
       f"margins shrink markedly versus the General case "
-      f"({by['Sieve'].dc_backup_pct:.0f}% vs "
-      f"{[r.dc_backup_pct for r in gen if r.tray.name=='Sieve'][0]:.0f}% for "
-      f"Sieve) because the smaller diameters needed for high-capacity trays "
-      f"shorten the weir, increasing the Francis-weir crest (h_ow) for the "
-      f"same liquid rate. All weired trays here still sit under the 50% "
-      f"limit, but with much less margin than the General case -- a real "
-      f"design at this FLV would likely need wider downcomers or a larger "
-      f"diameter than the flood-only sizing shown. **Dualflow is flagged as "
-      f"not recommended** for this service regardless of the numbers: with "
-      f"no downcomer, all the liquid must counter-flow through the same "
-      f"perforations as the vapor, which becomes the limiting mechanism at "
-      f"high liquid rates (Kister, *Distillation Operation*).\n")
+      f"({sieve_hpl.dc_backup_pct:.0f}% vs {sieve_gen.dc_backup_pct:.0f}% for "
+      f"the Sieve baseline) because the smaller diameters needed for "
+      f"high-capacity trays shorten the weir, increasing the Francis-weir "
+      f"crest (h_ow) for the same liquid rate. The tightest downcomer margin "
+      f"here is **{worst_dc.tray.name}** ({worst_dc.dc_backup_pct:.0f}% of the "
+      f"50% limit) -- the high-capacity HT-series decks (e.g. HT-02 CVS) buy "
+      f"the smallest shell but pay for it in downcomer loading at high FLV. A "
+      f"real design at this FLV would likely need wider downcomers or a larger "
+      f"diameter than the flood-only sizing shown; the HT-04 DCX active "
+      f"downcomer module (see `NON_DECK_MODULES`) is aimed squarely at this "
+      f"high-weir-loading regime.\n")
 
     # -- Foaming --------------------------------------------------------------
     foam = all_results["Foaming Service"]
@@ -383,19 +406,24 @@ def write_report(all_results, matrix, path: str) -> None:
     a("### 4.5 Foaming Service\n")
     a("\n".join(results_table_md(foam)))
     a("")
+    sieve_foam = by.get("Sieve", foam[0])
+    sieve_gen2 = gen_by.get("Sieve", gen[0])
+    low_aer = min(foam, key=lambda r: r.tray.aeration_factor)
+    high_aer = max(foam, key=lambda r: r.tray.aeration_factor)
     a(f"Applying Kister's moderate-foam system factor (Fp = "
       f"{FOAMING_SYSTEM_FACTOR:.2f}) derates every tray's flooding velocity "
       f"equally, so diameters grow by 1/sqrt(Fp) = "
       f"{1/FOAMING_SYSTEM_FACTOR**0.5:.2f}x relative to the General case "
-      f"(e.g. Sieve {gen_by['Sieve'].diameter_ft:.2f} -> "
-      f"{by['Sieve'].diameter_ft:.2f} ft) for every tray type -- the relative "
+      f"(e.g. Sieve {sieve_gen2.diameter_ft:.2f} -> "
+      f"{sieve_foam.diameter_ft:.2f} ft) for every tray type -- the relative "
       f"ranking by capacity is unchanged. The differentiator in foaming "
       f"service is froth intensity: trays with a lower aeration factor "
-      f"(Dualflow {by['Dualflow'].tray.aeration_factor:.2f}, HyTrays Ripple/"
-      f"High-Performance {by['HyTrays Ripple'].tray.aeration_factor:.2f}) "
-      f"generate less aerated froth for the same clear-liquid height and "
-      f"are generally more foam-tolerant than Sieve/Valve "
-      f"({by['Sieve'].tray.aeration_factor:.2f}).\n")
+      f"generate less aerated froth for the same clear-liquid height and are "
+      f"generally more foam-tolerant. The lowest here is **{low_aer.tray.name}** "
+      f"(aeration {low_aer.tray.aeration_factor:.2f}) and the highest is "
+      f"**{high_aer.tray.name}** ({high_aer.tray.aeration_factor:.2f}); the "
+      f"capacity-oriented HT-series decks (HT-02 CVS, HT-03 GRADEX) run leaner "
+      f"froth than the adaptive sieve-like HT-01 decks.\n")
 
     a("## 5. Tray selection guidance matrix\n")
     a("Rank 1 = best, 5 = worst, by the metric noted for each service "
@@ -418,26 +446,30 @@ def write_report(all_results, matrix, path: str) -> None:
     a("")
 
     a("## 6. Conclusions & limitations\n")
-    a("- **HyTrays Ripple** is competitive or best-in-class for General "
-      "Rectification (smallest shell among weired trays, highest "
-      "efficiency, shortest column) and has a favorable fouling profile "
-      "between Sieve/Valve and Dualflow/High-Performance -- a good general-"
-      "purpose upgrade from plain Sieve. *Its parameters are placeholders; "
-      "replace them from the HyTrays datasheets once added to "
-      "`HyTrays/Datasheets/` and re-run.*")
-    a("- **Dualflow** wins on raw capacity and per-tray dP (General, "
-      "Vacuum, Fouling) but loses on efficiency/turndown and is not "
-      "recommended for high-liquid-rate service.")
-    a("- **High-Performance** gives the smallest shell across the board "
-      "and the lowest per-tray dP alongside Dualflow, with efficiency much "
-      "closer to Sieve -- a strong default where shell diameter/capex "
-      "dominates.")
-    a("- **Valve** matches Sieve's capacity but offers the widest turndown "
-      "of the conventional designs -- preferred where the column must run "
-      "efficiently over a wide load range, at the cost of being the most "
-      "fouling-sensitive (smallest open area, moving parts).")
-    a("- **Sieve** remains the simplest/cheapest baseline but is dominated "
-      "by HyTrays Ripple on every metric computed here.")
+    a("- **HT-02 CVS** (centrifugal swirl) wins on raw capacity -- the "
+      "smallest shell across services and capacity decoupled from tray "
+      "spacing -- making it the pick where shell diameter / plot space is the "
+      "controlling constraint, at the cost of narrower turndown and tighter "
+      "downcomer margins at high FLV.")
+    a("- **HT-03 GRADEX** (radially-graded push valves) is the efficiency "
+      "lever, especially on large-diameter trays (Peclet/plug-flow gain), "
+      "shortening the column where many stages are needed.")
+    a("- **HT-05 PULSAR** (fluidic oscillator) is the fouling specialist: the "
+      "best open-area retention in the family with no moving parts, plus a "
+      "useful efficiency bump -- the choice for deposit-forming service.")
+    a("- **HT-01A Hinge / HT-01B Spring** (adaptive flap decks) deliver the "
+      "widest turndown in the family for columns that must run efficiently "
+      "over a very wide load range; the spring variant trades a little "
+      "turndown for robustness and better fouling resistance.")
+    a("- **HT-01C LipSeal** (check-valve lips) is the straightforward "
+      "weep-resistant upgrade from plain sieve where mild turndown is the "
+      "issue.")
+    a("- **Sieve** remains the simplest/cheapest baseline, included here only "
+      "as the reference the HT-series factors are measured against.")
+    a("- The **DCX (HT-04)**, **VortiValve (HT-06)** and **AEGIS (HT-07)** "
+      "family members are not standalone decks and are not rated here; DCX in "
+      "particular targets the high-weir-loading regime exposed by the "
+      "High-P/High-L service above.")
     a("")
     a("**Model limitations** -- read before using these numbers for "
       "anything beyond relative tray-type screening:")
@@ -445,14 +477,17 @@ def write_report(all_results, matrix, path: str) -> None:
       "spacing 6-24 in (the Vacuum case uses 30 in, slightly outside the "
       "fitted range, and the High-P/High-L case has FLV at the top of the "
       "range).")
-    a("- Turndown/weep is represented by each tray's literature-typical "
+    a("- Turndown/weep is represented by each tray's datasheet-derived "
       "`min_load_frac`, not a first-principles weep-point correlation; "
       "entrainment is not explicitly modeled.")
-    a("- Dualflow's clear-liquid height is a fixed 1 in. placeholder "
-      "(no overflow weir to apply the Francis equation to) -- its dP and "
-      "downcomer-backup columns should be read as indicative only.")
-    a("- All `HyTrays Ripple` and `fouling_open_area_retention` values are "
-      "engineering placeholders pending vendor/manufacturer data.")
+    a("- The HT-series decks are modeled as single bubbling decks on a "
+      "standard weir/downcomer layout; device-specific physics (centrifugal "
+      "swirl, fluidic oscillation, adaptive-flap dynamics) are folded into "
+      "the capacity / efficiency / turndown / open-area factors rather than "
+      "resolved mechanistically.")
+    a("- All HT-series parameters are engineering estimates derived from the "
+      "datasheets in `HyTrays/Datasheets/` for *relative* screening -- refine "
+      "against detailed vendor/test data before absolute design.")
     a("")
     a("---")
     a("*Generated by `HyTrays/run_service_comparison.py`. Edit "
