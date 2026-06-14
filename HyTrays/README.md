@@ -1,5 +1,15 @@
 # HyTrays
 
+## Apex concept (severe-service, step-change-capacity tray)
+
+`HyTrays_Apex_concept.md` is a design-concept memo for a flagship tray
+targeting extreme fouling resistance, a 2-5 psi structural (uplift) deck
+rating and ~2x ULTRA-FRAC-class capacity via co-current "vortex-grid" boost
+zones. It is a paper exercise (no parameters in `tray_library.py` yet) --
+see its Section 7 for the path to integrate it into the comparison engine
+once the open R&D questions (Sec. 6) have a basis. Supporting reference
+images are in `References/`.
+
 ## Datasheets
 
 Drop the HyTrays tray-family PDF/Excel datasheets (and the Ansys files,
