@@ -51,3 +51,39 @@ surface tension and relative volatility are **engineering estimates**
 those four values with simulator output for a fully rigorous case. Edit
 `CASE` in `run_tray_comparison.py` and re-run to evaluate other sections /
 services.
+
+## Multi-service tray selection study
+
+A second, broader comparison that sizes all five tray families against
+**five representative services** (general rectification, fouling/heavy-ends,
+vacuum, high-pressure/high-liquid-load, foaming) -- the classic
+tray-selection discriminators in Kister, *Distillation Operation* Ch. 1.
+Intended as the numerical backbone for a tray-selection paper/report.
+
+| File | Purpose |
+|---|---|
+| `service_cases.py` | The 5 `ColumnCase` definitions (one per service), incl. foaming system factor and fouling flag. |
+| `run_service_comparison.py` | Run script: sizes/rates all 5 tray types for all 5 services, prints per-service tables, and writes the CSV/plots/report below. |
+
+### Run it
+
+```bash
+cd HyTrays
+python3 run_service_comparison.py
+```
+
+### Output (`HyTrays/output/`)
+
+- `service_comparison.csv` -- full numeric results, one row per (service, tray)
+- `11_diameter_by_service.png` -- column diameter, all trays x all services
+- `12_total_dp_by_service.png` -- total column pressure drop, all trays x all services
+- `13_downcomer_backup_by_service.png` -- downcomer backup vs. the 50% limit
+- `14_turndown_by_service.png` -- operating-range turndown ratio
+- `15_fouling_sensitivity.png` -- dry-tray dP increase vs. open-area retention (flow-independent)
+- `tray_selection_study.md` -- full report: tray/service tables, cross-service
+  plots, per-service discussion and a tray-selection guidance matrix
+
+Only the General Rectification case is anchored to the T801 stream data
+above; the other four services use representative property sets so the
+five tray types can be compared on a common, reproducible basis -- edit
+`service_cases.py` to match a specific column once real data is available.

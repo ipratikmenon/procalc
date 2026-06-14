@@ -64,6 +64,12 @@ class ColumnCase:
     f_flood: float = 0.80   # design fraction of flooding velocity
     n_theoretical: int = 20  # theoretical stages for the actual-tray comparison
 
+    # ── service modifiers ───────────────────────────────────────────────
+    system_factor: float = 1.00  # foaming/system derate on Fair's u_nf (Kister Fp);
+                                  # 1.0 = non-foaming, ~0.75 = moderate foam, ~0.5-0.6 = severe foam
+    fouling: bool = False         # apply tray.fouling_open_area_retention to the hole area
+    description: str = ""         # one-line service description, used in reports
+
 
 @dataclass(frozen=True)
 class TrayDesignResult:
@@ -79,6 +85,7 @@ class TrayDesignResult:
     a_col_ft2: float
     diameter_ft: float
 
+    f_hole_eff: float        # effective hole-area fraction used (fouling-derated if case.fouling)
     u_hole_ft_s: float
     dp_dry_in: float        # dry-tray pressure drop, in. liquid
     h_ow_in: float          # weir crest (Francis), in. liquid
@@ -139,7 +146,8 @@ def design_tray(tray: TrayType, case: ColumnCase) -> TrayDesignResult:
     """
     flv = flow_parameter(case)
     csbf = csbf_fair(flv, case.tray_spacing_in)
-    u_nf = flooding_velocity(csbf, case.sigma, case.rho_v, case.rho_l) * tray.capacity_factor
+    u_nf = (flooding_velocity(csbf, case.sigma, case.rho_v, case.rho_l)
+            * tray.capacity_factor * case.system_factor)
     u_design = case.f_flood * u_nf
 
     v_dot_cfs = case.v_mass_lb_hr / 3600.0 / case.rho_v
@@ -148,7 +156,8 @@ def design_tray(tray: TrayType, case: ColumnCase) -> TrayDesignResult:
     diameter_ft = math.sqrt(4.0 * a_col / math.pi)
 
     # ── dry-tray pressure drop (orifice equation) ──────────────────────
-    a_hole = tray.f_hole * a_active
+    f_hole_eff = tray.f_hole * (tray.fouling_open_area_retention if case.fouling else 1.0)
+    a_hole = f_hole_eff * a_active
     u_hole = v_dot_cfs / a_hole
     dp_dry = 0.186 * (u_hole / tray.c0) ** 2 * (case.rho_v / case.rho_l)
     dp_dry = max(dp_dry, tray.dp_dry_floor_in)
@@ -198,7 +207,7 @@ def design_tray(tray: TrayType, case: ColumnCase) -> TrayDesignResult:
         tray=tray, case=case,
         flv=flv, csbf_ft_s=csbf, u_nf_ft_s=u_nf, u_design_ft_s=u_design,
         a_active_ft2=a_active, a_col_ft2=a_col, diameter_ft=diameter_ft,
-        u_hole_ft_s=u_hole, dp_dry_in=dp_dry, h_ow_in=h_ow, h_clear_in=h_clear,
+        f_hole_eff=f_hole_eff, u_hole_ft_s=u_hole, dp_dry_in=dp_dry, h_ow_in=h_ow, h_clear_in=h_clear,
         dp_tray_in=dp_tray_in, dp_tray_psi=dp_tray_psi,
         h_dc_in=h_dc, h_dc_limit_in=h_dc_limit, dc_backup_pct=dc_backup_pct,
         pct_flood_design=pct_flood_design, max_load_pct=max_load_pct,

@@ -60,6 +60,14 @@ class TrayType:
     efficiency_factor: float  # multiplier on O'Connell point efficiency
     min_load_frac: float      # min stable vapor load / flood-limited design load
 
+    # ── fouling resistance ───────────────────────────────────────────────
+    # Fraction of as-new hole/slot open area expected to remain available
+    # once typical service deposits have built up (qualitative, from the
+    # tray-selection guidance in Kister, *Distillation Operation* Ch.1:
+    # large simple round holes/grids resist plugging best, small holes and
+    # tray hardware with moving parts/crevices resist it least).
+    fouling_open_area_retention: float = 1.00
+
     has_downcomer: bool = True
 
 
@@ -70,6 +78,7 @@ SIEVE = TrayType(
     c0=0.73, dp_dry_floor_in=0.00,
     aeration_factor=0.55,
     capacity_factor=1.00, efficiency_factor=1.00, min_load_frac=0.50,
+    fouling_open_area_retention=0.75,
 )
 
 RIPPLE = TrayType(
@@ -81,6 +90,7 @@ RIPPLE = TrayType(
     c0=0.74, dp_dry_floor_in=0.00,
     aeration_factor=0.50,
     capacity_factor=1.10, efficiency_factor=1.08, min_load_frac=0.35,
+    fouling_open_area_retention=0.85,
 )
 
 VALVE = TrayType(
@@ -90,6 +100,7 @@ VALVE = TrayType(
     c0=0.85, dp_dry_floor_in=0.40,
     aeration_factor=0.55,
     capacity_factor=1.00, efficiency_factor=1.00, min_load_frac=0.30,
+    fouling_open_area_retention=0.70,
 )
 
 DUALFLOW = TrayType(
@@ -100,6 +111,7 @@ DUALFLOW = TrayType(
     c0=0.73, dp_dry_floor_in=0.00,
     aeration_factor=0.40,
     capacity_factor=1.15, efficiency_factor=0.85, min_load_frac=0.65,
+    fouling_open_area_retention=0.92,
     has_downcomer=False,
 )
 
@@ -111,6 +123,7 @@ HIGH_PERFORMANCE = TrayType(
     c0=0.80, dp_dry_floor_in=0.00,
     aeration_factor=0.50,
     capacity_factor=1.25, efficiency_factor=0.97, min_load_frac=0.40,
+    fouling_open_area_retention=0.80,
 )
 
 ALL_TRAYS: list[TrayType] = [SIEVE, RIPPLE, VALVE, DUALFLOW, HIGH_PERFORMANCE]
