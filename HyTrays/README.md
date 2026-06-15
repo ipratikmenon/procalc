@@ -151,3 +151,28 @@ python3 make_apex_drawings.py
 
 Re-run both scripts and refresh `HyTrays_Apex_Technical_Paper.md`'s copied
 tables/figures after any change to `tray_library.py` or `cost_model.py`.
+
+## PDF compendium (everything on Apex in one document)
+
+`build_apex_compendium.py` combines `HyTrays_Apex_concept.md` and
+`HyTrays_Apex_Technical_Paper.md` into a single indexed, print-ready PDF --
+cover page, two-level table of contents (with PDF bookmarks), both documents
+in full, every referenced figure, and every LaTeX equation typeset as an
+image (via matplotlib mathtext).
+
+### Run it
+
+```bash
+cd HyTrays
+python3 build_apex_compendium.py
+```
+
+Requires `markdown` and `weasyprint` (`pip install markdown weasyprint`).
+
+### Output (`HyTrays/output/`)
+
+- `HyTrays_Apex_Compendium.pdf` -- the combined PDF (Part I: Concept &
+  Scorecard, Part II: Technical Paper)
+- `pdf_equations/` -- cached PNG renders of each equation, used by the PDF
+
+Re-run after editing either source document to refresh the PDF.
