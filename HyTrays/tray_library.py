@@ -82,6 +82,19 @@ only the combined design point -- it cannot validate interaction effects
 between the combined mechanisms, so these numbers are a *first-pass synthesis
 estimate* pending CFD/pilot validation, more provisional than the individual
 HT-0X figures above.
+
+Conventional industry tray families -- Apex technical-paper benchmark
+------------------------------------------------------------------
+``DUALFLOW``, ``MOVING_VALVE``, ``FIXED_VALVE``, ``HIGH_PERFORMANCE`` and
+``RIPPLE`` are *not* HyTrays products. They represent the conventional decks
+an Apex deck is specified against in practice, parameterised the same way as
+``SIEVE`` (Kister, Lockett -- see above). Together with ``SIEVE`` and
+``APEX`` they form ``APEX_BENCHMARK_TRAYS``, the 7-tray comparison set used
+by ``run_apex_paper.py`` and ``HyTrays_Apex_Technical_Paper.md``. These five
+also carry a ``relative_unit_cost_factor`` (tray-hardware cost per unit deck
+area, relative to sieve) used by ``cost_model.py`` for that paper's
+installed-cost estimate; the HT-0X decks above default to 1.00
+(not yet estimated, out of scope for that comparison).
 """
 from __future__ import annotations
 
@@ -123,6 +136,15 @@ class TrayType:
     # large simple round holes/grids resist plugging best, small holes and
     # tray hardware with moving parts/crevices resist it least).
     fouling_open_area_retention: float = 1.00
+
+    # ── relative fabricated cost ────────────────────────────────────────
+    # First-order *tray-hardware* cost per unit of deck area, relative to
+    # the plain sieve (=1.00), capturing fabrication complexity (punched
+    # holes vs. stamped/cast moving valves vs. precision cartridges). Used
+    # only by ``cost_model.py`` / ``run_apex_paper.py`` for the Apex
+    # technical paper's installed-cost estimate; HT-0X entries default to
+    # 1.00 (not yet estimated -- out of scope for that comparison).
+    relative_unit_cost_factor: float = 1.00
 
     has_downcomer: bool = True
 
@@ -298,6 +320,13 @@ APEX = TrayType(
     capacity_factor=2.50, efficiency_factor=1.20, min_load_frac=0.045,
     fouling_open_area_retention=0.93,
     has_downcomer=True,
+    # First-order cost multiple (concept memo Section 8, open question #5):
+    # precision-formed swirl-tube/helical-sleeve cartridges, lip-seal
+    # secondary cartridges, GRADEX-graded perforation pattern and PULSAR
+    # oscillator-slot machining are all far more involved per unit deck area
+    # than any conventional tray's punched/stamped hardware -- roughly 2x the
+    # most complex conventional option (High-Performance MD, 1.55x) below.
+    relative_unit_cost_factor=3.20,
 )
 
 
@@ -359,3 +388,124 @@ NON_DECK_MODULES: list[NonDeckModule] = [
                        "distinct hydraulic fingerprint.",
     ),
 ]
+
+
+# ── Conventional industry tray families -- Apex technical-paper benchmark ────
+# These five families are *not* HyTrays products. They represent the
+# conventional tray types an Apex deck would be specified against in
+# practice, parameterised from the published ranges in Kister, *Distillation
+# Design* (1992) & *Distillation Operation* (1990) and Lockett, *Distillation
+# Tray Fundamentals* (1986) -- the same sources used for ``SIEVE`` above.
+# Together with ``SIEVE`` and ``APEX`` they form ``APEX_BENCHMARK_TRAYS``,
+# the comparison set used by ``run_apex_paper.py`` /
+# ``HyTrays_Apex_Technical_Paper.md``.
+DUALFLOW = TrayType(
+    name="Dual-Flow",
+    description="Perforated grid tray with no downcomers: vapour and liquid "
+                 "share the same large round holes (18-22% open area), liquid "
+                 "weeping continuously to the tray below. Simplest and "
+                 "cheapest tray geometry -- no weirs, no downcomer panels, no "
+                 "moving parts -- and the large open holes resist plugging "
+                 "well, making it a classic choice for dirty/fouling and "
+                 "slurry services. The cost is point efficiency (no directed "
+                 "cross-flow -- significant back-mixing) and a narrow stable "
+                 "range: below roughly 65% of design vapour rate the "
+                 "perforations can no longer support the liquid head and the "
+                 "tray dumps.",
+    f_active=1.00, f_hole=0.20, h_weir_in=0.0,
+    c0=0.73, dp_dry_floor_in=0.00,
+    aeration_factor=0.40,
+    capacity_factor=1.15, efficiency_factor=0.83, min_load_frac=0.65,
+    fouling_open_area_retention=0.90,
+    has_downcomer=False,
+    relative_unit_cost_factor=0.70,
+)
+
+MOVING_VALVE = TrayType(
+    name="Moving Valve",
+    description="Conventional round/rectangular moving-valve tray (e.g. "
+                 "Glitsch V-1/A-1, Koch Flexitray, Nutter float valve): "
+                 "stamped valve caps lift off a punched deck as vapour rate "
+                 "rises, directing vapour horizontally into the froth and "
+                 "closing under their own weight at low rate. The closing "
+                 "valves are the main turndown advantage over a fixed-hole "
+                 "sieve (no weeping until the last valves seat), at the cost "
+                 "of a dry-pressure-drop floor (valve weight) and more "
+                 "fouling-prone moving parts/legs/cages.",
+    f_active=0.78, f_hole=0.13, h_weir_in=2.0,
+    c0=0.85, dp_dry_floor_in=0.40,
+    aeration_factor=0.55,
+    capacity_factor=1.03, efficiency_factor=1.00, min_load_frac=0.30,
+    fouling_open_area_retention=0.70,
+    relative_unit_cost_factor=1.35,
+)
+
+FIXED_VALVE = TrayType(
+    name="Fixed Valve",
+    description="Fixed (non-moving) venturi-shaped valve tray (e.g. Nye "
+                 "tray, ConSep/Nutter fixed valve, V-Grid fixed): punched "
+                 "directional louvers/venturis with no moving parts. The "
+                 "shaped orifice gives a higher discharge coefficient and "
+                 "directs vapour horizontally (less entrainment, modest "
+                 "capacity gain over sieve) and the fixed geometry resists "
+                 "fouling far better than a moving valve, at the cost of the "
+                 "moving valve's deep turndown -- there is no closing "
+                 "mechanism, so the stable range is only modestly better than "
+                 "a plain sieve.",
+    f_active=0.78, f_hole=0.12, h_weir_in=2.0,
+    c0=0.80, dp_dry_floor_in=0.05,
+    aeration_factor=0.52,
+    capacity_factor=1.08, efficiency_factor=1.00, min_load_frac=0.45,
+    fouling_open_area_retention=0.85,
+    relative_unit_cost_factor=1.20,
+)
+
+HIGH_PERFORMANCE = TrayType(
+    name="High-Performance MD",
+    description="Generic high-capacity multi-downcomer tray (e.g. Glitsch "
+                 "MVG, Koch Flexitray HC, ConSep, V-Grid HC): 3-5 parallel "
+                 "downcomers shorten the liquid flow path across the deck, "
+                 "cutting the hydraulic gradient and letting the tray run "
+                 "closer to flood before liquid backs up. Active area is "
+                 "increased and weir height reduced relative to a 1-2-pass "
+                 "sieve/valve tray, buying ~20-30% more capacity at a modest "
+                 "efficiency cost (shorter residence time per pass) and "
+                 "significantly more fabrication complexity (more deck "
+                 "panels, downcomer aprons and support beams).",
+    f_active=0.85, f_hole=0.14, h_weir_in=1.0,
+    c0=0.80, dp_dry_floor_in=0.10,
+    aeration_factor=0.50,
+    capacity_factor=1.25, efficiency_factor=0.97, min_load_frac=0.40,
+    fouling_open_area_retention=0.75,
+    relative_unit_cost_factor=1.55,
+)
+
+RIPPLE = TrayType(
+    name="Ripple (Corrugated)",
+    description="Corrugated-deck sieve tray (e.g. Nutter Ripple Tray-class "
+                 "products): the perforated deck plate is formed into "
+                 "shallow ripples/corrugations running across the liquid "
+                 "flow path. The corrugations add interfacial area, break up "
+                 "bubble coalescence and improve liquid distribution at low "
+                 "rate (retaining a thin liquid film in the troughs even as "
+                 "the bulk level drops), giving a modest efficiency and "
+                 "turndown gain over a flat sieve deck for a relatively small "
+                 "fabrication cost increase (one extra forming step on an "
+                 "otherwise conventional punched deck panel).",
+    f_active=0.80, f_hole=0.11, h_weir_in=1.5,
+    c0=0.75, dp_dry_floor_in=0.00,
+    aeration_factor=0.50,
+    capacity_factor=1.10, efficiency_factor=1.10, min_load_frac=0.40,
+    fouling_open_area_retention=0.72,
+    relative_unit_cost_factor=1.15,
+)
+
+
+# Conventional benchmark set (Sieve + the five families above) and the full
+# Apex technical-paper comparison set (benchmark + Apex). Independent of
+# ALL_TRAYS / the HT-series reports above.
+CONVENTIONAL_TRAYS: list[TrayType] = [
+    SIEVE, DUALFLOW, MOVING_VALVE, FIXED_VALVE, HIGH_PERFORMANCE, RIPPLE,
+]
+
+APEX_BENCHMARK_TRAYS: list[TrayType] = CONVENTIONAL_TRAYS + [APEX]

@@ -296,7 +296,7 @@ rate. Flagged as a residual risk for very-high-FLV services in Section 8.
 | 5 | Fouling resistance -- near self-cleaning | `fouling_open_area_retention=0.93` (PULSAR=0.95 is family-best, Sieve=0.75) | **Met** | HT-05 PULSAR self-sweeping relief (3.4) + large chamfered slots; only +16% dry-tray dP increase when fouled (vs. Sieve's +78%, see fouling-sensitivity figure) |
 | 6 | Maintenance -- cartridge swap | *(architecture, not a numeric output)* | **Met by design** | HT-07 AEGIS-style bolt-in cartridge grid (3.5); not modeled by the 1-D engine |
 | 7 | Stability -- no weeping/dumping | `min_load_frac=0.045`; DC backup 17-54% across services, all within the 100% limit | **Met in the model's terms**, with one flagged margin | "No weeping" down to 4.5% load shares item 2's caveat; High-P/High-L DC backup at 54% is the *tightest* in the family (Section 6) |
-| 8 | Cost -- manufacturable at scale | *(architecture, not a numeric output)* | **Architecture claim -- open** | Repeatable stamped/cast cartridges + large fixed slots (3.5) plausibly help, but a first-order cost multiple vs. conventional decks is still needed (Section 8) |
+| 8 | Cost -- manufacturable at scale | Relative installed cost 0.64-0.66 vs. Sieve=1.00, across all five services, *despite* a 3.2x tray-hardware unit-cost multiple | **Met -- first-order positive result** | Resolved by the installed-cost model in `HyTrays_Apex_Technical_Paper.md` Section 8: the dominant shell-cost term (`D x H`) shrinks ~49% from the -39% diameter reduction (item 4), more than offsetting the 3.2x cartridge unit-cost multiple |
 | 9 | Control -- real-time adaptive | *(reframing, same params as item 2)* | **Reframed** | "Real-time adaptive" delivered as passive, zero-latency geometry (3.6) rather than sensors/actuators -- electronics would contradict items 5/6/8 |
 | 10 | Energy -- major reduction | Total column dP -45% to -58% vs. Sieve across all 5 services (Section 6) | **Met** | The most consistent win in the scorecard; lower column dP reduces reboiler-duty / recompression requirements in pressure-driven services |
 
@@ -309,11 +309,12 @@ rate. Flagged as a residual risk for very-high-FLV services in Section 8.
 | No weeping / no dumping | 3.2 two-zone hand-off | Same as scorecard item 7 |
 | Massive turndown ratio | 3.2 two-zone hand-off | Same as scorecard item 2 (22.22:1) |
 
-**Bottom line**: 7 of 10 metrics are *Met* (numerically or by design); one
-(*Pressure drop*) is a *stretch* -- approaching but not literally matching its
-target; one (*Control*) is honestly *reframed* as passive geometry rather than
-electronics; and one (*Cost*) remains an *open* architecture claim pending a
-first-order cost study. The two metrics carrying the most validation risk --
+**Bottom line**: 8 of 10 metrics are *Met* (numerically or by design),
+including *Cost* (item 8), resolved by the first-order installed-cost model
+in `HyTrays_Apex_Technical_Paper.md` Section 8. One (*Pressure drop*) is a
+*stretch* -- approaching but not literally matching its target; one
+(*Control*) is honestly *reframed* as passive geometry rather than
+electronics. The two metrics carrying the most validation risk --
 **Capacity** (item 4, a 2.50x synthesis number) and **Turndown** (item 2, a
 two-zone hand-off the 1-D engine can't simulate directly) -- are exactly the
 two flagged for CFD/pilot work in Section 8.
@@ -343,11 +344,17 @@ two flagged for CFD/pilot work in Section 8.
    70%-area cartridge field meets a 15%-area lip-valve field (sealing,
    differential thermal growth, vibration coupling) is unaddressed by any
    individual HT-0X datasheet.
-5. **Cost multiple.** Scorecard item 8 (manufacturable at scale) is currently
-   an architecture claim. A first-order cost estimate -- cartridges +
-   AEGIS-grade structural grid vs. a conventional valve/sieve deck of the
-   same diameter -- is needed before "manufacturable at scale" is more than
-   an assertion.
+5. **Cost multiple -- resolved (first-order).** Scorecard item 8
+   (manufacturable at scale) now has a first-order installed-cost estimate:
+   `cost_model.py` + `HyTrays_Apex_Technical_Paper.md` Section 8 find
+   `relative_installed_cost` = 0.64-0.66 (Sieve = 1.00) across all five
+   services, despite a 3.2x tray-hardware unit-cost multiple, because the
+   dominant shell-cost term shrinks ~49% from the -39% diameter reduction
+   (item 2 above). Remaining refinement needs (vendor cartridge pricing, a
+   proper vessel-costing correlation in place of the `D x H` proxy, possible
+   wall-thickness effects of the smaller diameter and of the AEGIS 2-5 psi
+   rating) are tracked in `HyTrays_Apex_Technical_Paper.md` Section 13 item
+   5.
 
 ## 9. One-line summary
 
@@ -361,8 +368,10 @@ resistance, and an HT-07 AEGIS bolt-in cartridge grid that delivers the 2-5
 psi structural rating *and* turns maintenance into a cartridge swap. Every
 adaptive element is passive and load-driven, so "real-time adaptive control"
 is the deck's geometry, not its instrumentation. Eight of the ten wishlist
-metrics are met outright in the model; the other two (packing-level dP,
-electronic-style control) are honestly reframed as "approaching" and
-"achieved passively" respectively -- and the two highest-leverage numbers
-(2.50x capacity, 22.2:1 turndown) are exactly the two queued for CFD/pilot
-validation.
+metrics -- including cost, resolved by the first-order installed-cost model
+in `HyTrays_Apex_Technical_Paper.md` Section 8 -- are met in the model; the
+other two are honestly reframed: packing-level pressure drop as
+"approaching" (best in the family, but ~2-3x typical packing dP/stage) and
+electronic-style control as "achieved passively" (zero-latency, zero-
+electronics geometry). The two highest-leverage numbers (2.50x capacity,
+22.2:1 turndown) are exactly the two queued for CFD/pilot validation.
