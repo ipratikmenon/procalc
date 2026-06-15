@@ -44,6 +44,21 @@ deck itself (see ``NON_DECK_MODULES`` for the descriptive catalog):
                           hydraulics unchanged, so it has no distinct
                           hydraulic fingerprint to rate.
 
+HyTrays Apex -- flagship deck, above the HT-series line
+------------------------------------------------------------------
+``APEX`` is a *flagship* deck, deliberately left outside the HT-0X numbering
+(see ``HyTrays_Apex_concept.md``). Where each HT-0X deck above isolates one
+mechanism, Apex is an "Integrated Cartridge-Grid": HT-02/HT-08 swirl-tube
+cartridges for primary capacity, an HT-01C lip-sealed secondary trickle zone
+for deep turndown, HT-03 GRADEX radial/azimuthal grading and multi-chordal
+sweep for efficiency and dead-zone elimination, HT-05 PULSAR oscillator slots
+for self-cleaning, and an HT-07 AEGIS-style bolted cartridge-grid for the
+structural rating and cartridge-swap maintenance. It is rated by this engine
+as a single :class:`TrayType` (``APEX``) representing its design point;
+``HyTrays_Apex_concept.md`` Section 9 maps each of its parameters back to the
+contributing HT-0X mechanism and scores it against the flagship's 10-metric
+target spec.
+
 Parameter sources & status
 --------------------------
 ``SIEVE`` uses values representative of the published ranges for the plain
@@ -51,13 +66,22 @@ perforated sieve tray (Kister, *Distillation Design* (1992) & *Distillation
 Operation* (1990); Perry's Chemical Engineers' Handbook, Sec. 18; Lockett,
 *Distillation Tray Fundamentals* (1986)).
 
-The six HT-series decks are parameterised from the qualitative/quantitative
+The seven HT-series decks are parameterised from the qualitative/quantitative
 behaviour stated in their datasheets (capacity envelope, turndown range,
 efficiency uplift, open-area and fouling notes). Where a datasheet gives a
 range, the value below is a representative design-point pick; per-tray notes
 record the datasheet figure each parameter is anchored to. These remain
 engineering estimates for *relative* screening -- refine against detailed
 vendor/test data before using them for absolute design.
+
+``APEX`` is a *synthesis* design: each of its parameters is derived by
+combining the corresponding parameter from the HT-0X mechanism it draws on
+(see ``HyTrays_Apex_concept.md`` Section 9 for the per-parameter mapping and
+provenance), not from its own independent datasheet. The 1-D engine evaluates
+only the combined design point -- it cannot validate interaction effects
+between the combined mechanisms, so these numbers are a *first-pass synthesis
+estimate* pending CFD/pilot validation, more provisional than the individual
+HT-0X figures above.
 """
 from __future__ import annotations
 
@@ -243,9 +267,43 @@ HT08_VORTEXA = TrayType(
 )
 
 
-# Engine-rateable trays: the conventional baseline + the seven HT-series
-# contacting decks. The three non-deck modules (below) are documented but not
-# sized here.
+# ── HyTrays Apex -- flagship "Integrated Cartridge-Grid" deck ───────────────
+APEX = TrayType(
+    name="HyTrays Apex",
+    description="Integrated Cartridge-Grid flagship: a single deck built from "
+                 "five proven HT-0X mechanisms working in concert rather than "
+                 "one new physical principle. ~70% of active area is HT-02/"
+                 "HT-08-style swirl-tube cartridges with mechanical vapour/"
+                 "liquid disengagement caps, decoupling capacity from the "
+                 "classic Souders-Brown limit at the design point (capacity "
+                 "~2.5x sieve). ~15% is an HT-01C lip-sealed secondary trickle "
+                 "zone that stays open at very low vapour rate, stretching "
+                 "turndown far past any single HT-0X deck. HT-03 GRADEX radial/"
+                 "azimuthal grading plus multi-chordal liquid sweep drives the "
+                 "froth toward plug flow (no dead zones), recovering the "
+                 "efficiency that co-current contacting normally costs. HT-05 "
+                 "PULSAR-style self-sweeping oscillator slots keep the "
+                 "cartridge faces clear between turnarounds. The whole deck "
+                 "bolts to an HT-07 AEGIS-style structural grid as swappable "
+                 "cartridges, rated for 2-5 psi transient uplift. Every "
+                 "'control' action -- sleeve lift/rotation, lip-valve lift, "
+                 "oscillator sweep -- is passive and load-driven: the deck IS "
+                 "the controller, with zero electronics and zero latency. See "
+                 "HyTrays_Apex_concept.md Section 9 for the per-parameter "
+                 "mapping to each contributing HT-0X mechanism and an honest "
+                 "scorecard against the flagship's 10-metric target.",
+    f_active=0.85, f_hole=0.25, h_weir_in=0.5,
+    c0=0.85, dp_dry_floor_in=0.10,
+    aeration_factor=0.38,
+    capacity_factor=2.50, efficiency_factor=1.20, min_load_frac=0.045,
+    fouling_open_area_retention=0.93,
+    has_downcomer=True,
+)
+
+
+# Engine-rateable trays: the conventional baseline, the seven HT-series
+# contacting decks, and the Apex flagship. The three non-deck modules (below)
+# are documented but not sized here.
 ALL_TRAYS: list[TrayType] = [
     SIEVE,
     HT01A_HINGE,
@@ -255,6 +313,7 @@ ALL_TRAYS: list[TrayType] = [
     HT03_GRADEX,
     HT05_PULSAR,
     HT08_VORTEXA,
+    APEX,
 ]
 
 

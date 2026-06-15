@@ -2,10 +2,11 @@
 """HyTrays — numerical distillation-column tray comparison.
 
 Runs ``column_hydraulics.design_tray`` for each tray family in
-``tray_library.ALL_TRAYS`` (the conventional Sieve baseline plus the six
-HT-series contacting decks: HT-01A Hinge, HT-01B Spring, HT-01C LipSeal,
-HT-02 CVS, HT-03 GRADEX and HT-05 PULSAR) on a single representative column
-section, then prints a comparison table and writes:
+``tray_library.ALL_TRAYS`` (the conventional Sieve baseline, the seven
+HT-series contacting decks -- HT-01A Hinge, HT-01B Spring, HT-01C LipSeal,
+HT-02 CVS, HT-03 GRADEX, HT-05 PULSAR and HT-08 VORTEXA -- and the HyTrays
+Apex flagship) on a single representative column section, then prints a
+comparison table and writes:
 
     HyTrays/output/tray_comparison.csv
     HyTrays/output/01_capacity_and_sizing.png
@@ -350,11 +351,25 @@ def write_report(results: list[TrayDesignResult], path: str) -> None:
       " column and, by needing fewer trays, usually lowers the total column"
       " pressure drop as well.\n")
 
+    apex = r_by_name.get("HyTrays Apex")
+
     a("## Summary / selection guidance\n")
     a("- **Sieve** (baseline, not a HyTrays product) -- cheapest per-tray"
       " hardware, but the largest shell, the most trays for a given"
       " separation and the worst turndown. Every HT-series deck below is"
       " rated relative to it.")
+    if apex is not None:
+        a("- **HyTrays Apex** -- flagship \"Integrated Cartridge-Grid\" deck,"
+          " positioned *above* the HT-series line (see"
+          " `HyTrays_Apex_concept.md`); combines mechanisms from across the"
+          " HT-01...HT-08 family into one deck. In this case it gives the"
+          f" smallest shell ({apex.diameter_ft:.2f} ft), the highest"
+          f" efficiency ({apex.e_tray_pct:.1f}%), the widest turndown"
+          f" ({apex.turndown_ratio:.2f}:1) and the lowest total dP"
+          f" ({apex.total_dp_psi:.2f} psi) of the whole family -- a"
+          " first-pass *synthesis* estimate (concept memo Section 9) that"
+          " needs CFD/pilot validation before it is more than a design"
+          " target.")
     a("- **HT-01A Hinge / HT-01B Spring** -- adaptive decks whose flaps"
       " track the vapor load, giving the widest turndown in the family"
       " (~12-15:1 / ~11:1); pick these where the column must run efficiently"
