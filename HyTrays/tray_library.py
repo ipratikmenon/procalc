@@ -15,7 +15,7 @@ HyTrays product.
 
 The HyTrays HT-series (datasheets in ``HyTrays/Datasheets/``)
 ------------------------------------------------------------------
-The family spans several distinct functional classes. Six are *standalone
+The family spans several distinct functional classes. Seven are *standalone
 contacting decks* that this 1-D Fair-correlation engine can size and rate,
 and they are represented as :class:`TrayType` entries below:
 
@@ -25,6 +25,8 @@ and they are represented as :class:`TrayType` entries below:
     HT-02   CVS        -- centrifugal vapour-swirl tube tray
     HT-03   GRADEX     -- radially-graded push-valve tray
     HT-05   PULSAR     -- fluidic-oscillator self-sweeping tray
+    HT-08   VORTEXA    -- helical-indexed variable-slot swirl tray
+                          (load-tracking turndown extension of HT-02)
 
 Three further family members are **not** standalone contacting decks and so
 are deliberately *not* modeled as :class:`TrayType` entries -- the engine
@@ -214,8 +216,34 @@ HT05_PULSAR = TrayType(
     fouling_open_area_retention=0.95,
 )
 
+HT08_VORTEXA = TrayType(
+    name="HT-08 VORTEXA",
+    description="Helical-indexed variable-slot swirl deck: a load-tracking "
+                 "sleeve retrofit to HT-02's swirl tubes, kinematically "
+                 "coupling axial lift to rotation via a back-drivable helical "
+                 "constraint so tangential slot area opens/closes passively "
+                 "with vapour load. Preserves HT-02's Csb ~0.14-0.18 m/s "
+                 "capacity and <0.02 entrainment at 90% flood, at a slightly "
+                 "lower per-tray dP (~11 vs ~12 mbar), while extending "
+                 "turndown from HT-02's ~2.5:1 to a predicted ~8:1 (cell). "
+                 "Failure mode is benign: a stuck sleeve simply reverts to "
+                 "fixed-geometry HT-02 behaviour. Not recommended for "
+                 "heavy-fouling duty -- HT-02 (no moving parts) remains "
+                 "preferred there.",
+    # Same tube/slot layout and capacity as HT-02 (Table 2: Csb, entrainment
+    # unchanged); slightly higher C0 from the ~11 vs ~12 mbar dP/stage figure.
+    f_active=0.75, f_hole=0.15, h_weir_in=2.0,
+    c0=0.82, dp_dry_floor_in=0.20,
+    aeration_factor=0.50,
+    # EOG 0.85 vs HT-02's 0.86 (Table 2) -> efficiency_factor scaled down
+    # proportionally from HT-02's 1.00. Turndown ~8:1 (cell) at f_flood=0.80
+    # -> max_load_pct=125% -> min_load_frac = (125/8)/125 = 1/8.
+    capacity_factor=1.65, efficiency_factor=0.98, min_load_frac=0.125,
+    fouling_open_area_retention=0.75,
+)
 
-# Engine-rateable trays: the conventional baseline + the six HT-series
+
+# Engine-rateable trays: the conventional baseline + the seven HT-series
 # contacting decks. The three non-deck modules (below) are documented but not
 # sized here.
 ALL_TRAYS: list[TrayType] = [
@@ -226,6 +254,7 @@ ALL_TRAYS: list[TrayType] = [
     HT02_CVS,
     HT03_GRADEX,
     HT05_PULSAR,
+    HT08_VORTEXA,
 ]
 
 

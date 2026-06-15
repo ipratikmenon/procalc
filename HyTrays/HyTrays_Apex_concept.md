@@ -174,6 +174,18 @@ number that needs CFD/pilot validation before it goes into a real datasheet.
    complexity/fouling risk, or is ~0.55-0.65 `min_load_frac` acceptable for
    the target severe-service applications (which often run closer to design
    rate anyway)?
+
+   *Candidate mechanism:* HT-08 VORTEXA (`HyTrays/Datasheets/HT08_VORTEXA.pdf`,
+   `tray_library.HT08_VORTEXA`) discloses a passive, actuator-free
+   helical-indexed sleeve that opens/closes slot area in proportion to vapour
+   load, extending HT-02's turndown from ~2.5:1 to ~8:1 with a *benign*
+   failure mode (a stuck sleeve reverts to fixed-geometry behaviour). It was
+   developed for HT-02's round swirl tubes, not Apex's vortex-bank slots, but
+   the same load-tracking-sleeve principle -- back-drivable helical
+   lift/rotation lock, self-stabilising quasi-static float -- is a plausible
+   starting point for an Apex "secondary low-load path" without a separate
+   bleed-slot system. Adapting it to Apex's elongated bank slots (vs. HT-08's
+   round tube slots) would be the key open design question.
 4. **Manufacturability/cost** -- thicker bolted deck + vane caps vs.
    conventional stamped valve decks; first-order cost multiple needed before
    this is more than a concept.

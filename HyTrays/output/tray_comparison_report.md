@@ -32,6 +32,7 @@ Flow parameter FLV = (L/V)*sqrt(rho_V/rho_L) = **0.0520** -- a low-FLV, vapor-do
 | HT-02 CVS | 3.48 | 2.50 | 0.0545 | 3.14 | 35 | 50-125 | 2.50:1 | 76.2 | 27 | 64.0 | 1.473 |
 | HT-03 GRADEX | 3.91 | 1.82 | 0.0478 | 2.75 | 30 | 38-125 | 3.33:1 | 85.3 | 24 | 58.0 | 1.146 |
 | HT-05 PULSAR | 4.23 | 1.59 | 0.0500 | 2.88 | 31 | 31-125 | 4.00:1 | 83.8 | 24 | 58.0 | 1.201 |
+| HT-08 VORTEXA | 3.48 | 2.50 | 0.0531 | 3.06 | 34 | 16-125 | 8.00:1 | 74.7 | 27 | 64.0 | 1.433 |
 
 ## Discussion
 
@@ -39,7 +40,7 @@ Flow parameter FLV = (L/V)*sqrt(rho_V/rho_L) = **0.0520** -- a low-FLV, vapor-do
 
 **Pressure drop.** Per-tray pressure drop tracks hole velocity (u_hole) and the dry-tray discharge coefficient (C0). The lowest total column dP here is **HT-01C LipSeal** (0.99 psi), a product of both its per-tray drop and the number of trays its efficiency requires. The plain sieve baseline runs 55.7 mpsi/tray (1.50 psi total); decks with higher discharge coefficients (valve-/push-valve-style C0) cut the dry-tray component, while those that add stages cut the *total* by needing fewer trays.
 
-**Downcomer backup.** FLV is low in this case (vapor-dominated), so every tray with downcomers operates well inside its 50%-of-spacing backup limit (Sieve 34%, HT-01A Hinge 28%, HT-01B Spring 29%, HT-01C LipSeal 25%, HT-02 CVS 35%, HT-03 GRADEX 30%, HT-05 PULSAR 31%). Downcomer area is not the limiting consideration for this section; flooding/entrainment (Fair capacity) governs sizing instead.
+**Downcomer backup.** FLV is low in this case (vapor-dominated), so every tray with downcomers operates well inside its 50%-of-spacing backup limit (Sieve 34%, HT-01A Hinge 28%, HT-01B Spring 29%, HT-01C LipSeal 25%, HT-02 CVS 35%, HT-03 GRADEX 30%, HT-05 PULSAR 31%, HT-08 VORTEXA 34%). Downcomer area is not the limiting consideration for this section; flooding/entrainment (Fair capacity) governs sizing instead.
 
 **Turndown / operating window.** The adaptive HT-01 decks (living hinge / leaf spring) follow the vapor load by opening and closing their flaps, so they resist weeping far below the design rate and post the widest stable operating windows. The widest here is **HT-01A Hinge** (12.50:1); the widest HT-series deck is **HT-01A Hinge** (12.50:1), versus 2.00:1 for the plain sieve baseline. Capacity-oriented decks (centrifugal swirl) need a minimum vapor rate to work and so have narrower windows.
 

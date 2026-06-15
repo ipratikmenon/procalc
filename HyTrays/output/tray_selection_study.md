@@ -15,6 +15,7 @@ The conventional **Sieve** baseline and the six HyTrays HT-series contacting dec
 | HT-02 CVS | 0.75 | 0.15 | 2.0 | 0.80 | 0.50 | 1.65 | 1.00 | 0.40 | 0.80 |
 | HT-03 GRADEX | 0.82 | 0.11 | 1.5 | 0.82 | 0.50 | 1.20 | 1.12 | 0.30 | 0.75 |
 | HT-05 PULSAR | 0.80 | 0.12 | 2.0 | 0.71 | 0.55 | 1.05 | 1.10 | 0.25 | 0.95 |
+| HT-08 VORTEXA | 0.75 | 0.15 | 2.0 | 0.82 | 0.50 | 1.65 | 0.98 | 0.12 | 0.75 |
 
 > *HT-series parameters are derived from the datasheets in `HyTrays/Datasheets/` and are engineering estimates for relative screening -- refine against detailed vendor/test data before absolute design.*
 
@@ -59,6 +60,7 @@ The conventional **Sieve** baseline and the six HyTrays HT-series contacting dec
 | HT-02 CVS | 3.48 | 2.50 | 0.0545 | 35 | 50-125 | 2.50:1 | 76.2 | 27 | 64.0 | 1.473 |
 | HT-03 GRADEX | 3.91 | 1.82 | 0.0478 | 30 | 38-125 | 3.33:1 | 85.3 | 24 | 58.0 | 1.146 |
 | HT-05 PULSAR | 4.23 | 1.59 | 0.0500 | 31 | 31-125 | 4.00:1 | 83.8 | 24 | 58.0 | 1.201 |
+| HT-08 VORTEXA | 3.48 | 2.50 | 0.0531 | 34 | 16-125 | 8.00:1 | 74.7 | 27 | 64.0 | 1.433 |
 
 FLV = 0.052 (vapor-dominated). The smallest shell is **HT-02 CVS** (3.48 ft vs 4.39 ft for the Sieve baseline), and the highest efficiency is **HT-03 GRADEX** (85.3%), giving the shortest column (HT-03 GRADEX: 58 ft, 24 trays). The lowest total column dP is **HT-01C LipSeal** (0.99 psi vs 1.50 psi for Sieve). Across the HT-series decks the efficiency uplift (HT-03 GRADEX / HT-05 PULSAR) and capacity (HT-02 CVS) are the main levers in this clean, vapor-dominated service.
 
@@ -73,6 +75,7 @@ FLV = 0.052 (vapor-dominated). The smallest shell is **HT-02 CVS** (3.48 ft vs 4
 | HT-02 CVS | 4.30 | 4.41 | 0.0843 | 42 | 62-154 | 2.50:1 | 33.5 | 45 | 100.0 | 3.792 |
 | HT-03 GRADEX | 4.82 | 3.21 | 0.0791 | 38 | 46-154 | 3.33:1 | 37.5 | 40 | 90.0 | 3.165 |
 | HT-05 PULSAR | 5.22 | 2.81 | 0.0694 | 35 | 38-154 | 4.00:1 | 36.9 | 41 | 92.0 | 2.847 |
+| HT-08 VORTEXA | 4.30 | 4.41 | 0.0875 | 43 | 19-154 | 8.00:1 | 32.9 | 46 | 102.0 | 4.023 |
 
 Sized at 65% of flood (margin for deposit buildup) with each tray's hole area derated by `fouling_open_area_retention`. The standalone fouling-sensitivity result (Fig. 15, independent of flow rates) shows the underlying mechanism -- for a tray whose open area survives at fraction *r* of as-new, dry-tray dP rises by (1/r)^2 - 1:
 
@@ -85,6 +88,7 @@ Sized at 65% of flood (margin for deposit buildup) with each tray's hole area de
 | HT-02 CVS | 0.80 | +56% |
 | HT-03 GRADEX | 0.75 | +78% |
 | HT-05 PULSAR | 0.95 | +11% |
+| HT-08 VORTEXA | 0.75 | +78% |
 
 The most fouling-tolerant tray here is **HT-05 PULSAR** (retention 0.95, only +11% dry-tray dP as deposits build), keeping it usable far longer between cleanings -- by design for HT-05 PULSAR, whose self-sweeping jet and lack of moving parts resist plugging. The least tolerant is **HT-01A Hinge** (+104%; crevices/moving parts), while the plain Sieve baseline rises by roughly 78%. The adaptive HT-01 hinge/lip decks sit lower than PULSAR because their moving flaps and lips offer more crevices for deposits.
 
@@ -99,6 +103,7 @@ The most fouling-tolerant tray here is **HT-05 PULSAR** (retention 0.95, only +1
 | HT-02 CVS | 7.02 | 15.96 | 0.1039 | 38 | 50-125 | 2.50:1 | 45.9 | 18 | 55.0 | 1.870 |
 | HT-03 GRADEX | 7.87 | 11.61 | 0.0931 | 34 | 38-125 | 3.33:1 | 51.4 | 16 | 50.0 | 1.489 |
 | HT-05 PULSAR | 8.52 | 10.16 | 0.0914 | 34 | 31-125 | 4.00:1 | 50.4 | 16 | 50.0 | 1.463 |
+| HT-08 VORTEXA | 7.02 | 15.96 | 0.1004 | 37 | 16-125 | 8.00:1 | 44.9 | 18 | 55.0 | 1.807 |
 
 With rho_V = 0.06 lb/ft3, superficial velocities and diameters are large for all trays (7.0-8.8 ft). Per-tray dP is what matters most here, because every inch of tray dP raises the flash-zone temperature. The lowest per-tray dP is **HT-01C LipSeal** (69.2 mpsi, C0 = 0.78) and the highest is **Sieve** (105 mpsi, C0 = 0.73). The HT-series decks with higher discharge coefficients (HT-02 CVS swirl tubes, HT-03 GRADEX push valves) hold the per-tray dP down, while low-C0 sieve-like decks run highest -- multiplied over a real vacuum tower's tray count, that gap is what drives vacuum-service designs toward higher-C0 or high-capacity internals.
 
@@ -113,6 +118,7 @@ With rho_V = 0.06 lb/ft3, superficial velocities and diameters are large for all
 | HT-02 CVS | 7.45 | 0.80 | 0.0514 | 47 | 50-125 | 2.50:1 | 84.7 | 48 | 106.0 | 2.467 |
 | HT-03 GRADEX | 8.35 | 0.58 | 0.0448 | 42 | 38-125 | 3.33:1 | 94.8 | 43 | 96.0 | 1.927 |
 | HT-05 PULSAR | 9.04 | 0.51 | 0.0509 | 43 | 31-125 | 4.00:1 | 93.1 | 43 | 96.0 | 2.187 |
+| HT-08 VORTEXA | 7.45 | 0.80 | 0.0511 | 47 | 16-125 | 8.00:1 | 83.0 | 49 | 108.0 | 2.504 |
 
 FLV = 0.535 (high, liquid-dominated). Downcomer backup margins shrink markedly versus the General case (43% vs 34% for the Sieve baseline) because the smaller diameters needed for high-capacity trays shorten the weir, increasing the Francis-weir crest (h_ow) for the same liquid rate. The tightest downcomer margin here is **HT-02 CVS** (47% of the 50% limit) -- the high-capacity HT-series decks (e.g. HT-02 CVS) buy the smallest shell but pay for it in downcomer loading at high FLV. A real design at this FLV would likely need wider downcomers or a larger diameter than the flood-only sizing shown; the HT-04 DCX active downcomer module (see `NON_DECK_MODULES`) is aimed squarely at this high-weir-loading regime.
 
@@ -127,6 +133,7 @@ FLV = 0.535 (high, liquid-dominated). Downcomer backup margins shrink markedly v
 | HT-02 CVS | 4.02 | 1.88 | 0.0406 | 28 | 50-125 | 2.50:1 | 76.2 | 27 | 64.0 | 1.095 |
 | HT-03 GRADEX | 4.51 | 1.37 | 0.0347 | 24 | 38-125 | 3.33:1 | 85.3 | 24 | 58.0 | 0.833 |
 | HT-05 PULSAR | 4.88 | 1.19 | 0.0387 | 26 | 31-125 | 4.00:1 | 83.8 | 24 | 58.0 | 0.930 |
+| HT-08 VORTEXA | 4.02 | 1.88 | 0.0397 | 28 | 16-125 | 8.00:1 | 74.7 | 27 | 64.0 | 1.073 |
 
 Applying Kister's moderate-foam system factor (Fp = 0.75) derates every tray's flooding velocity equally, so diameters grow by 1/sqrt(Fp) = 1.15x relative to the General case (e.g. Sieve 4.39 -> 5.07 ft) for every tray type -- the relative ranking by capacity is unchanged. The differentiator in foaming service is froth intensity: trays with a lower aeration factor generate less aerated froth for the same clear-liquid height and are generally more foam-tolerant. The lowest here is **HT-02 CVS** (aeration 0.50) and the highest is **Sieve** (0.55); the capacity-oriented HT-series decks (HT-02 CVS, HT-03 GRADEX) run leaner froth than the adaptive sieve-like HT-01 decks.
 
@@ -136,13 +143,14 @@ Rank 1 = best, 5 = worst, by the metric noted for each service (footnotes below)
 
 | Tray | General [1] | Fouling [2] | Vacuum [3] | High-P/High-L [4] | Foaming [5] |
 |---|---|---|---|---|---|
-| Sieve | 7 (1.5) | 5 (0.75) | 7 (0.105) | 5 (42.7) | 4 (0.55) |
-| HT-01A Hinge | 2 (1.11) | 7 (0.7) | 2 (0.0735) | 2 (42.3) | 5 (0.55) |
-| HT-01B Spring | 4 (1.18) | 3 (0.78) | 3 (0.08) | 4 (42.5) | 6 (0.55) |
-| HT-01C LipSeal | 1 (0.989) | 4 (0.78) | 1 (0.0692) | 1 (40.1) | 3 (0.52) |
-| HT-02 CVS | 6 (1.47) | 2 (0.8) | 6 (0.104) | 7 (47.3) | 1 (0.5) |
+| Sieve | 8 (1.5) | 5 (0.75) | 8 (0.105) | 5 (42.7) | 5 (0.55) |
+| HT-01A Hinge | 2 (1.11) | 8 (0.7) | 2 (0.0735) | 2 (42.3) | 6 (0.55) |
+| HT-01B Spring | 4 (1.18) | 3 (0.78) | 3 (0.08) | 4 (42.5) | 7 (0.55) |
+| HT-01C LipSeal | 1 (0.989) | 4 (0.78) | 1 (0.0692) | 1 (40.1) | 4 (0.52) |
+| HT-02 CVS | 7 (1.47) | 2 (0.8) | 7 (0.104) | 8 (47.3) | 1 (0.5) |
 | HT-03 GRADEX | 3 (1.15) | 6 (0.75) | 5 (0.0931) | 3 (42.4) | 2 (0.5) |
-| HT-05 PULSAR | 5 (1.2) | 1 (0.95) | 4 (0.0914) | 6 (43) | 7 (0.55) |
+| HT-05 PULSAR | 5 (1.2) | 1 (0.95) | 4 (0.0914) | 6 (43) | 8 (0.55) |
+| HT-08 VORTEXA | 6 (1.43) | 7 (0.75) | 6 (0.1) | 7 (47.2) | 3 (0.5) |
 
 [1] **General** (General Rectification (T801 basis)): Lower total column dP across the N_actual trays needed for the target separation (psi).
 [2] **Fouling** (Fouling / Heavy-Ends Service): Higher fouling open-area retention -> smaller dry-tray dP increase as deposits build up (see fouling sensitivity figure).
