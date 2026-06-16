@@ -291,6 +291,12 @@ The key distinguishing features from all prior vapour--liquid tray art are:
     showing hex chambers at crests and liquid jets at troughs;
     (c)~single-wave nozzle detail showing liquid film on wave faces and
     vapour path; (d)~flat-vs.-wavy comparison table.
+  \item[Figure~\ref{fig:details}] Design refinement details:
+    (a)~three nozzle-cut options for the chamber floor (single ellipse,
+    three-ring ellipses, four circular holes); (b)~three-nozzle
+    impingement cross-section; (c)~wavy-deck chamber-at-crest elevation
+    with axis-switching free-flight zone; (d)~smooth wall vs.\ helical
+    guide vane vs.\ ring orifice baffle.
 \end{description}
 
 % ════════════════════════════════════════════════════════════════════════════
@@ -1515,6 +1521,237 @@ outer ring diameter, same downcomer footprint) and can be retrofitted
 into the same column shell with no shell modifications.
 
 % ════════════════════════════════════════════════════════════════════════════
+\section{Design Refinements}
+\label{sec:refinements}
+
+This section addresses four design details that were raised during review of
+the baseline architecture: the visibility of the elliptical vapour/liquid
+inlets in the six-view drawing, the effect of internal chamber features on
+turbulence, the correct chamber position on the wavy deck, and the choice
+between single and multiple nozzle cuts in the chamber floor.
+Figure~\ref{fig:details} illustrates all four topics.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{output/45_cist_design_details.png}
+  \caption{CIST design refinements.
+    \textbf{(a)} Nozzle-cut options viewed from below the chamber:
+    single centred ellipse (baseline), three ellipses at 120° and
+    $r = 0.5\,R_c$ (recommended), and four circular holes at 90° and
+    $r = 0.52\,R_c$ — all drawn to the same total flow area.
+    \textbf{(b)} Cross-section showing how three offset jets converge at the
+    impingement zone (${\approx}\,0.38\,H_c$ above the chamber floor) before
+    the swirl contact zone begins; the tangential vapour inlet slot is visible
+    on the right.
+    \textbf{(c)} Wavy-deck elevation confirming chamber placement at the
+    \emph{crest} (wave peak); the trough-to-crest free-flight gap provides the
+    axis-switching pre-contact zone.
+    \textbf{(d)} Three internal-feature options: smooth wall (dead core present),
+    helical guide vane (eliminates dead core, $+15$--$25$\% $N_{\mathrm{OG}}$),
+    and ring orifice baffle at $H_c/2$ (creates high-shear zone, $+10$--$20$\%
+    overall).}
+  \label{fig:details}
+\end{figure}
+
+\subsection{Elliptical Inlet Openings — Visibility in the Six-View Drawing}
+\label{sec:ellipse_visible}
+
+The updated six-view drawing (Figure~\ref{fig:multiview}) now shows the
+elliptical nozzle ring in cyan at the chamber base ($z = 0$).  In the
+\textbf{plan view} (camera directly above) the nozzle appears as a true
+ellipse at the centre of the cylinder, rotated to the design orientation.
+In the \textbf{front and side elevations} it appears as a short horizontal
+line segment at the junction between the chamber wall and the tray deck.
+In the \textbf{isometric views} the ellipse is visible foreshortened at the
+base of the chamber, clearly distinct from the crown disc above.
+
+The tangential vapour inlet slot is shown as an orange arc on the lower
+portion of the cylinder wall.  In the plan view it appears as a short arc;
+in the elevation views it appears as a rectangular orange patch on the
+cylinder surface.  The slot arc covers approximately $\pm 25°$ of the
+cylinder circumference, which corresponds to a tangential entry angle that
+generates the design swirl number $S \approx 2$--$3$
+(Section~\ref{sec:swirl}).
+
+\subsection{Effect of Internal Chamber Features on Turbulence and Mass Transfer}
+\label{sec:internal_features}
+
+Three internal geometries are evaluated (Figure~\ref{fig:details}d):
+
+\subsubsection{Smooth-wall cylinder (baseline)}
+
+The Rankine vortex formed by the tangential inlet has a solid-body core
+of radius $r_c \approx 0.3\,R_c$.  Within $r < r_c$ the tangential
+velocity is low and the centripetal acceleration is insufficient to
+reach the droplet-capture threshold.  This near-axis dead zone has poor
+mass-transfer performance (diffusion-limited, no convection).  The
+baseline smooth-wall design accepts this limitation.
+
+\subsubsection{Helical guide vane}
+
+A continuous helical fin of pitch $L_{\mathrm{pitch}} = 1.5\,D_c$
+welded to the inner cylinder wall acts as a static swirl generator.  As
+the rising vapour stream encounters the vane it is redirected
+circumferentially, reinforcing the swirl imparted by the tangential slot
+at all heights.  The effect is twofold:
+
+\begin{enumerate}[nosep]
+  \item The solid-body core shrinks: $r_c$ decreases to approximately
+    $0.10\,R_c$, nearly eliminating the dead zone.
+  \item The effective angular velocity $\Omega$ increases at the same
+    inlet slot velocity, raising $N_g$ by an estimated 30--40\% for
+    a vane height-to-pitch ratio $e/L_{\mathrm{pitch}} = 0.08$.
+\end{enumerate}
+
+The estimated improvement in $N_{\mathrm{OG}}$ from the helical vane is
+15--25\%, at a pressure-drop penalty of approximately 8--12\%
+(additional wall friction from vane area).
+
+\subsubsection{Ring orifice baffle at $H_c/2$}
+
+A thin annular plate of inner diameter $0.8\,D_c$ welded at
+$z = H_c/2$ forces the swirling flow through a constricted annular
+orifice.  The local velocity increases by $(D_c/0.8\,D_c)^2 = 1.56\times$
+(continuity), creating a high-shear zone immediately above the baffle.
+The Dankwerts penetration-theory coefficient scales as $k_L \propto
+\sqrt{u_{\mathrm{rel}}}$, so the annular acceleration produces a local
+increase in $k_L$ of $\approx\!\sqrt{1.56} = 1.25\times$ in the baffle
+vicinity.  Averaged over the full chamber height the net improvement in
+$N_{\mathrm{OG}}$ is estimated at 10--20\%.
+
+The ring baffle also acts as a \emph{partial separator}: droplets
+larger than the centrifugal cut diameter that have not yet been captured
+at the wall are re-accelerated through the orifice and flung outward,
+improving overall collection efficiency.  The baffle adds no moving
+parts; it is a welded ring of the same material as the chamber wall.
+
+\subsubsection{Summary: internal feature selection}
+
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+Feature & Description & $\Delta N_{\mathrm{OG}}$ & $\Delta P$ penalty \\
+\midrule
+Smooth wall   & Baseline                    & --          & --         \\
+Helical vane  & Eliminates dead core        & $+15$--$25$\% & $+8$--$12$\% \\
+Ring baffle   & High-shear zone at $H_c/2$ & $+10$--$20$\% & $+5$--$8$\%  \\
+Both combined & Vane + baffle              & $+22$--$38$\% & $+13$--$18$\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The helical vane is preferred for vacuum service (where any extra
+pressure drop is costly); the ring baffle is preferred for
+atmospheric or pressure service where the additional $\Delta P$ is
+tolerable.  Both features can be combined for maximum efficiency.
+
+\subsection{Chamber Position on the Wavy Deck: Crests, Not Troughs}
+\label{sec:crest_position}
+
+Chambers are installed at the \textbf{crests} (peaks) of the triangular wave
+(Figure~\ref{fig:details}c).  The reasoning is mechanical and thermodynamic:
+
+\paragraph{Vapour buoyancy.}
+Vapour rising through the inter-tray space is less dense than liquid and
+therefore accumulates preferentially at the high points (crests).  Placing
+the chamber tangential slot just above the crest intercepts this
+naturally rising vapour stream without requiring it to deflect downward.
+
+\paragraph{Nozzle-to-chamber free-flight zone.}
+The nozzle is positioned in the trough at the wave base ($z = 0$).
+The chamber floor is at crest height $z = h_w$.  The jet therefore
+travels $h_w = 31.2$\,mm through open inter-tray space before entering
+the chamber.  Far from being a design penalty, this free-flight gap is
+the \emph{axis-switching pre-contact zone}: the elliptical jet undergoes
+one full axis-switching cycle over this distance
+(Section~\ref{sec:axis_switch}) and arrives at the chamber floor
+already partially atomised.  The droplet size entering the swirl
+contact zone is consequently smaller than it would be if the nozzle
+were at the same height as the chamber floor.
+
+\paragraph{Structural stability.}
+The crest provides a locally flat bearing surface for the chamber base
+ring, which can be machined to the crest profile during fabrication.
+Trough installation would require the chamber to span the wave, making
+it taller and mechanically more complex with no performance benefit.
+
+\subsection{Single vs.\ Multiple Nozzle Cuts in the Chamber Floor}
+\label{sec:multi_nozzle}
+
+The baseline design uses a single centred elliptical nozzle.  A
+significant performance improvement is available by replacing this with
+\textbf{three elliptical cuts at 120° spacing} on a ring of radius
+$r = 0.5\,R_c$, each cut having the same major/minor axis ratio $k = a/b$
+as the baseline but scaled so the total flow area is preserved:
+\begin{equation}
+  \pi\,a_i\,b_i = \frac{\pi a_0 b_0}{N} \implies a_i = \frac{a_0}{\sqrt{N}},
+  \quad b_i = \frac{b_0}{\sqrt{N}}
+  \label{eq:scaled_nozzle}
+\end{equation}
+For $N = 3$: $a_i = a_0/\sqrt{3} = 0.577\,a_0$, $b_i = 0.577\,b_0$.
+
+\subsubsection{Droplet-size reduction}
+
+Since the Rayleigh instability growth rate and the resulting Sauter mean
+diameter both scale with the nozzle minor semi-axis $b$
+(Equation~\ref{eq:d32_ellipse}):
+\begin{equation}
+  \frac{d_{32,N}}{d_{32,1}} = \frac{b_i}{b_0} = \frac{1}{\sqrt{N}}
+  \label{eq:dsv_scaling}
+\end{equation}
+At $N = 3$: droplets are $1/\sqrt{3} = 58\%$ the diameter of the single-nozzle
+case, and the interfacial area per unit liquid volume scales as
+$d_{32}^{-1}$, increasing by $\sqrt{3} \approx 1.73\times$.
+
+\subsubsection{Cross-impingement}
+
+The three jets, offset from the axis by $0.5\,R_c$ and directed slightly
+inward (convergence half-angle $\approx 8°$--$12°$), collide at a
+height
+\[
+  h_{\mathrm{imp}} = \frac{0.5\,R_c}{\tan(10°)} \approx 0.36\,H_c
+\]
+above the chamber floor.  The collision shatters droplets that
+survived Rayleigh breakup, further reducing $d_{32}$ by an estimated
+20--40\% relative to isolated-jet breakup.
+
+\subsubsection{Angular momentum contribution}
+
+Each jet's centre-line is offset from the chamber axis by $0.5\,R_c$.
+The upward momentum of each jet therefore has a tangential component
+that reinforces the swirl induced by the vapour inlet slot, augmenting
+the total angular momentum of the contact zone by approximately:
+\[
+  \Delta L = N \cdot \dot{m}_L\,u_{\mathrm{jet}}\cdot(0.5\,R_c)
+\]
+This is a direct, liquid-side swirl contribution, active even if the
+vapour swirl momentarily weakens (e.g.\ at turndown).  The effect
+improves turndown performance by maintaining centrifugal separation
+even at reduced vapour throughput.
+
+\subsubsection{Minimum-head requirement for multi-nozzle operation}
+
+The Weber criterion $\We_L \ge 8$ for jet coherence scales as:
+\[
+  H_{L,\min}^{(N)} = \frac{4\,\sigma\,N}{\rhoL\,g\,C_d^2\,2b_0}
+  = N\,H_{L,\min}^{(1)}
+\]
+At $N = 3$, the minimum sump head required is $3\times$ higher than
+for a single nozzle.  For $H_{L,\min}^{(1)} = 3$\,mm, the
+three-nozzle design requires $H_{L,\min}^{(3)} = 9$\,mm — still
+far below the typical design sump head of 50--100\,mm.
+
+\subsubsection{Recommendation}
+
+Three elliptical nozzles at 120° on $r = 0.5\,R_c$ (option~(ii) in
+Figure~\ref{fig:details}a) is the preferred configuration because it:
+(1) reduces $d_{32}$ by $\sqrt{3}$, (2) creates cross-impingement,
+(3) contributes angular momentum, and (4) preserves the aspect-ratio
+advantage of the elliptical shape over $N = 4$ circular holes (which
+produce a lower $\Delta P_{\mathrm{capillary}}$ margin and lose the
+axis-switching benefit).
+
+% ════════════════════════════════════════════════════════════════════════════
 \section{Claims (Draft)}
 \label{sec:claims}
 
@@ -1607,6 +1844,23 @@ provides a trough-level minimum sump head $H_{L,\min} = h_w/2$
 sufficient to sustain the jet formation condition
 $\We_L \ge 8$ at turndown ratios up to 3.5:1 without secondary
 flow-path augmentation.
+
+\textbf{Claim 14.}
+The tray of Claim~1 wherein the elliptical orifice nozzle of each
+chamber is replaced by $N \ge 2$ elliptical orifice nozzles arranged
+on a concentric ring of radius $r = 0.5\,R_c$ at equal angular spacing,
+each nozzle having semi-axes $a_i = a_0/\sqrt{N}$, $b_i = b_0/\sqrt{N}$
+so as to preserve the total liquid flow area and reduce the Sauter mean
+diameter by the factor $1/\sqrt{N}$ relative to the single-nozzle
+baseline.
+
+\textbf{Claim 15.}
+The tray of Claim~1 further comprising at least one of: (a) a helical
+guide vane of pitch $L_{\mathrm{pitch}} = 1.0$--$2.0\,D_c$ affixed to
+the inner chamber wall to reinforce swirl and reduce the near-axis dead
+zone; (b) an annular ring-orifice baffle of inner diameter
+$0.7$--$0.9\,D_c$ affixed at height $H_c/2$ to create a localised
+high-shear zone and secondary centrifugal collection stage.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Industrial Applicability}
