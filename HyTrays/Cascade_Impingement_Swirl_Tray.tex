@@ -303,6 +303,13 @@ The key distinguishing features from all prior vapour--liquid tray art are:
     (c)~centripetal acceleration $N_g(z)$ from 184.7\,g to 3.24\,g on
     log scale with effective mean 42.4\,g;
     (d)~local cut diameter $d_{50}(z)$ profile, overall $d_{50} = 10.8$\,µm.
+  \item[Figure~\ref{fig:sulzer}] Numerical comparison of the CIST
+    (curved helical vane, three elliptical nozzles at 120°) against
+    Sulzer UFM and SVG commercial trays across twelve documented
+    operating cases on a common 9-ft, 2-pass, 24-in-spacing column:
+    (a)~per-tray pressure drop; (b)~equivalent CIST column diameter at
+    matched throughput; (c)~tray efficiency on an O'Connell basis;
+    (d)~capacity utilisation and turndown.
 \end{description}
 
 % ════════════════════════════════════════════════════════════════════════════
@@ -1951,6 +1958,171 @@ Figure~\ref{fig:details}a) is the preferred configuration because it:
 advantage of the elliptical shape over $N = 4$ circular holes (which
 produce a lower $\Delta P_{\mathrm{capillary}}$ margin and lose the
 axis-switching benefit).
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Numerical Validation Against Commercial Trays (Sulzer UFM and SVG)}
+\label{sec:sulzer}
+
+The qualitative comparison of Section~\ref{sec:comparison} is here
+replaced by a quantitative benchmark.  Two documented vendor rating
+sheets were supplied for the \emph{same} fractionation column---a
+108-in (9.0\,ft) inner diameter, two-pass, 24-in tray-spacing tower of
+63.62\,ft$^2$ cross-section---one fitted with a Sulzer UFM (moving
+mini-valve) deck and one with a Sulzer SVG (fixed-valve) deck.  Each
+sheet rates the deck across twelve operating cases (C1--C4, plus a
+turndown case ``TD'', each at two section conditions S2 and S11).  The
+fluid properties are light hydrocarbons,
+$\rhoL \approx 37$--$39$\,lb/ft$^3$, $\rhoV \approx 0.89$--$1.08$\,lb/ft$^3$,
+$\sigma \approx 8.3$--$9.3$\,dyn/cm and $\mu_L \approx 0.13$--$0.15$\,cP.
+The two sheets share identical fluid data case-by-case; only the
+tray-side hydraulic results differ.
+
+\subsection{Method}
+
+For each case the same gas and liquid mass throughputs were imposed on
+the CIST hydraulic model developed in Sections~\ref{sec:comparison}
+and earlier, using the preferred configuration of this disclosure:
+chamber radius $\Rc = 37.5$\,mm, height $\Hc = 210$\,mm, the curved
+helical guide vane of Section~\ref{sec:wavy} with
+$\theta_0 = 20°\!\to\!\theta_1 = 70°$ (arc length 332\,mm), and three
+elliptical nozzles spaced 120° apart at $r = 0.5\,\Rc$ per the
+recommendation of \S\ref{sec:wavy}.  The CIST is rated entirely from
+first principles---no vendor correlation is borrowed.  Three quantities
+are computed per case:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Chamber count and equivalent diameter.}  The number of
+    swirl chambers required to pass the actual volumetric vapour load at
+    the design axial velocity $\ux = 3.0$\,m/s is
+    $N_{\mathrm{ch}} = \lceil \dot Q_V / (\ux\,\pi \Rc^2)\rceil$.  With
+    hex packing on a 120-mm pitch and a 90\,\% peripheral-area
+    efficiency, this fixes the equivalent CIST column diameter.
+  \item \textbf{Per-tray pressure drop.}
+    $\Delta P = K\,\tfrac12 \rhoV \ux^2$, with
+    $K = C_{\mathrm{in}}\cot^2\theta_0 + f_D (L_v/D_h) + \cot^2\theta_1
+    = 1.73$ from the curved-vane vapour path (Section~\ref{sec:wavy}).
+  \item \textbf{Efficiency.}  An O'Connell base efficiency
+    $E_{\mathrm{OC}} = 51 - 32.5\log_{10}(\alpha\mu_L)$ is scaled by
+    1.32 for the three-nozzle curved-vane CIST (dead-core elimination
+    $+10\%$, high-shear vane base $+12\%$, film renewal $+3\%$, and the
+    $d_{32}\!\times\!1/\sqrt{3}$ interfacial-area gain $+7\%$ from the
+    three-nozzle scheme), capped at 95\,\%.  The vendor decks are scaled
+    by 1.10 (UFM) and 1.05 (SVG).
+\end{enumerate}
+
+\subsection{Results}
+
+Table~\ref{tab:sulzer} reports all twelve cases; Figure~\ref{fig:sulzer}
+plots the four discriminators.
+
+\begin{table}[H]
+\centering
+\caption{CIST vs.\ Sulzer UFM and SVG, twelve cases, common 9-ft column.
+  JF = jet flood; $\Delta P$ in mmHg/tray; CIST $D$ = equivalent column
+  diameter at $\ux = 3$\,m/s; ``sav.'' = CIST $\Delta P$ saving vs.\ that
+  deck.  CIST $N_g^{\mathrm{eff}} = 42.4$\,g and $d_{50} = 8.0$--8.4\,µm
+  in every case.}
+\label{tab:sulzer}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcc cc cc cc c}
+\toprule
+ & \multicolumn{2}{c}{UFM} & \multicolumn{2}{c}{SVG}
+ & \multicolumn{3}{c}{CIST} & \multicolumn{2}{c}{$\Delta P$ saving}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-8}\cmidrule(lr){9-10}
+Case & JF\% & $\Delta P$ & JF\% & $\Delta P$
+ & $D$/ft & $N_{\mathrm{ch}}$ & $\Delta P$
+ & vs UFM & vs SVG\\
+\midrule
+C1 S2      & 58 & 4.36 & 60 & 2.86 & 3.62 & 69 & 0.98 & 78\% & 66\%\\
+C1 S11     & 52 & 3.54 & 56 & 2.21 & 3.54 & 66 & 0.90 & 75\% & 59\%\\
+C2 S2      & 58 & 4.38 & 60 & 2.88 & 3.62 & 69 & 0.98 & 78\% & 66\%\\
+C2 S11     & 52 & 3.57 & 56 & 2.23 & 3.57 & 67 & 0.90 & 75\% & 60\%\\
+C2 WWN S2  & 49 & 3.55 & 51 & 2.51 & 3.32 & 58 & 0.97 & 73\% & 61\%\\
+C2 WWN S11 & 43 & 2.78 & 46 & 1.86 & 3.29 & 57 & 0.87 & 69\% & 53\%\\
+C3 S2      & 31 & 2.76 & 32 & 2.39 & 2.65 & 37 & 0.98 & 65\% & 59\%\\
+C3 S11     & 26 & 2.17 & 27 & 1.93 & 2.54 & 34 & 0.83 & 62\% & 57\%\\
+C4 S2      & 41 & 3.04 & 43 & 2.31 & 3.05 & 49 & 0.98 & 68\% & 58\%\\
+C4 S11     & 36 & 2.35 & 38 & 1.70 & 2.96 & 46 & 0.86 & 63\% & 49\%\\
+TD S2      & 28 & 2.24 & 29 & 1.93 & 2.50 & 33 & 1.01 & 55\% & 48\%\\
+TD S11     & 25 & 1.83 & 27 & 1.50 & 2.43 & 31 & 0.91 & 50\% & 40\%\\
+\midrule
+\textbf{Range} & 25--58 & 1.83--4.38 & 27--60 & 1.50--2.88
+ & 2.4--3.6 & 31--69 & 0.83--1.01 & 50--78\% & 40--66\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{output/48_cist_vs_sulzer.png}
+  \caption{CIST (curved helical vane, three elliptical nozzles at 120°)
+    vs.\ Sulzer UFM and SVG over twelve cases on the common 9-ft column.
+    (a)~per-tray pressure drop; (b)~equivalent CIST column diameter at
+    matched throughput; (c)~efficiency on an O'Connell basis with deck
+    factors; (d)~capacity utilisation and turndown.}
+  \label{fig:sulzer}
+\end{figure}
+
+\subsection{Interpretation: Savings, Turndown and Performance}
+
+\paragraph{Capacity / diameter reduction.}  The UFM and SVG decks run
+this column at 25--60\,\% of jet flood, i.e.\ neither deck is
+flood-limited at the rated duty---the 9-ft diameter is set by the need
+to keep a gravity-drained froth below entrainment.  The CIST, having no
+deck pool and a centrifugal (not gravity) phase split, passes the same
+vapour through chambers operating at $\ux = 3$\,m/s.  The volumetric
+load is met by 31--69 chambers, giving an equivalent column diameter of
+\textbf{2.4--3.6\,ft against the installed 9\,ft---a 60--73\,\%
+diameter reduction} (66\,\% mean), or equivalently an 84--93\,\%
+reduction in cross-sectional area for the same throughput.  This is the
+dominant economic result: the same separation duty fits in roughly a
+one-third-diameter shell.
+
+\paragraph{Pressure-drop saving.}  CIST per-tray pressure drop is
+0.83--1.01\,mmHg across all twelve cases, essentially flat because it
+scales with $\rhoV\ux^2$ rather than with a liquid head.  Against the
+moving-valve UFM (1.83--4.38\,mmHg) this is a \textbf{50--78\,\% saving}
+(67\,\% mean); against the lower-drop fixed-valve SVG
+(1.50--2.88\,mmHg) it is a \textbf{40--66\,\% saving} (56\,\% mean).
+The saving is largest at high vapour load (C1/C2), where conventional
+dry-drop and aerated-head losses both climb while the CIST drop barely
+moves.  For a vacuum or low-$\Delta P$ service this compounds down the
+column: at 13 trays the CIST saves of order 15--40\,mmHg of total tower
+pressure drop relative to the vendor decks.
+
+\paragraph{Turndown flexibility.}  The CIST holds $N_g^{\mathrm{eff}}
+= 42.4$\,g and $d_{50} = 8$\,µm at the design point.  Because the
+centrifugal field scales as $\ux^2$, the swirl separation stays
+effective as the vapour rate falls: maintaining $N_g \ge 15$\,g sets a
+lower limit near $\ux = 1.5$\,m/s, while droplet residence time sets an
+upper limit near $\ux = 5.0$\,m/s, for an unaided \textbf{turndown of
+$\approx 3.3{:}1$}.  The three-nozzle liquid feed extends liquid-side
+turndown independently---each nozzle can be valved, so the minimum
+stable sump head ($9$\,mm for three nozzles) still sits far below the
+50--100\,mm operating head.  The documented TD cases (jet flood
+25--29\,\%) fall comfortably inside the CIST envelope: at those rates
+the CIST runs at the low end of its $\ux$ band with the swirl field
+still above the $15$-g floor, whereas the vendor decks are by then near
+their own weep/low-load margins.
+
+\paragraph{Efficiency.}  On the O'Connell basis the curved-vane,
+three-nozzle CIST reaches the 95\,\% cap in all twelve cases against
+$\approx 77$--80\,\% for the valve decks.  For a fixed number of
+theoretical stages this translates to roughly \textbf{15\,\% fewer
+actual trays than UFM and 19\,\% fewer than SVG}.  Combined with the
+24-in spacing retained from the vendor design, the shorter tray count
+and the much smaller diameter give a substantially smaller and lighter
+column for the identical separation.
+
+\paragraph{Caveat.}  These CIST figures are model predictions from the
+first-principles correlations of this disclosure, not measured data;
+the vendor numbers are rated values from commercial software.  The
+efficiency multiplier (1.32) and the pressure-drop coefficient
+($K = 1.73$) are the two parameters most in need of pilot confirmation
+(Section~\ref{sec:limitations}).  The diameter reduction, which follows
+directly from the chamber-count geometry and is largely insensitive to
+those two parameters, is the most robust of the four results.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Claims (Draft)}
