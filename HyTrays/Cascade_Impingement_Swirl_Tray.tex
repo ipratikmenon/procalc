@@ -303,6 +303,13 @@ The key distinguishing features from all prior vapour--liquid tray art are:
     (c)~centripetal acceleration $N_g(z)$ from 184.7\,g to 3.24\,g on
     log scale with effective mean 42.4\,g;
     (d)~local cut diameter $d_{50}(z)$ profile, overall $d_{50} = 10.8$\,µm.
+  \item[Figure~\ref{fig:wall_film}] Inner-wall enhancement features:
+    (a)~elevation cross-section showing saddle-cut base, drainage slots,
+    spiral grooves, liquid film, nozzles, and cross-chevron crown;
+    (b)~plan view of cylinder base with saddle-depth contour, slot
+    positions and 120° nozzle layout; (c)~feature assessment table;
+    (d)~derived film thickness, film Reynolds number, groove enhancement
+    factor and drainage-slot sizing.
   \item[Figure~\ref{fig:sulzer}] Numerical comparison of the CIST
     (curved helical vane, three elliptical nozzles at 120°) against
     Sulzer UFM and SVG commercial trays across twelve documented
@@ -1958,6 +1965,279 @@ Figure~\ref{fig:details}a) is the preferred configuration because it:
 advantage of the elliptical shape over $N = 4$ circular holes (which
 produce a lower $\Delta P_{\mathrm{capillary}}$ margin and lose the
 axis-switching benefit).
+
+% ════════════════════════════════════════════════════════════════════════════
+\section{Inner-Wall Film, Drainage Slots, Surface Grooves and Crown Chevron}
+\label{sec:wall_film}
+
+This section evaluates four structural additions to the baseline CIST
+cylinder proposed in Figure~\ref{fig:wall_film}: base drainage slots,
+spiral grooves on the inner wall, an analogous feature on the outer
+wall, and a cross-chevron crown insert.  The three elliptical
+liquid-jet nozzles at 120° remain unchanged throughout.
+
+\subsection{Cylinder Attachment to the Wavy Deck}
+
+On the corrugated deck the chamber cylinder straddles a wave crest.
+The crest runs horizontally (the ``ridge'' direction, perpendicular to
+wave propagation); the cylinder axis is vertical.  The intersection of
+a vertical cylinder of radius $\Rc$ with two inclined planes of
+half-angle $\alpha = 27.5°$ meeting at a line is a pair of oblique
+elliptic arcs.  Taking the crest as the $x$-axis and measuring depth
+below the crest apex,
+\begin{equation}
+  h_{\mathrm{cut}}(\varphi) = \Rc\,|\sin\varphi|\,\tan\alpha
+  \label{eq:hcut}
+\end{equation}
+where $\varphi$ is the azimuthal angle measured from the crest direction.
+The maximum saddle depth is
+\begin{equation}
+  h_{\mathrm{cut,max}} = \Rc\,\tan\alpha = 37.5 \times \tan 27.5° = 19.5\,\text{mm}
+  \label{eq:hcutmax}
+\end{equation}
+at $\varphi = \pm 90°$ (the wave-propagation direction, i.e.\ the sides of the
+cylinder perpendicular to the ridge).  At $\varphi = 0°$ (along the crest
+ridge) the saddle depth is zero.
+
+\textbf{Fabrication.}  The cylinder base is \emph{profile-cut} to Eq.~\eqref{eq:hcut}
+by CNC plasma or laser; the resulting ``saddle'' base rests in the V-groove
+of the crest like a barrel in a rack.  A fillet weld is run along the full
+intersection line, sealing the chamber from outside.  Because the weld follows
+a 3-D curve it is made in segments; no shell modification is required.
+
+\subsection{Base Drainage Slots}
+
+After entering through the tangential inlet slot and spiralling upward, liquid
+droplets impinge on the wall under centrifugal force and form a falling film
+(Section~\ref{sec:film_thickness}).  This film migrates to the base of the
+cylinder, which is the lowest point of the profile cut.  Without a drain path
+the collected liquid would pool at the base and partially obstruct the
+tangential vapour inlet, raising the effective $K$ coefficient and creating
+flow instability.
+
+\textbf{Slot design.}  Drainage slots are cut in the cylinder wall at the two
+lowest points of the saddle ($\varphi = \pm 90°$), height $h_s = 5$\,mm and
+width $w_s$ (derived below).  The weld is omitted at these two positions;
+short gussets on the \emph{outside} of the cylinder restore structural
+continuity across the gap.  Drained liquid falls onto the wave face and
+flows by gravity to the sump trough.
+
+\textbf{Slot sizing.}  Under the centrifugal pressure of the film the
+drain velocity is
+\begin{equation}
+  u_s = \sqrt{2\,a_c\,\delta}
+  \label{eq:uslot}
+\end{equation}
+where $a_c = \bar{a}_c = 42.4\,g = 416$\,m/s$^2$ (effective centripetal
+acceleration, Section~\ref{sec:refinements}) and $\delta$ is the film
+thickness (Section~\ref{sec:film_thickness}).  For $\delta = 70$\,µm
+(derived below):
+\[
+  u_s = \sqrt{2 \times 416 \times 70 \times 10^{-6}} = 0.24\;\text{m/s}
+\]
+The total film drainage rate is $Q_w = \alpha_{\mathrm{dep}}\,Q_L^{(ch)}$
+where $\alpha_{\mathrm{dep}} \approx 0.85$ is the fraction of the per-chamber
+liquid flow deposited on the wall by centrifugation (the remainder leaves as
+fine mist through the crown), and $Q_L^{(ch)}$ is the per-chamber liquid
+volumetric flow.  For the C1\,S2 case with $N_{ch} = 69$:
+\[
+  Q_L^{(ch)} = 6.38 \times 10^{-5}\;\text{m}^3\text{/s},\quad
+  Q_w = 5.42 \times 10^{-5}\;\text{m}^3\text{/s}
+\]
+Two slots $(N_s = 2)$ require per-slot area
+\[
+  A_s = \frac{Q_w}{N_s\,u_s} = \frac{5.42 \times 10^{-5}}{2 \times 0.24}
+       = 1.13 \times 10^{-4}\;\text{m}^2
+\]
+For $h_s = 5$\,mm: $w_s = A_s/h_s = 22.6$\,mm.  In practice a
+$5 \times 25$\,mm slot (per side) is adequate; at the lower liquid-load
+cases the slot is only partially flowing.
+
+\textbf{Benefit.}  The slots keep the vapour inlet free of pooled liquid
+across the full operating range.  This is most critical at high $L/G$
+(cases C3\,S2: $L/G = 45$\,wt.\%) where without drainage the base pool
+would increase effective $K$ by $\sim 20$--$30$\,\%.
+
+\subsection{Thin Liquid Film on the Inner Wall}
+\label{sec:film_thickness}
+
+As centrifuged droplets impinge on the inner wall they coalesce into a
+thin falling film under the combined influence of gravity (axial) and
+centrifugal force (radial).  The steady film thickness is obtained from the
+Nusselt centrifugal-film equation:
+\begin{equation}
+  \delta = \left(\frac{3\,\mu_L\,\Gamma}{\rhoL\,a_c}\right)^{1/3}
+  \label{eq:delta_film}
+\end{equation}
+where $\Gamma = Q_w/(2\pi\Rc)$ is the film flow per unit circumference.
+For the C1\,S2 representative case:
+\[
+  \Gamma = \frac{5.42 \times 10^{-5}}{2\pi \times 0.0375}
+         = 2.30 \times 10^{-4}\;\text{m}^2\text{/s}
+\]
+\[
+  \delta = \left(\frac{3 \times 1.35 \times 10^{-4} \times 2.30 \times 10^{-4}}
+                 {605.5 \times 416}\right)^{1/3}
+         = 71\;\mu\text{m}
+\]
+The film Reynolds number
+\begin{equation}
+  \mathrm{Re}_{\mathrm{film}} = \frac{4\,\Gamma\,\rhoL}{\mu_L}
+    = \frac{4 \times 2.30 \times 10^{-4} \times 605.5}{1.35 \times 10^{-4}}
+    \approx 4100
+  \label{eq:re_film}
+\end{equation}
+exceeds the turbulent transition at 1600.  The film is therefore turbulent
+and provides higher mass-transfer coefficients than the Nusselt laminar
+prediction.  The 71-µm film is far too thin to pool or destabilise the
+vapour path; it is a beneficial wetted-wall contact surface in addition to
+the jet-spray zone.
+
+\subsection{Spiral Grooves on the Inner Wall}
+
+\textbf{Geometry.}  V-shaped spiral grooves are formed on the inner
+surface during tube rolling or by a single-pass CNC operation: depth
+$d_g = 1$\,mm, width $w_g = 2$\,mm, pitch $s_g = 8$\,mm, helix angle
+matching the local vane angle $\theta(z)$.
+
+\textbf{Area enhancement.}  Each groove adds two inclined sidewalls of
+height $d_g$, doubling the wetted area per groove compared with the
+smooth surface:
+\begin{equation}
+  f_{\mathrm{area}} = 1 + \frac{2\,d_g}{s_g}
+                    = 1 + \frac{2 \times 1}{8} = 1.25
+  \label{eq:f_area}
+\end{equation}
+i.e.\ 25\,\% more wetted wall area.
+
+\textbf{Turbulence enhancement.}  The relative roughness is
+$\varepsilon/D_h = d_g/D_h = 1/75 = 0.013$.  From the Colebrook/Moody
+correlation the Darcy friction factor increases from $f = 0.020$ (smooth)
+to $f_r \approx 0.023$ ($+$15\,\%).  By the Chilton--Colburn analogy for
+heat and mass transfer,
+\begin{equation}
+  f_{\mathrm{turb}} = \left(\frac{f_r}{f}\right)^{2/3}
+                    = 1.15^{0.667} = 1.10
+  \label{eq:f_turb}
+\end{equation}
+i.e.\ the mass-transfer coefficient on the grooved wall is 10\,\% higher
+than on a smooth wall.
+
+\textbf{Combined effect.}  The wall-film mass-transfer contribution to the
+total NOG is enhanced by
+\begin{equation}
+  f_{\mathrm{groove}} = f_{\mathrm{area}} \times f_{\mathrm{turb}}
+                       = 1.25 \times 1.10 = 1.38
+  \label{eq:f_groove}
+\end{equation}
+The wall film provides approximately 7\,\% of the total NOG (estimated from
+the ratio of wall-film specific surface area $a_w = 2/\Rc = 53$\,m$^{-1}$
+to jet-spray specific area $a_j \approx 150$\,m$^{-1}$, both weighted by their
+respective $k_L$ values).  Grooves therefore add
+$0.07 \times (1.38 - 1) \approx +2.7$\,\% to the total NOG.
+
+In the 12 Sulzer comparison cases (Section~\ref{sec:sulzer}) the efficiency
+is already at the 95\,\% cap; the groove improvement is reserved for lower
+$E_{\mathrm{OC}}$ services (heavy liquids or low relative volatility) where the
+cap is not reached.
+
+\textbf{Pressure-drop penalty.}  The wall-friction term in $K$ increases by
+15\,\%: $\Delta K = 0.15 \times f_D(L_v/D_h) = 0.15 \times 0.0885 = 0.013$.
+As a fraction of total $K = 1.73$ this is less than 1\,\%---entirely
+negligible.
+
+\textbf{Outer-wall grooves.}  Grooves on the outer surface of the cylinder
+(facing the sump liquid) are assessed as providing negligible mass-transfer
+benefit: the outer wall is in contact with the quiescent sump pool, not the
+vapour-shear zone.  They add fabrication cost without a corresponding
+process gain and are not recommended.
+
+\subsection{Cross-Chevron Crown Insert}
+
+The sketch proposes criss-cross baffles at the top of the cylinder.  Two
+interpretations are examined.
+
+\textbf{Interpretation A — mid-height opposing helices (full height).}
+Two opposing-handedness helical baffles running the full chamber height
+create counter-rotating vortex pairs, similar to a static-mixer element.
+The adverse effect is that they disrupt the coherent Rankine vortex
+established by the guide vane, reducing the wall-acceleration
+$N_g^{\mathrm{eff}}$ and impairing centrifugal separation.  At
+$u_x = 3$\,m/s the incremental mass-transfer benefit ($\sim$10--20\,\%)
+is outweighed by the 15--25\,\% pressure-drop penalty and the degraded
+separation.  \emph{Interpretation A is not recommended.}
+
+\textbf{Interpretation B — cross-chevron crown vanes (exit only).}
+Two short opposing angled vanes are placed only at the crown exit
+(top 15\,\% of $\Hc$, above the guide vane).  These act as a
+\emph{chevron mist eliminator}: droplets that survive the centrifuge stage
+(principally those with $d < d_{50} = 8$\,µm) impinge on the angled vanes
+by inertia.  The pressure drop is dominated by the tangential kinetic energy
+at the crown:
+\begin{equation}
+  \Delta P_{\mathrm{chev}} = C_{\mathrm{chev}}\,\tfrac12\,\rhoV\,u_{\theta,c}^2
+  \label{eq:dp_chev}
+\end{equation}
+where $u_{\theta,c} = u_x\cot\theta_1 = 3.0 \times \cot 70° = 1.09$\,m/s
+and $C_{\mathrm{chev}} = 0.30$ (chevron loss coefficient, well-designed
+close-packed chevron).  For the C1\,S2 case:
+\[
+  \Delta P_{\mathrm{chev}} = 0.30 \times 0.5 \times 16.72 \times 1.09^2
+    = 3.0\;\text{Pa} = 0.022\;\text{mmHg/tray}
+\]
+This is less than 3\,\% of the total CIST pressure drop.  The benefit is an
+estimated 10--15\,\% additional capture of the 5--8\,µm fraction that
+passes the main centrifuge, improving vapour purity (entrainment
+reduction) without changing the mass-transfer NOG.
+
+\emph{Interpretation B (cross-chevron at crown only) is recommended as
+an optional add-on for vapour-purity-sensitive services.}
+
+\subsection{Summary of Recommendations}
+
+Table~\ref{tab:wall_features} collects the four wall features.
+
+\begin{table}[H]
+\centering
+\caption{Inner-wall and crown features: recommendation, effect and penalty.}
+\label{tab:wall_features}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llcc}
+\toprule
+Feature & Mass-transfer/separation effect & $\Delta$NOG & $\Delta(\Delta P)$\\
+\midrule
+Base drainage slots & Prevents base pooling; stabilises $\Delta P$; & 0 & 0\\
+                    & extends turndown at high $L/G$                &   &  \\
+Inner spiral grooves & $f_{\mathrm{groove}} = 1.38\times$ on wall film; & $+$2.7\,\% & $<$1\,\%\\
+                     & relevant in uncapped-efficiency services            &             &  \\
+Crown cross-chevron  & $+$10--15\,\% capture of $d<8$\,µm mist;          & 0 & $+$0.02\,mmHg\\
+(Interpretation B)   & vapour-purity improvement                           &   & \\
+Outer-wall grooves   & Negligible (sump side)                             & 0 & 0 \\
+Mid-height opposing  & Disrupts Rankine vortex; impairs centrifuge;         & & \\
+helices (full ht.)   & not recommended                                    & $-$  & $+$15--25\,\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{output/49_cist_wall_film.png}
+  \caption{CIST inner-wall enhancement features.
+    \textbf{(a)} Elevation cross-section: cylinder on wavy-deck crest
+    showing saddle cut, drainage slots at $\varphi = \pm 90°$, spiral
+    grooves on inner wall, 71-µm liquid film, three nozzle openings in
+    deck, and cross-chevron crown vanes.
+    \textbf{(b)} Plan view of cylinder base: saddle-cut depth contour
+    (darker = lower elevation), two drainage slots at the wave-face
+    direction, three 120° nozzles at $r = 0.5\,\Rc$.
+    \textbf{(c)} Feature assessment table: physics, mass-transfer effect
+    and pressure-drop penalty for each proposed feature.
+    \textbf{(d)} Derived quantities for representative C1\,S2 conditions:
+    film thickness (Nusselt centrifugal), film Reynolds number, groove
+    enhancement factor and drainage-slot sizing.}
+  \label{fig:wall_film}
+\end{figure}
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Numerical Validation Against Commercial Trays (Sulzer UFM and SVG)}
