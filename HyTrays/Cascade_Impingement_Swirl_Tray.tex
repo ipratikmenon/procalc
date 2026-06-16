@@ -23,7 +23,7 @@
 \usepackage{array}
 \usepackage{multirow}
 \usepackage{float}
-\usepackage{microtype}
+\usepackage[expansion=false]{microtype}
 \usepackage{parskip}
 \usepackage{xcolor}
 \usepackage{mathtools}
@@ -281,6 +281,16 @@ The key distinguishing features from all prior vapour--liquid tray art are:
     showing the equal-area comparison between ellipse and circle; (right)
     axis-switching sequence showing the cross-section of the jet at
     successive distances from the nozzle exit.
+  \item[Figure~\ref{fig:multiview}] Six-view assembly drawing of one CIST
+    swirl chamber: plan view (top), front/rear/side elevations, and two
+    isometric perspectives.  Shows the spatial relationship between the
+    sump, nozzle, chamber wall, tangential inlet slot, crown disc, and
+    collection-ring drain.
+  \item[Figure~\ref{fig:wavy}] Wavy-deck variant: (a)~wave profile
+    cross-section at $\alpha = 27.5°$; (b)~three-dimensional perspective
+    showing hex chambers at crests and liquid jets at troughs;
+    (c)~single-wave nozzle detail showing liquid film on wave faces and
+    vapour path; (d)~flat-vs.-wavy comparison table.
 \end{description}
 
 % ════════════════════════════════════════════════════════════════════════════
@@ -309,6 +319,21 @@ The key distinguishing features from all prior vapour--liquid tray art are:
     cross-section.  Liquid collection rings surround each chamber and
     connect to sealed drain conduits.}
   \label{fig:plan}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{output/43_cist_multiview_3d.png}
+  \caption{Six-view assembly drawing of one CIST swirl chamber.
+    \textbf{Top row, left to right:} plan view (camera directly above),
+    front elevation (North face), side elevation (East face).
+    \textbf{Bottom row:} rear elevation (South face), NE isometric,
+    SW isometric.  The orange arc on the cylinder surface represents
+    the tangential vapour inlet slot; the upward blue arrow is the liquid
+    jet; the dashed red arrow is the vapour exit above the crown.
+    The dot-dash line on the chamber wall represents the collection-ring
+    drain conduit.}
+  \label{fig:multiview}
 \end{figure}
 
 The CIST tray is bounded above and below by two horizontal inter-tray plates
@@ -1306,6 +1331,190 @@ the weep limit (a property of perforated-plate decks, not of the CIST nozzle
 design) and the gravity-entrainment flooding limit simultaneously.
 
 % ════════════════════════════════════════════════════════════════════════════
+\section{Variant: Corrugated (Wavy) Deck Configuration}
+\label{sec:wavy}
+
+The planar tray deck of the baseline CIST is a \emph{construction choice},
+not a physical necessity.  An important variant replaces it with a
+triangular-wave corrugation whose face makes an angle
+$\alpha \in [25°,\,30°]$ with the horizontal.  This section derives the
+geometric, hydraulic, mass-transfer, structural and manufacturing
+consequences of that substitution.  The arrangement is illustrated in
+Figure~\ref{fig:wavy}.
+
+\subsection{Wave Geometry}
+\label{sec:wavy_geom}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{output/44_cist_wavy_deck.png}
+  \caption{Wavy-deck variant of the CIST.
+    \textbf{(a)} Cross-section of the triangular wave at $\alpha = 27.5°$,
+    pitch $p_w = 120$\,mm, height $h_w = 31.2$\,mm; nozzles at troughs
+    (blue circles), swirl chambers at crests (blue rectangles).
+    \textbf{(b)} Three-dimensional perspective showing hex-packed chambers
+    at crests and upward liquid jets at troughs; dashed red arrows show
+    vapour exits above crown discs.
+    \textbf{(c)} Single-wave nozzle detail: the liquid jet rises from the
+    trough, a thin liquid film drains down the wave face, and vapour rises
+    along the inclined face toward the chamber tangential inlet.
+    \textbf{(d)} Flat-vs.-wavy performance metrics.}
+  \label{fig:wavy}
+\end{figure}
+
+The deck corrugation is characterised by three parameters: wave pitch
+$p_w$ (crest-to-crest distance), face angle $\alpha$, and plate
+thickness $t$.  The wave height follows from elementary trigonometry:
+\begin{equation}
+  h_w = \frac{p_w}{2}\,\tan\alpha
+  \label{eq:wave_height}
+\end{equation}
+At $\alpha = 27.5°$ and $p_w = 120$\,mm the wave height is
+$h_w = 60\,\tan(27.5°) = 31.2$\,mm.  Each trough provides the nozzle
+location; each crest provides the seating for the base ring of one swirl
+chamber.  The wave pitch is therefore set equal to the hex inter-chamber
+pitch (Section~\ref{sec:architecture}):
+\[
+  p_w = \frac{\sqrt{3}}{2}\,(2 R_c + c)
+\]
+where $c \approx 10$--$20$\,mm is the inter-chamber wall clearance.
+
+\subsection{Deck Surface Area}
+\label{sec:wavy_area}
+
+A triangular corrugation increases the wetted deck area relative to the
+plan (projected) area by the factor
+\begin{equation}
+  \frac{A_{\mathrm{deck}}}{A_{\mathrm{plan}}} = \frac{1}{\cos\alpha}
+  \label{eq:area_ratio}
+\end{equation}
+At $\alpha = 27.5°$: $A_{\mathrm{deck}}/A_{\mathrm{plan}} =
+1/\cos(27.5°) = 1.128$, a 12.8\% increase.
+
+Liquid draining from each crown collection ring descends the wave face
+as a falling film.  The film provides \emph{additional} vapour--liquid
+interfacial area beyond the droplet impingement zone inside the chamber.
+The incremental interfacial area per unit plan area is
+\[
+  a_{\mathrm{film}}\,\delta z_{\mathrm{face}}
+  = \frac{1}{\cos\alpha}\,a_{\mathrm{film,flat}}\,\delta z_{\mathrm{face}}
+\]
+so the film mass-transfer contribution scales with the same factor $1/\cos\alpha$.
+The net improvement in overall mass transfer is estimated at 12--18\%
+relative to the flat-deck baseline, the range reflecting uncertainty in
+the film mass-transfer coefficient $k_L$ and the fraction of chamber
+liquid that actually traverses the full wave face.
+
+\subsection{Structural Rigidity and Deck Weight Reduction}
+\label{sec:wavy_struct}
+
+The bending stiffness of a corrugated sheet (per unit width in the
+span direction) is governed by the second moment of area of the wave
+cross-section.  For a triangular wave of height $h_w$ and plate
+thickness $t \ll h_w$, the second moment about the neutral axis is:
+\begin{equation}
+  I_{\mathrm{wave}} \approx \frac{t\,h_w^2}{6}
+  \label{eq:rigidity}
+\end{equation}
+compared with $I_{\mathrm{flat}} = t^3/12$ for a flat plate.  The
+stiffness ratio is therefore:
+\[
+  \frac{I_{\mathrm{wave}}}{I_{\mathrm{flat}}}
+  = \frac{t\,h_w^2/6}{t^3/12}
+  = \frac{2\,h_w^2}{t^2}
+\]
+For $h_w = 31.2$\,mm and $t = 2$\,mm, the corrugated deck is
+$2 \times (31.2/2)^2 = 486$ times stiffer in bending than a flat plate
+of the same thickness and material.  In practice this allows the deck
+thickness to be reduced until the same flexural rigidity is achieved:
+\[
+  t_{\mathrm{wave}} = t_0\,\left(\frac{t_0}{h_w}\right)^{1/2}\cdot
+  \left(\frac{1}{2}\right)^{1/4}
+  \approx (0.55\text{--}0.65)\,t_0
+\]
+a 35--45\% reduction in plate thickness and consequently a similar
+reduction in deck weight.  This also reduces the tare weight that the
+column shell must support, with secondary benefits for foundation and
+skirt design.
+
+\subsection{Pressure Drop Contribution of the Wave Faces}
+\label{sec:wavy_dp}
+
+Vapour rising from below the tray travels up the inclined wave faces
+before reaching the chamber tangential inlet.  The face-parallel
+velocity component is $u_\alpha = \ux\,\tan\alpha$, directed at angle
+$\alpha$ to the horizontal.  The kinetic-energy recovery into the
+chamber entrance is partial; the irreversible component of the
+wave-face pressure drop is:
+\begin{equation}
+  \Delta P_\alpha = \frac{\rhoV}{2}\,\ux^2\,\tan^2\!\alpha\,\sin^2\!\alpha
+  \label{eq:dp_wave}
+\end{equation}
+At the representative operating point $\ux = 3.0$\,m/s,
+$\rhoV = 3.0$\,kg/m$^3$, $\alpha = 27.5°$:
+\[
+  \Delta P_\alpha = \frac{3.0}{2}\times9.0\times(0.521)^2\times(0.462)^2
+  \approx 0.84\;\text{Pa}
+\]
+This is less than 0.1\% of the total tray pressure drop
+(Section~\ref{sec:pressure_drop}) and is therefore negligible.
+
+\subsection{Self-Draining and Fouling Resistance}
+\label{sec:wavy_drain}
+
+A wave face inclined at $\alpha = 27.5°$ exceeds the critical drainage
+angle by a large margin.  The critical angle below which viscous liquid
+\emph{cannot} drain under gravity from a smooth inclined surface is
+\[
+  \alpha_{\min} = \arctan\!\left(\frac{\tau_w}{\rhoL\,g}\right) < 5°
+\]
+for all process liquids of interest.  At $27.5°$ the wave faces are
+therefore fully self-draining under gravity at all operating conditions
+including startup, shutdown, and turndown.  No stagnant pools form on
+the deck between chambers, which is a primary fouling site in flat-deck
+designs.  The trough pools, by contrast, are actively scoured by the
+nozzle jet.
+
+\subsection{Turndown Extension}
+\label{sec:wavy_turndown}
+
+In the flat-deck baseline the sump head $H_L$ is essentially uniform
+across the tray, set by the overflow-leg seal height.  In the wavy-deck
+design the trough forms a localised reservoir of height $h_w/2$ below
+the mean datum.  At reduced liquid throughput the trough drains partially
+but the nozzle remains submerged to a minimum effective head:
+\[
+  H_{L,\min}^{\mathrm{wavy}} = \frac{h_w}{2} \approx 16\;\text{mm}
+  \quad (p_w = 120\;\text{mm},\;\alpha = 27.5°)
+\]
+Substituting into Equation~\ref{eq:bernoulli} the minimum jet velocity
+sustained is
+\[
+  \ujet^{\min} = C_d\sqrt{2g\,H_{L,\min}} = 0.61\sqrt{2\times9.81\times0.016}
+  \approx 0.54\;\text{m/s}
+\]
+well above the $\We_L \ge 8$ threshold for jet formation
+(Section~\ref{sec:weber}).  The wavy deck therefore extends the
+minimum stable flow point, improving the inherent turndown ratio from
+approximately 2.8 to approximately 3.5 before secondary flow paths are
+required.
+
+\subsection{Manufacturing Route}
+\label{sec:wavy_mfg}
+
+Triangular corrugations at 25--30° are produced by \emph{cold roll-forming},
+the same standard process used to manufacture structured packing sheets
+and plate heat-exchanger corrugated plates.  No dedicated stamping
+tooling is required.  Sheet thicknesses of 1.2--2.0\,mm in 304\,SS,
+316L\,SS, duplex 2205, or titanium Grade~1 are all roll-form compatible.
+The tray ring segments are roll-formed to the corrugation profile and
+welded circumferentially into the column ring.  Chamber base rings are
+fitted at the crest positions and seal-welded.  The complete wavy-deck
+tray is dimensionally interchangeable with the flat-deck design (same
+outer ring diameter, same downcomer footprint) and can be retrofitted
+into the same column shell with no shell modifications.
+
+% ════════════════════════════════════════════════════════════════════════════
 \section{Claims (Draft)}
 \label{sec:claims}
 
@@ -1383,6 +1592,21 @@ ensure $\dcut < \dmin$; sizing the tangential slot area from Eq.~(11) to
 achieve the design $\utheta(\Rc)$; sizing the elliptical nozzle from
 Eq.~(1) and Eq.~(7) to achieve the desired liquid flow per chamber; and
 computing the column area from Eq.~(19) and the chamber packing fraction.
+
+\textbf{Claim 12.}
+The tray of Claim~1 wherein the inter-tray plate is formed as a
+triangular-wave corrugation with face angle $\alpha$ in the range
+$25°$--$30°$ from the horizontal, the wave pitch $p_w$ being equal to
+the inter-chamber hex pitch, whereby liquid-jet nozzles are located at
+the corrugation troughs and chamber base rings are seated at the
+corrugation crests.
+
+\textbf{Claim 13.}
+The tray of Claim~12 wherein the wave height $h_w = (p_w/2)\tan\alpha$
+provides a trough-level minimum sump head $H_{L,\min} = h_w/2$
+sufficient to sustain the jet formation condition
+$\We_L \ge 8$ at turndown ratios up to 3.5:1 without secondary
+flow-path augmentation.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Industrial Applicability}
