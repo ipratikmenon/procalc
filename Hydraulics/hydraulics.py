@@ -2861,8 +2861,10 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("", False),
         ("FLOW FRACTION FROM MAIN (Tee split / merge)", True),
         ("  On a Tee fitting row, enter a SIGNED fraction of the Main flow:", False),
-        ("    negative  = SPLIT  (that fraction leaves the line)", False),
-        ("    positive  = MERGE  (that fraction joins the line)", False),
+        ("    negative  = SPLIT   (that fraction of the CURRENT flow leaves the line)", False),
+        ("    positive  = MERGE   (running flow becomes that fraction of the ORIGINAL Main flow —", False),
+        ("                         an absolute target, e.g. 0.125 → 0.25 → 0.5 → 1.0 builds a header", False),
+        ("                         up in stages as branches join it)", False),
         ("  The running vapour & liquid mass flows are scaled in Seq order; downstream dP follows.", False),
         ("", False),
         ("MULTIPLE LINES IN SERIES", True),
@@ -3634,9 +3636,13 @@ def build_profile_flash_noiso(
         scale_tag = ""
 
         # ── Tee split / merge: update running flow scale ─────────────────
+        # negative = SPLIT: a delta fraction of the CURRENT flow leaves the line.
+        # positive = MERGE: the running flow becomes that fraction of the
+        # original Main flow (an ABSOLUTE target), e.g. 0.125 → 0.25 → 0.5 → 1.0
+        # builds a header up in stages as branches join it.
         frac = num(row.get("Flow Fraction from Main"))
         if frac is not None and _is_tee(fitting):
-            new_scale = max(0.0, flow_scale + frac)
+            new_scale = frac if frac > 0 else max(0.0, flow_scale + frac)
             verb = "merge" if frac > 0 else "split"
             scale_tag += f" | Tee {verb} {frac:+.3f} → flow×{new_scale:.3f}"
             flow_scale = new_scale
