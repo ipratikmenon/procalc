@@ -2854,6 +2854,10 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  Leave Stream Lookup BLANK to enter properties by hand in the yellow columns.", False),
         ("  Fill Temp, Vapor Mass Flow, Vap MW/Visc/Z/Cp-Cv/Density and (optionally) the Liq columns.", False),
         ("  The engine synthesises a frozen flash split from these numbers — no HMB needed.", False),
+        ("  OVERRIDE MODE: with Stream Lookup filled (pulling an HMB stream), filling a yellow cell on", False),
+        ("  ANY row of that stream makes the typed value win over the HMB property for that field —", False),
+        ("  e.g. type a Vapor Mass Flow to test a different rate without touching the HMB file.", False),
+        ("  The override persists on every row downstream until changed again or a new stream loads.", False),
         ("", False),
         ("FLOW FRACTION FROM MAIN (Tee split / merge)", True),
         ("  On a Tee fitting row, enter a SIGNED fraction of the Main flow:", False),
@@ -3470,6 +3474,69 @@ def _blend_sp(sp_a, sp_b, mass_a: float, mass_b: float):
 # ════════════════════════════════════════════════════════════════════════
 #  No-ISO pressure marcher
 # ════════════════════════════════════════════════════════════════════════
+# ── Yellow-cell property overrides (win over a resolved HMB stream) ──────
+# Maps an input-sheet column to the StreamProps/FlashResult field it overrides.
+_YELLOW_OVERRIDE_MAP = {
+    "Temp (degF)":          "temp_f",
+    "Vapor Mass Flow":      "vap_mass",
+    "Vap MW":               "vap_mw",
+    "Vap Visc (cP)":        "vap_visc",
+    "Vap Z":                "vap_z",
+    "Vap Cp/Cv":            "vap_cp_cv",
+    "Vap Density (lb/ft3)": "vap_density",
+    "Liq Mass Flow (lb/h)": "liq_mass",
+    "Liq Density (lb/ft3)": "liq_density",
+    "Liq Visc (cP)":        "liq_visc",
+}
+
+
+def _row_yellow_overrides(row: dict) -> dict:
+    """Non-blank yellow manual-input cells on this row, keyed by field name."""
+    out = {}
+    for col, field_name in _YELLOW_OVERRIDE_MAP.items():
+        v = num(row.get(col))
+        if v is not None:
+            out[field_name] = v
+    return out
+
+
+def _apply_property_overrides(sp, fr, overrides: dict):
+    """Overlay persisted yellow-cell overrides onto a resolved sp/fr pair.
+
+    Lets any filled yellow cell win over the matching property pulled from
+    the HMB stream, without having to clear Stream Lookup and re-enter every
+    property by hand. Mass-flow overrides also re-derive quality/beta/moles
+    on the FlashResult so downstream phase split & ΔP stay consistent.
+    """
+    if not overrides or sp is None:
+        return sp, fr
+    sp_fields = dict(overrides)
+    if "vap_mw" in sp_fields:
+        sp_fields["mol_weight"] = sp_fields["vap_mw"]
+    if "vap_mass" in sp_fields or "liq_mass" in sp_fields:
+        sp_fields["total_mass"] = ((sp_fields.get("vap_mass", sp.vap_mass) or 0.0)
+                                    + (sp_fields.get("liq_mass", sp.liq_mass) or 0.0))
+    sp = replace(sp, **sp_fields)
+
+    if fr is not None:
+        fr_fields = {k: overrides[k] for k in ("vap_mass", "liq_mass", "vap_mw", "temp_f")
+                     if k in overrides}
+        if fr_fields:
+            vm  = fr_fields.get("vap_mass", fr.vap_mass)
+            lm  = fr_fields.get("liq_mass", fr.liq_mass)
+            vmw = fr_fields.get("vap_mw", fr.vap_mw) or 1.0
+            lmw = fr.liq_mw or vmw
+            tot = vm + lm
+            vmol, lmol = (vm / vmw if vmw else 0.0), (lm / lmw if lmw else 0.0)
+            tmol = vmol + lmol
+            fr_fields["quality"]   = (vm / tot) if tot > 0 else (1.0 if vm > 0 else 0.0)
+            fr_fields["vap_moles"] = vmol
+            fr_fields["liq_moles"] = lmol
+            fr_fields["beta"]      = (vmol / tmol) if tmol > 0 else fr_fields["quality"]
+            fr = replace(fr, **fr_fields)
+    return sp, fr
+
+
 def build_profile_flash_noiso(
         block_rows: list[dict],
         resolver,
@@ -3524,6 +3591,7 @@ def build_profile_flash_noiso(
     cur_sp:  HE.StreamProps | None = None   # active mixture StreamProps
     last_key = None           # (stream, hmb, case) to detect a genuine new stream
     mw_map: dict[str, float] = {}   # component → MW (for mole→mass in the sheet)
+    override_state: dict = {}       # persisted yellow-cell overrides (this stream)
 
     def _flash(fd, pp):
         return (FV.flash_isenthalpic(fd, pp) if use_isoH else FV.flash(fd, pp))
@@ -3537,8 +3605,10 @@ def build_profile_flash_noiso(
             cur_sp   = row_sp if row_sp is not None else default_sp
             last_key = key
             flow_scale = vap_cf = liq_cf = 1.0
+            override_state = {}
         elif cur_feed is None and row_sp is not None:
             cur_sp = row_sp                       # manual rows refresh sp
+        override_state.update(_row_yellow_overrides(row))
         a_feed, a_sp = cur_feed, (cur_sp or default_sp)
 
         fitting    = row.get("Fitting Name")
@@ -3624,6 +3694,10 @@ def build_profile_flash_noiso(
         else:
             fr = None
         sp = a_sp                       # used by the ΔP dispatch below
+        if override_state:
+            sp, fr = _apply_property_overrides(sp, fr, override_state)
+            scale_tag += (" | manual override: "
+                          + ", ".join(sorted(override_state)))
 
         if vap_eff <= 1e-9 and liq_eff <= 1e-9:
             scale_tag += ("  | stream terminated (carry-forward 0)"
