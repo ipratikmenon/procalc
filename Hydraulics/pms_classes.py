@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _JSON = os.path.join(_HERE, "gems_extracted.json")
@@ -106,6 +106,41 @@ G1S_2 = PipingClass(
 CURATED: list[PipingClass] = [G1S_1, G1S_2]
 
 
+# ── pipe-rule patches ────────────────────────────────────────────────────
+# Some extracted classes carry a single "CAL" row spanning a size range that
+# the GEMS sheet actually splits across multiple footnotes with DIFFERENT
+# schedule floors per sub-range; the bulk extractor has no way to tell them
+# apart and flattens them to one row with min_schedule="STD". A patch here
+# replaces ONLY pipe_rules for the named class — moc/components/etc. still
+# come from gems_extracted.json.
+#
+# G1A-3: the bulk-extracted "26"-48" CAL" row collapsed footnotes 63 (26"
+# only) and 1 (28"-48") into one min_schedule="STD" row. Per the project's
+# pipe-class data sheet (A 671 Gr.CC60 CL.22, WELDED, size range 26"-36"):
+#   26" only (note 63): P = 20.04 kgf/cm2g (285 psig) -> floor STD
+#   28"-36"  (note 1):  P = 16.03 kgf/cm2g (228 psig) -> floor XS
+# ASME B31.3 304.1.2(b): t = P*D / (2*(S*E*W + P*Y)), S = 20000 psig
+# (M.G. 1.1 carbon steel), E = 1.0, Y = 0.4, W = 1.0; tm = t + 0.125 in
+# corrosion allowance; required nominal T = tm + 0.3 mm (flat A671 welded-
+# pipe mill tolerance, not the 12.5% seamless convention). Both computed T
+# values land well under their schedule floor, so the floor governs:
+#   26":     t=0.184 in, tm=0.309 in, T=0.321 in -> STD (0.375 in) wins
+#   28"-36": t=0.159 in, tm=0.284 in, T=0.296 in -> XS  (0.500 in) wins
+PIPE_RULE_PATCHES: dict[str, tuple[PipeRule, ...]] = {
+    "G1A-3": (
+        PipeRule("3/4", "1", "160", "–", "Carbon Steel, Seamless", "14"),
+        PipeRule("1-1/2", "2", "80", "–", "Carbon Steel, Seamless"),
+        PipeRule("3", "24", "Std", "–", "Carbon Steel, Seamless"),
+        PipeRule("26", "26", "STD", "–",
+                 "Carbon Steel, Welded (A671 Gr.CC60 CL.22), Calculate Thickness",
+                 "63"),
+        PipeRule("28", "36", "XS", "–",
+                 "Carbon Steel, Welded (A671 Gr.CC60 CL.22), Calculate Thickness",
+                 "1"),
+    ),
+}
+
+
 # ── load extracted classes from JSON ────────────────────────────────────────
 def _class_from_dict(d: dict) -> PipingClass:
     pipe_rules = tuple(
@@ -151,10 +186,15 @@ def load_classes(json_path: str = _JSON) -> list[PipingClass]:
     if os.path.exists(json_path):
         with open(json_path, encoding="utf-8") as f:
             for d in json.load(f):
-                if d.get("name", "").upper() in curated_names:
+                name = d.get("name", "")
+                if name.upper() in curated_names:
                     continue
                 try:
-                    out.append(_class_from_dict(d))
+                    pc = _class_from_dict(d)
+                    patch = PIPE_RULE_PATCHES.get(name.upper())
+                    if patch:
+                        pc = replace(pc, pipe_rules=patch)
+                    out.append(pc)
                 except Exception as e:  # noqa: BLE001
                     print(f"  ! skipped class {d.get('name')}: {e}")
     return out
