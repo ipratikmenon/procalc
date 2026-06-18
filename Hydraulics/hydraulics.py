@@ -3376,6 +3376,21 @@ def _is_tee_split_branch(fitting: str | None) -> int | None:
     return None
 
 
+def _feed_comp_mole_fracs(feed, fr) -> dict:
+    """{component: (y_i, x_i)} vapor/liquid mole fractions for one station's
+    flash.  Mole fractions are scale-independent, so this always reflects the
+    feed's own composition regardless of any mass-flow override/carry-over.
+    Returns {} when no feed/composition is available."""
+    if feed is None or fr is None or not getattr(feed, "names", None):
+        return {}
+    y = fr.y or []
+    x = fr.x or []
+    return {
+        name: (y[i] if i < len(y) else 0.0, x[i] if i < len(x) else 0.0)
+        for i, name in enumerate(feed.names)
+    }
+
+
 def _feed_comp_flows(feed, fr, vap_mult: float = 1.0, liq_mult: float = 1.0) -> dict:
     """Per-component molar flow (lb-mol/hr) for a station's (scaled) flash.
 
@@ -3670,6 +3685,7 @@ def build_profile_flash_noiso(
     stations: list[HE.Station] = []
     flashes: list = []
     comps: list[dict] = []
+    comp_fracs: list[dict] = []   # comp_fracs[i] = {component: (y_i, x_i)}
     p       = max(p_start, p_floor)
     cum     = 0.0
     last_bore = None
@@ -3989,9 +4005,10 @@ def build_profile_flash_noiso(
         ))
         flashes.append(fr)
         comps.append(comp_vec)
+        comp_fracs.append(_feed_comp_mole_fracs(a_feed, fr_full))
         p = p_out
 
-    return stations, flashes, comps, mw_map
+    return stations, flashes, comps, mw_map, comp_fracs
 
 
 def build_profile_solved(
@@ -4306,6 +4323,136 @@ def _build_flash_detail_sheet(
                ha="right" if isinstance(v, (int, float)) else "left")
     for ci, w in enumerate([5, 9, 12, 11, 13, 20, 20, 16, 16, 10, 10], 1):
         cw(ws, ci, w)
+    return sheet_title
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Stream_Props_Detail sheet — fitting-wise Total/Vapor/Liquid breakdown
+# ════════════════════════════════════════════════════════════════════════
+def _build_stream_props_detail_sheet(
+        wb: Workbook,
+        stations: list[HE.Station],
+        flashes: list,
+        comp_fracs: list[dict],
+        sp: HE.StreamProps,
+        circuit_id: str,
+        stream_name: str,
+        run_label: str = "Main",
+) -> str:
+    """One Property/Total/Vapor/Liquid block per fitting, plus a per-fitting
+    component vapor/liquid mole-fraction table.
+
+    Only properties that the engine actually re-evaluates at each fitting's
+    (T, P) are shown (flow rates, density, viscosity, Z, mole/mass
+    fractions).  Properties only known at the single HMB reference state
+    (Cp, thermal conductivity, std density/API gravity, enthalpy, surface
+    tension) are NOT carried into this per-fitting table — they don't vary
+    with the march and would be misleading presented as if they did.
+    """
+    sheet_title = (f"Stream_Props_Detail_{run_label}"
+                    if run_label != "Main" else "Stream_Props_Detail")
+    ws = wb.create_sheet(sheet_title)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = GRNHDR
+    ncol = 4
+    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
+    _c(ws, 1, 1,
+       f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
+       f"Stream: {stream_name}",
+       bg=NAVY, fg=WHITE, sz=11, bold=True)
+    ws.row_dimensions[1].height = 20
+
+    u = _u()
+    r = 3
+    for s, fr, fracs in zip(stations, flashes, comp_fracs):
+        if fr is None:
+            continue
+        vap_rho = (_gas_rho_kgm3(fr.vap_mw, sp.vap_z, sp.temp_f, s.p_in_psia)
+                   / LBFT3_TO_KGM3) if sp.vap_z else None
+        liq_rho = sp.liq_density
+        q_vap = (fr.vap_mass / vap_rho) if (vap_rho and fr.vap_mass) else None
+        q_liq = (fr.liq_mass / liq_rho) if (liq_rho and fr.liq_mass) else None
+        tot_mass  = fr.vap_mass + fr.liq_mass
+        tot_moles = fr.vap_moles + fr.liq_moles
+        tot_mw    = (tot_mass / tot_moles) if tot_moles else None
+
+        ws.merge_cells(f"A{r}:{get_column_letter(ncol)}{r}")
+        _c(ws, r, 1,
+           f"Seq {s.seq} · {s.comp_id or ''} · {s.fitting or ''}   "
+           f"({u.disp('P', s.p_in_psia)} {u.label('P')})",
+           bg=STEEL, fg=WHITE, sz=10, bold=True)
+        r += 1
+        _hdr(ws, ["Property", "Total", "Vapor", "Liquid"], row=r)
+        head = r
+        r += 1
+
+        def row(label, tot, vap, liq, bold=False, section=False):
+            nonlocal r
+            if section:
+                ws.merge_cells(f"A{r}:{get_column_letter(ncol)}{r}")
+                _c(ws, r, 1, label, bg=DGRAY, fg=WHITE, sz=9, bold=True)
+                r += 1
+                return
+            bg = LGRAY if (r - head) % 2 else WHITE
+            _c(ws, r, 1, label, bg=bg, sz=9, bold=bold)
+            for ci, v in ((2, tot), (3, vap), (4, liq)):
+                _c(ws, r, ci, "" if v is None else v, bg=bg, sz=9,
+                   ha="right" if isinstance(v, (int, float)) else "left", bold=bold)
+            r += 1
+
+        row("FLOW RATES", None, None, None, section=True)
+        row(f"Molar Rate ({u.label('molflow')})",
+            u.disp("molflow", tot_moles, 3) if tot_moles else 0,
+            u.disp("molflow", fr.vap_moles, 3), u.disp("molflow", fr.liq_moles, 3))
+        row(f"Mass Rate ({u.label('mflow')})",
+            u.disp("mflow", tot_mass, 1), u.disp("mflow", fr.vap_mass, 1),
+            u.disp("mflow", fr.liq_mass, 1))
+        row("Actual Vol Rate (ft3/hr)",
+            round((q_vap or 0) + (q_liq or 0), 1),
+            round(q_vap, 1) if q_vap is not None else None,
+            round(q_liq, 1) if q_liq is not None else None)
+
+        row("CONDITIONS", None, None, None, section=True)
+        row(f"Temperature ({u.label('T')})", u.disp("T", sp.temp_f, 2), None, None)
+        row(f"Pressure ({u.label('P')})", u.disp("P", s.p_in_psia), None, None)
+        row("Molecular Weight",
+            round(tot_mw, 4) if tot_mw else None,
+            round(fr.vap_mw, 4), round(fr.liq_mw, 4))
+        row("Vapor Mole Fraction", round(fr.beta, 4), None, None)
+        row("Liquid Mole Fraction", round(1.0 - fr.beta, 4), None, None)
+        row("Liquid Mass Fraction (quality)", round(1.0 - fr.quality, 4), None, None)
+
+        row("VAPOR PHASE PROPERTIES", None, None, None, section=True)
+        row(f"Density ({u.label('rho')})", None,
+            u.disp("rho", vap_rho, 6) if vap_rho else None, None)
+        row("Viscosity (cP)", None, sp.vap_visc, None)
+        row("Z Factor", None, sp.vap_z, None)
+
+        row("LIQUID PHASE PROPERTIES", None, None, None, section=True)
+        row(f"Density ({u.label('rho')})", None, None,
+            u.disp("rho", liq_rho, 4) if liq_rho else None)
+        row("Viscosity (cP)", None, None, sp.liq_visc)
+        r += 1
+
+        # ── Component vapor/liquid mole-fraction table for this fitting ──
+        if fracs:
+            names = sorted(fracs.keys(), key=lambda n: -(fracs[n][0] + fracs[n][1]))
+            _c(ws, r, 1, "Component Mole Fraction", bg=DGRAY, fg=WHITE, sz=9, bold=True)
+            for ci, name in enumerate(names, 2):
+                _c(ws, r, ci, name, bg=GRNHDR, fg=WHITE, sz=8, bold=True)
+            r += 1
+            _c(ws, r, 1, "Vapor (y)", bg=LGRAY, sz=9, bold=True)
+            for ci, name in enumerate(names, 2):
+                _c(ws, r, ci, round(fracs[name][0], 6), sz=8, ha="right")
+            r += 1
+            _c(ws, r, 1, "Liquid (x)", bg=LGRAY, sz=9, bold=True)
+            for ci, name in enumerate(names, 2):
+                _c(ws, r, ci, round(fracs[name][1], 6), sz=8, ha="right")
+            r += 2
+        else:
+            r += 1
+
+    cw(ws, 1, 30); cw(ws, 2, 16); cw(ws, 3, 16); cw(ws, 4, 16)
     return sheet_title
 
 
@@ -4809,7 +4956,7 @@ def run_noiso(
         # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
         # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
         # captured split-off flow/composition instead of marching standalone.
-        branch_runs: list = []            # (label, sts, fls, cmps, b_lns)
+        branch_runs: list = []            # (label, sts, fls, cmps, b_lns, cfracs)
         injections: dict[int, dict] = {}  # main_rows index → branch outlet
         line_branch_count: dict[str, int] = {}
         line_split_count: dict[str, int] = {}
@@ -4844,10 +4991,10 @@ def run_noiso(
                                      default_liq_cf=split_cap["liq_cf"])
                 if split_cap.get("sp") is not None:
                     solve_kwargs["default_sp"] = split_cap["sp"]
-            sts, fls, cmps, _bmw = build_profile_solved(block, resolver, bp, **solve_kwargs)
+            sts, fls, cmps, _bmw, cfracs = build_profile_solved(block, resolver, bp, **solve_kwargs)
             b_lns = [r["Line No"] for r in block]
             label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
-            branch_runs.append((label, sts, fls, cmps, b_lns))
+            branch_runs.append((label, sts, fls, cmps, b_lns, cfracs))
             if split_cap is not None:
                 print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
                       f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
@@ -4877,7 +5024,7 @@ def run_noiso(
                       f"Tee Join Branch Flow {join_n}.")
 
         # ── March the Main with branch injections ────────────────────────
-        main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
+        main_stations, main_flashes, main_comps, main_mw, main_cfracs = build_profile_solved(
             main_rows, resolver, p_start, flash_mode=flash_mode,
             default_sp=sp, injections=injections)
 
@@ -4902,7 +5049,11 @@ def run_noiso(
             station_lines=station_lines, line_colors=lc)
 
         # ── Branch sheets ────────────────────────────────────────────────
-        for (label, sts, fls, cmps, b_lns) in branch_runs:
+        sp_sheets = [_build_stream_props_detail_sheet(
+            wb, main_stations, main_flashes, main_cfracs, sp,
+            circuit_id=cid, stream_name=sk, run_label="Main")]
+
+        for (label, sts, fls, cmps, b_lns, cfracs) in branch_runs:
             pp_sheets.append(_build_pressure_profile_sheet(
                 wb, sts, fls, sp,
                 circuit_id=cid, stream_name=sk,
@@ -4910,6 +5061,9 @@ def run_noiso(
                 station_lines=b_lns, line_colors=lc))
             fp_sheets.append(_build_flash_detail_sheet(
                 wb, sts, fls, feed, sp, run_label=label))
+            sp_sheets.append(_build_stream_props_detail_sheet(
+                wb, sts, fls, cfracs, sp,
+                circuit_id=cid, stream_name=sk, run_label=label))
 
         # ── Screening / analysis sheets (all main stations, whole circuit)
         circuit_label = f"Circuit {cid}  ({', '.join(lns)})"
@@ -4951,8 +5105,9 @@ def run_noiso(
         # ── Sheet order ──────────────────────────────────────────────────
         order = (pp_sheets + fp_sheets +
                  ["Composition Splits",
-                  "Component_Detail", "Stream_Props",
-                  "FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
+                  "Component_Detail", "Stream_Props"]
+                 + sp_sheets +
+                 ["FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
                  + fp_map_sheets
                  + ["Input_Pipeline", "README"])
         for name in reversed(order):
