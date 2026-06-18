@@ -5558,6 +5558,29 @@ def _ref_beta(sp) -> float:
     return (vmol / tot) if tot > 0 else 0.0
 
 
+def _wilson_k_full(tc_r, omega, pc_psia, p_psia, temp_f) -> float | None:
+    """Full Wilson (1968) K-value correlation, anchored purely to fundamental
+    component properties (no HMB phase-composition data required):
+
+        K_i(T,P) = (Pc_i/P) · exp[5.373·(1+ω_i)·(1 − Tc_i/T)]      (T, Tc in °R)
+
+    Used as a fallback reference when the HMB's own y/x (or z/x proxy)
+    K-ratios are numerically degenerate — e.g. when the reference molar
+    vapor fraction β₀ is extremely close to 0 or 1, the minor phase's
+    reported composition carries little real relative-volatility information
+    (x_i ≈ z_i for nearly all i), so every component's z_i/x_i ratio collapses
+    to ~1 regardless of true volatility.  None if any input is unavailable.
+    """
+    if tc_r is None or omega is None or pc_psia is None or temp_f is None or p_psia is None:
+        return None
+    t_r = temp_f + F_TO_R
+    if t_r <= 0 or pc_psia <= 0 or p_psia <= 0:
+        return None
+    expo = WILSON_C * (1.0 + omega) * (1.0 - tc_r / t_r)
+    expo = max(-50.0, min(50.0, expo))
+    return (pc_psia / p_psia) * math.exp(expo)
+
+
 def _solve_lambda(z, k_raw, beta_target, it_max: int = 200) -> float:
     """Multiplier λ such that Rachford-Rice(z, λ·k_raw) == beta_target.
 
@@ -5715,23 +5738,43 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
     s = sum(z) or 1.0
     z = [zi / s for zi in z]
 
+    p_ref = sp.pres_psia or 0.0
+    if p_ref <= 0:
+        return None
+
     if use_yx:
         # true K_ref already material-balance correct; gentle λ nudge to β₀
         lam = _solve_lambda(z, k_raw, beta0)
+        k_ref = [min(1e10, max(1e-10, lam * kr)) for kr in k_raw]
         basis = "yx"
     else:
+        # The z/x proxy degenerates to ~1 for every component whenever β₀ is
+        # extremely close to 0 or 1 (x_i ≈ z_i), losing all relative-volatility
+        # information — every component then flips from all-liquid to
+        # all-vapor together as pressure falls, instead of the light ends
+        # flashing off preferentially.  Where fundamental criticals (Tc/Pc/ω)
+        # are available — typically the light/volatile species — substitute
+        # the physically-grounded full Wilson correlation's SHAPE for those
+        # components' raw ratio (still globally λ-scaled together with the
+        # rest, so Rachford-Rice still reproduces the HMB's exact β₀ — the
+        # absolute Wilson K is not trustworthy enough quantitatively, but its
+        # relative ordering across components is far better than the flat
+        # proxy's).
+        wilson_k = [_wilson_k_full(tc, om, pc, p_ref, sp.temp_f)
+                    for tc, om, pc in zip(tc_r, omega, pc_l)]
+        if any(wk is not None for wk in wilson_k):
+            k_raw = [wk if wk is not None else kr for wk, kr in zip(wilson_k, k_raw)]
+            basis = "zx-lambda+wilson"
+        else:
+            basis = "zx-lambda"
         lam = _solve_lambda(z, k_raw, beta0)
-        basis = "zx-lambda"
-    k_ref = [min(1e10, max(1e-10, lam * kr)) for kr in k_raw]
+        k_ref = [min(1e10, max(1e-10, lam * kr)) for kr in k_raw]
 
     total_mw = sum(zi * mi for zi, mi in zip(z, mw))
     total_mass = (sp.vap_mass or 0.0) + (sp.liq_mass or 0.0)
     if total_mass <= 0:
         total_mass = sp.total_mass or 0.0
     total_moles = (total_mass / total_mw) if total_mw > 0 else 0.0
-    p_ref = sp.pres_psia or 0.0
-    if p_ref <= 0:
-        return None
 
     feed = FlashFeed(names=names, z=z, k_ref=k_ref, mw=mw,
                      total_mass_lbhr=total_mass, p_ref_psia=p_ref,
