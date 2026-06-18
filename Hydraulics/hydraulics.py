@@ -3560,16 +3560,27 @@ def _row_yellow_overrides(row: dict) -> dict:
     return out
 
 
-def _apply_property_overrides(sp, fr, overrides: dict):
+def _apply_property_overrides(sp, fr, overrides: dict, feed_mode: bool = False):
     """Overlay persisted yellow-cell overrides onto a resolved sp/fr pair.
 
     Lets any filled yellow cell win over the matching property pulled from
     the HMB stream, without having to clear Stream Lookup and re-enter every
-    property by hand. Mass-flow overrides also re-derive quality/beta/moles
-    on the FlashResult so downstream phase split & ΔP stay consistent.
+    property by hand. In MANUAL mode (no composition feed) mass-flow
+    overrides also re-derive quality/beta/moles on the FlashResult directly,
+    since ``fr`` there has no other source of truth.  In FEED mode (a
+    composition feed flashed via Rachford-Rice), vap_mass/liq_mass overrides
+    are instead applied upstream as a persistent mass-scale ratio on the
+    whole feed-flash (see ``build_profile_flash_noiso``) — they are dropped
+    here to avoid double-counting the override against the feed's own
+    un-scaled natural flow.
     """
     if not overrides or sp is None:
         return sp, fr
+    if feed_mode:
+        overrides = {k: v for k, v in overrides.items()
+                     if k not in ("vap_mass", "liq_mass")}
+        if not overrides:
+            return sp, fr
     sp_fields = dict(overrides)
     if "vap_mw" in sp_fields:
         sp_fields["mol_weight"] = sp_fields["vap_mw"]
@@ -3665,6 +3676,8 @@ def build_profile_flash_noiso(
     flow_scale = 1.0          # running Tee split/merge multiplier (both phases)
     vap_cf = 1.0              # running vapour carry-forward multiplier
     liq_cf = 1.0              # running liquid carry-forward multiplier
+    mass_scale = 1.0          # feed-mode override: rescales the whole feed-flash
+    mass_scale_set = False    # to the user's real total flow (fixed once per stream)
     cur_feed = None           # ACTIVE mixture feed (a blend after a Tee join)
     cur_sp:  HE.StreamProps | None = None   # active mixture StreamProps
     last_key = None           # (stream, hmb, case) to detect a genuine new stream
@@ -3686,6 +3699,8 @@ def build_profile_flash_noiso(
             flow_scale = 1.0
             vap_cf = default_vap_cf if ridx == 0 else 1.0
             liq_cf = default_liq_cf if ridx == 0 else 1.0
+            mass_scale = 1.0
+            mass_scale_set = False
             override_state = {}
         elif cur_feed is None and row_sp is not None:
             cur_sp = row_sp                       # manual rows refresh sp
@@ -3767,8 +3782,6 @@ def build_profile_flash_noiso(
                               f"(skipped — needs HMB streams on both runs)")
 
         # ── Flash the ACTIVE mixture at this pressure, then scale ────────
-        vap_eff = flow_scale * vap_cf
-        liq_eff = flow_scale * liq_cf
         comp_vec: dict = {}
         fr_full = None
         if a_feed is not None:
@@ -3776,12 +3789,35 @@ def build_profile_flash_noiso(
                 if n not in mw_map and i < len(a_feed.mw):
                     mw_map[n] = a_feed.mw[i]
             fr_full = _flash(a_feed, p_eval)
+            # A Vapor/Liquid Mass Flow override on a Stream-Lookup row means
+            # "this composition's REAL total flow is X" — fix a single ratio,
+            # once per stream, between that target and the feed's own
+            # natural (un-scaled) total, and apply it like any other
+            # carry-forward multiplier.  This preserves the feed's rigorous
+            # VLE phase split at each pressure instead of substituting one
+            # phase's absolute override value and adding it to the other
+            # phase's un-rescaled natural value (which double-counts mass
+            # from two different bases).
+            if not mass_scale_set and ("vap_mass" in override_state
+                                        or "liq_mass" in override_state):
+                nat_total = fr_full.vap_mass + fr_full.liq_mass
+                tgt_total = (override_state.get("vap_mass", fr_full.vap_mass)
+                             + override_state.get("liq_mass", fr_full.liq_mass))
+                if nat_total > 0:
+                    mass_scale = tgt_total / nat_total
+                mass_scale_set = True
+            vap_eff = flow_scale * vap_cf * mass_scale
+            liq_eff = flow_scale * liq_cf * mass_scale
             fr = _scale_flash_result(fr_full, vap_eff, liq_eff)
             comp_vec = _feed_comp_flows(a_feed, fr_full, vap_eff, liq_eff)
         elif a_sp is not None and (a_sp.vap_mass or a_sp.liq_mass):
+            vap_eff = flow_scale * vap_cf
+            liq_eff = flow_scale * liq_cf
             fr_full = _synth_flash_result(a_sp, p_eval)
             fr = _scale_flash_result(fr_full, vap_eff, liq_eff)  # manual mode
         else:
+            vap_eff = flow_scale * vap_cf
+            liq_eff = flow_scale * liq_cf
             fr = None
         sp = a_sp                       # used by the ΔP dispatch below
 
@@ -3795,7 +3831,8 @@ def build_profile_flash_noiso(
                 "liq_cf": pending_split_scale * liq_cf,
             }
         if override_state:
-            sp, fr = _apply_property_overrides(sp, fr, override_state)
+            sp, fr = _apply_property_overrides(sp, fr, override_state,
+                                                feed_mode=(a_feed is not None))
             scale_tag += (" | manual override: "
                           + ", ".join(sorted(override_state)))
 
