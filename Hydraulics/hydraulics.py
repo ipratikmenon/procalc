@@ -5346,6 +5346,15 @@ class FlashFeed:
     vap_cp: float | None = None
     liq_cp: float | None = None
     k_basis: str = "yx"       # 'yx' (true), 'zx-lambda' (proxy), or 'wilson'
+    # Components whose K is re-evaluated directly from a physical
+    # solubility correlation (Riazi-Vera / AGS) at flash()'s actual (P,T)
+    # rather than extrapolated from k_ref via the generic Wilson (Pref/P)
+    # shape — those correlations are not the simple multiplicatively
+    # separable form Wilson is, so extrapolating their reference-state
+    # value with Wilson's shape would silently misrepresent them away from
+    # the reference point.  Maps component index -> (gas name, solvent MW).
+    k_special: dict[int, tuple[str, float]] | None = None
+    k_lambda: float = 1.0     # the single calibration multiplier from _solve_lambda
 
     @property
     def n(self) -> int:
@@ -5444,6 +5453,16 @@ def flash(feed: FlashFeed, p_psia: float,
 
     k = [min(1e12, max(1e-12, kr * ratio * w))
          for kr, w in zip(feed.k_ref, wcorr)]
+
+    if feed.k_special:
+        for idx, (nm_up, solvent_mw) in feed.k_special.items():
+            if nm_up == "H2":
+                kv = _ags_k_h2(p, t_used, solvent_mw)
+            else:
+                kv = _riazi_vera_k(nm_up, p, t_used, solvent_mw)
+            if kv is not None:
+                k[idx] = min(1e12, max(1e-12, feed.k_lambda * kv))
+
     beta = rachford_rice(feed.z, k)
 
     x, y = [], []
@@ -5581,6 +5600,182 @@ def _wilson_k_full(tc_r, omega, pc_psia, p_psia, temp_f) -> float | None:
     return (pc_psia / p_psia) * math.exp(expo)
 
 
+# Riazi & Vera (2005, Ind. Eng. Chem. Res. 44, 186-192), Table 1 (DIPPR) +
+# Table 4 recommended petroleum/crude-oil correction factors alpha.  CO2's
+# alpha is the single fitted value from their Table 3 (no fixed petroleum
+# recommendation was given).  H2 is handled separately by the more rigorous
+# Augmented Grayson-Streed model below (_ags_k_h2) — Torres, de Hemptinne &
+# Machin (2013, OGST 68(2), 217-233) verified that model specifically
+# against heavy petroleum cuts (LVGO/HVGO/GDAR/ABVB), exactly this use case.
+_RIAZI_VERA_GASES = {
+    "METHANE": dict(tc_k=190.56, pc_bar=45.99, v1l=52.0,   delta1=11.62,
+                     omega=0.0115, alpha=0.94, frol_fixed=None),
+    "ETHANE":  dict(tc_k=305.32, pc_bar=78.83, v1l=45.7,   delta1=12.4,
+                     omega=0.0995, alpha=1.3,  frol_fixed=None),
+    "CO2":     dict(tc_k=304.21, pc_bar=78.83, v1l=37.27,  delta1=14.56,
+                     omega=0.225, alpha=1.10, frol_fixed=None),
+}
+
+
+def _rk_vapor_z(a: float, b: float) -> float:
+    """Largest real (vapour) root of the Redlich-Kwong compressibility cubic
+    Z**3 - Z**2 + (A - B - B**2)*Z - A*B = 0, by Newton-Raphson from the
+    ideal-gas seed Z=1 (robust here since Tr is large / Pr modest for H2 in
+    this application — the vapour root dominates)."""
+    z = 1.0
+    for _ in range(100):
+        f = z ** 3 - z ** 2 + (a - b - b ** 2) * z - a * b
+        fp = 3 * z ** 2 - 2 * z + (a - b - b ** 2)
+        if fp == 0:
+            break
+        z_new = z - f / fp
+        z_new = max(z_new, b + 1e-9)
+        if abs(z_new - z) < 1e-12:
+            z = z_new
+            break
+        z = z_new
+    return z
+
+
+# Grayson & Streed (1963) Curl-Pitzer coefficients for H2's pure-liquid
+# fugacity coefficient (eq 6), as refit by Torres, de Hemptinne & Machin's
+# "Augmented Grayson-Streed" (AGS, 2013, OGST 68(2), 217-233, Table 6) — only
+# A0/A1 (the dominant temperature-dependence terms) were refit, against
+# hydrogen solubility data spanning n-heptane through aromatics/heavy
+# petroleum cuts; the rest are carried over unchanged from the original
+# Grayson-Streed (1963) H2 row.  Per both papers, only the log(phi^(0)) term
+# is used for H2 (the acentric-factor correction term is dropped entirely).
+_AGS_H2_COEFFS = dict(A0=1.67380, A1=6.93898, A2=-0.02110, A3=0.00011,
+                       A4=0.0, A5=0.008585, A6=0.0, A7=0.0, A8=0.0, A9=0.0)
+_AGS_H2_TC_K = 33.4
+_AGS_H2_PC_BAR = 13.155      # 1 315 524 Pa
+_AGS_H2_V1_CM3MOL = 31.0     # 0.0310 m3/kmol
+_AGS_H2_DELTA1 = 6.648       # (J/cm3)^0.5
+
+
+def _ags_k_h2(p_psia, temp_f, solvent_mw) -> float | None:
+    """Augmented Grayson-Streed (AGS) K-value for hydrogen dissolved in a
+    heavy hydrocarbon liquid (Torres, de Hemptinne & Machin, 2013, OGST
+    68(2), 217-233).  Standard Grayson-Streed structure,
+    K1 = phi1^(L*) * gamma1 / phi1^V, with two changes from the original
+    1963 correlation that this paper showed cut the AAD on heavy-cut H2
+    solubility roughly in half (55% -> 30%, validated against real
+    LVGO/HVGO/GDAR/ABVB hydroprocessing feeds):
+      * gamma1 includes a Flory entropic term in addition to Hildebrand's
+        regular-solution enthalpic term, evaluated at infinite dilution
+        (consistent with this implementation's Henry's-law-style K, and
+        with how the paper itself reports gamma1^inf in Tables 4/5);
+      * phi1^(L*)'s temperature-dependence coefficients (A0, A1) are
+        refit for H2 specifically (Table 6) instead of the original 1963
+        values, which the paper found systematically under/over-predict
+        for n-C16+ and aromatics.
+    The solvent is characterized only by its SCN (single-carbon-number)
+    average MW (Riazi & Vera, 2005, eq 17/18) for delta2/v2 — the same
+    lumped-solvent approach AGS itself found most reliable (Table 14).
+    phi1^V uses the Redlich-Kwong EOS for pure H2 vapour (eq 11-17),
+    neglecting other vapour-phase species' effect on H2's own fugacity
+    coefficient — a minor simplification at the modest reduced pressures
+    typical of refinery off-gas.  Returns None if inputs are invalid.
+    """
+    if not p_psia or p_psia <= 0 or temp_f is None or not solvent_mw or solvent_mw <= 0:
+        return None
+    t_k = (temp_f - 32.0) * 5.0 / 9.0 + 273.15
+    p_bar = p_psia / 14.5038
+    if t_k <= 0:
+        return None
+
+    m = solvent_mw
+    delta2 = 17.5913 - math.exp(3.0076 - 0.549097 * m ** 0.3)          # eq 17
+    v2 = m / (1.05 - math.exp(3.80258 - 3.12287 * m ** 0.1))           # eq 18
+    if v2 <= 0:
+        return None
+
+    v1 = _AGS_H2_V1_CM3MOL
+    delta1 = _AGS_H2_DELTA1
+    r = 8.314
+    # gamma1 at infinite dilution: Hildebrand (enthalpic) + Flory (entropic)
+    ln_gamma1 = (v1 * (delta1 - delta2) ** 2 / (r * 298.15)
+                 + math.log(v1 / v2) + 1.0 - v1 / v2)
+    gamma1 = math.exp(ln_gamma1)
+
+    tr = t_k / _AGS_H2_TC_K
+    pr = p_bar / _AGS_H2_PC_BAR
+    if tr <= 0 or pr <= 0:
+        return None
+    c = _AGS_H2_COEFFS
+    log_phi0 = (c["A0"] + c["A1"] / tr + c["A2"] * tr + c["A3"] * tr ** 2
+                + c["A4"] * tr ** 3
+                + (c["A5"] + c["A6"] * tr + c["A7"] * tr ** 2) * pr
+                + (c["A8"] + c["A9"] * tr) * pr ** 2
+                - math.log10(pr))
+    phi1_lstar = 10.0 ** log_phi0
+
+    a_rk = 0.42748 * pr / tr ** 2.5
+    b_rk = 0.08664 * pr / tr
+    z = _rk_vapor_z(a_rk, b_rk)
+    if z <= b_rk:
+        return None
+    ln_phi_v = (z - 1.0) - math.log(z - b_rk) - (a_rk / b_rk) * math.log(1.0 + b_rk / z)
+    phi1_v = math.exp(ln_phi_v)
+    if phi1_v <= 0:
+        return None
+
+    k = phi1_lstar * gamma1 / phi1_v
+    return k if (math.isfinite(k) and k > 0) else None
+
+
+def _riazi_vera_k(name_upper, p_psia, temp_f, solvent_mw) -> float | None:
+    """Riazi & Vera (2005) regular-solution-theory K-value for a light gas
+    dissolved in a heavy hydrocarbon liquid, used in place of Wilson's
+    corresponding-states shape for the specific species this paper targets
+    (H2, CH4, C2H6, CO2) — Wilson is known to badly misjudge H2 (Tc=33 K)
+    volatility once it is partly dissolved in a hot heavy liquid, exactly the
+    failure mode this paper was built to address.
+
+    From the paper's eq 1, x1 = phi1V·P1/(gamma1·f1L) with P1 = y1·P, so
+    K = y1/x1 = gamma1·f1L/(phi1V·P).  gamma1 (eq 2) uses the "SCN"
+    single-pseudo-component solvent model (eq 17/18, requiring only the
+    solvent's average MW) and approximates delta_mix ~= delta2 (the
+    solute's own volume fraction in the liquid is neglected — reasonable at
+    the low-to-moderate solubilities this model targets).  Returns None if
+    `name_upper` isn't tabulated or inputs are invalid.
+    """
+    g = _RIAZI_VERA_GASES.get(name_upper)
+    if (g is None or not p_psia or p_psia <= 0 or temp_f is None
+            or not solvent_mw or solvent_mw <= 0):
+        return None
+    t_k = (temp_f - 32.0) * 5.0 / 9.0 + 273.15
+    p_bar = p_psia / 14.5038
+    if t_k <= 0:
+        return None
+
+    m = solvent_mw
+    delta2 = 17.5913 - math.exp(3.0076 - 0.54907 * m ** 0.3)   # eq 17
+    delta1 = g["alpha"] * g["delta1"]
+    v1l = g["v1l"]
+    r = 8.314
+    gamma1 = math.exp(v1l * (delta1 - delta2) ** 2 / (r * 298.15))   # eq 2
+
+    tc_k, pc_bar = g["tc_k"], g["pc_bar"]
+    tr = t_k / tc_k
+    if tr <= 0:
+        return None
+    fr_ol = g["frol_fixed"]
+    if fr_ol is None:
+        fr_ol = math.exp(7.902 - 8.19643 / tr - 3.08 * math.log(tr))   # eq 6
+    f1l = fr_ol * pc_bar * math.exp(v1l * (p_bar - 1.013) / (r * t_k))  # eq 5
+
+    pr = p_bar / pc_bar
+    omega = g["omega"]
+    expo = (pr / tr) * ((0.083 - 0.422 * tr ** -1.6)
+                         + omega * (0.139 - 0.122 * tr ** -4.2))        # eq 7
+    expo = max(-50.0, min(50.0, expo))
+    phi1v = math.exp(expo)
+
+    k = gamma1 * f1l / (phi1v * p_bar)
+    return k if (math.isfinite(k) and k > 0) else None
+
+
 def _solve_lambda(z, k_raw, beta_target, it_max: int = 200) -> float:
     """Multiplier λ such that Rachford-Rice(z, λ·k_raw) == beta_target.
 
@@ -5677,6 +5872,47 @@ def _read_comp_constants(hmb_path) -> dict:
     return out
 
 
+_PF_NAME_RE = re.compile(r"^PF(\d+)A(\d+)D(?:_\d+)?$")
+
+
+def _decode_pf_pseudo(name_upper: str) -> dict | None:
+    """Petroleum-fraction pseudo-component names emitted by the source PRO/II
+    model encode their own normal boiling point and API gravity directly,
+    e.g. 'PF736A30D_6' = NBP 736°F, API 30 (the trailing '_<n>' is just a
+    cut-set index and varies by stream/column, which is why most of these
+    don't have an exact-name match in the COMP_CONSTANTS sheet — that sheet
+    only enumerates one arbitrarily-chosen cut set per NBP/API pair).  Since
+    the Lee-Kesler/Edmister correlation underlying COMP_CONSTANTS only needs
+    NBP and SG (API), decode them straight from the name instead of relying
+    on an exact lookup match."""
+    m = _PF_NAME_RE.match(name_upper)
+    if not m:
+        return None
+    nbp_f, api = float(m.group(1)), float(m.group(2))
+    sg = 141.5 / (131.5 + api)
+    tb_r = nbp_f + 459.67
+    if tb_r <= 0 or sg <= 0:
+        return None
+    # Lee-Kesler (1975) Tc/Pc + Edmister (1958) omega — same correlation
+    # comp_constants.py uses for pseudo-fractions, inlined here so this
+    # decode path has no dependency on pandas (comp_constants imports it
+    # for spreadsheet I/O, which isn't needed for the bare correlation).
+    tc_r = (341.7 + 811.1 * sg
+            + (0.4244 + 0.1174 * sg) * tb_r
+            + (0.4669 - 3.2623 * sg) * 1e5 / tb_r)
+    ln_pc = (8.3634
+             - 0.0566 / sg
+             - (0.24244 + 2.2898 / sg + 0.11857 / sg ** 2) * 1e-3 * tb_r
+             + (1.4685 + 3.648 / sg + 0.47227 / sg ** 2) * 1e-7 * tb_r ** 2
+             - (0.42019 + 1.6977 / sg ** 2) * 1e-10 * tb_r ** 3)
+    pc_psia = math.exp(ln_pc)
+    if pc_psia <= 14.696 or tc_r <= tb_r:
+        return None
+    theta = tc_r / tb_r - 1.0
+    omega = (3.0 / 7.0) * math.log10(pc_psia / 14.696) / theta - 1.0 if theta > 0 else None
+    return {"tc_f": tc_r - 459.67, "pc_psia": pc_psia, "omega": omega}
+
+
 def _build_feed(z_d, x_d, mass_d, mole_d, sp,
                 y_d: dict | None = None,
                 const_map: dict | None = None) -> FlashFeed | None:
@@ -5722,7 +5958,10 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
             k_raw.append((float(zi) / xi) if xi > 1e-12 else 1e6)
         mw.append(mwi)
         # criticals
-        cm = (const_map or {}).get(str(n).strip().upper())
+        n_up = str(n).strip().upper()
+        cm = (const_map or {}).get(n_up)
+        if cm is None or cm.get("tc_f") is None:
+            cm = _decode_pf_pseudo(n_up)
         if cm and cm.get("tc_f") is not None:
             tc_r.append(cm["tc_f"] + F_TO_R)
             omega.append(cm.get("omega"))
@@ -5762,13 +6001,52 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         # proxy's).
         wilson_k = [_wilson_k_full(tc, om, pc, p_ref, sp.temp_f)
                     for tc, om, pc in zip(tc_r, omega, pc_l)]
-        if any(wk is not None for wk in wilson_k):
+        used_wilson = any(wk is not None for wk in wilson_k)
+        if used_wilson:
             k_raw = [wk if wk is not None else kr for wk, kr in zip(wilson_k, k_raw)]
+
+        # For the specific light gases Riazi & Vera (2005) / the Augmented
+        # Grayson-Streed model (Torres et al., 2013) target (H2, CH4, C2H6,
+        # CO2), their solubility-parameter K-values are more reliable than
+        # Wilson's generic corresponding-states shape — Wilson is known to
+        # misjudge H2 once dissolved in a hot heavy liquid, the exact
+        # failure mode these correlations were built for.  The "solvent" is
+        # the rest of the feed's z-weighted average MW (this component
+        # excluded), per the SCN approach both papers settled on as most
+        # reliable for lumped heavy-cut characterization.
+        total_mw_zw = sum(zi * mi for zi, mi in zip(z, mw))
+        used_riazi = False
+        k_special: dict[int, tuple[str, float]] = {}
+        for idx, nm in enumerate(names):
+            nm_up = str(nm).strip().upper()
+            if nm_up not in _RIAZI_VERA_GASES and nm_up != "H2":
+                continue
+            rest_z = 1.0 - z[idx]
+            if rest_z <= 1e-9:
+                continue
+            solvent_mw = (total_mw_zw - z[idx] * mw[idx]) / rest_z
+            if nm_up == "H2":
+                rv_k = _ags_k_h2(p_ref, sp.temp_f, solvent_mw)
+            else:
+                rv_k = _riazi_vera_k(nm_up, p_ref, sp.temp_f, solvent_mw)
+            if rv_k is not None:
+                k_raw[idx] = rv_k
+                used_riazi = True
+                k_special[idx] = (nm_up, solvent_mw)
+
+        if used_riazi and used_wilson:
+            basis = "zx-lambda+wilson+riazivera+ags"
+        elif used_riazi:
+            basis = "zx-lambda+riazivera+ags"
+        elif used_wilson:
             basis = "zx-lambda+wilson"
         else:
             basis = "zx-lambda"
         lam = _solve_lambda(z, k_raw, beta0)
         k_ref = [min(1e10, max(1e-10, lam * kr)) for kr in k_raw]
+
+    if use_yx:
+        k_special = {}
 
     total_mw = sum(zi * mi for zi, mi in zip(z, mw))
     total_mass = (sp.vap_mass or 0.0) + (sp.liq_mass or 0.0)
@@ -5785,7 +6063,8 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
                      liq_h_ref=getattr(sp, "liq_sp_enthalpy", None),
                      vap_cp=getattr(sp, "vap_cp", None),
                      liq_cp=getattr(sp, "liq_cp", None),
-                     k_basis=basis)
+                     k_basis=basis,
+                     k_special=(k_special or None), k_lambda=lam)
     feed.beta_ref = rachford_rice(z, k_ref)
     return feed
 
