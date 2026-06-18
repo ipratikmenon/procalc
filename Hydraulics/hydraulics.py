@@ -2370,9 +2370,17 @@ FITTING_NAMES: list[str] = [
     # Tees
     "Tee Join Branch Flow 1",
     "Tee Join Branch Flow 2",
+    "Tee Join Branch Flow 3",
+    "Tee Join Branch Flow 4",
+    "Tee Join Branch Flow 5",
+    "Tee Join Branch Flow 6",
     "Tee Join Line Flow",
     "Tee Split Branch Flow 1",
     "Tee Split Branch Flow 2",
+    "Tee Split Branch Flow 3",
+    "Tee Split Branch Flow 4",
+    "Tee Split Branch Flow 5",
+    "Tee Split Branch Flow 6",
     "Tee Split Line Flow",
     # Special / instruments
     "Fix Pressure",
@@ -2434,9 +2442,17 @@ _K_TABLE: dict[str, float] = {
     "sudden enlargement":                     1.00,
     "tee join branch flow 1":                 1.80,
     "tee join branch flow 2":                 1.80,
+    "tee join branch flow 3":                 1.80,
+    "tee join branch flow 4":                 1.80,
+    "tee join branch flow 5":                 1.80,
+    "tee join branch flow 6":                 1.80,
     "tee join line flow":                     0.40,
     "tee split branch flow 1":                1.80,
     "tee split branch flow 2":                1.80,
+    "tee split branch flow 3":                1.80,
+    "tee split branch flow 4":                1.80,
+    "tee split branch flow 5":                1.80,
+    "tee split branch flow 6":                1.80,
     "tee split line flow":                    0.40,
     "nozzle":                                 0.04,
     "orifice":                                0.00,   # dP from Instr dP column
@@ -2569,6 +2585,8 @@ INPUT_HEADERS: list[str] = [
     "Run Type",               # Main | Branch
     "Seq",                    # component sequence (auto-incremented if blank)
     "Start P (psia)",         # starting pressure; first row of the circuit / branch
+    "Upstream Line No",       # Branch only: Main Line No it splits from; blank → previous Main line
+    "Upstream Seq",           # Branch only: exact Main Seq of the 'Tee Split Branch Flow N' row
     "Flow Fraction from Main",  # signed fraction of Main flow at a Tee (+merge / -split)
     "Mass Vapor Fraction Carry Over",   # MASS fraction of vapour carried (blank=1; 0=dump)
     "Mass Liquid Fraction Carry Over",  # MASS fraction of liquid carried (blank=1; 0=dump)
@@ -2620,6 +2638,8 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Stream Lookup": ("Stream Lookup", None), "Run Type": ("Run Type", None),
     "Seq": ("Seq", None),
     "Start P (psia)": ("Start P", "P"),
+    "Upstream Line No": ("Upstream Line No", None),
+    "Upstream Seq": ("Upstream Seq", None),
     "Flow Fraction from Main": ("Flow Fraction from Main", None),
     "Mass Vapor Fraction Carry Over": ("Mass Vapor Fraction Carry Over", None),
     "Mass Liquid Fraction Carry Over": ("Mass Liquid Fraction Carry Over", None),
@@ -2747,6 +2767,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     width_map = {
         "Circuit": 9, "Line No": 12, "HMB File": 16, "Case": 10,
         "Stream Lookup": 14, "Run Type": 10, "Seq": 6, "Start P (psia)": 12,
+        "Upstream Line No": 14, "Upstream Seq": 11,
         "Flow Fraction from Main": 14, "Temp (degF)": 11, "Vapor Mass Flow": 14,
         "Vap MW": 9, "Vap Visc (cP)": 11, "Vap Z": 8, "Vap Cp/Cv": 10,
         "Vap Density (lb/ft3)": 14, "Liq Mass Flow (lb/h)": 14,
@@ -2902,6 +2923,22 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
         ("  Branches are marched independently.  FIV/AIV/regime sheets use the Main run.", False),
+        ("", False),
+        ("AUTO-LINKED SPLITS & JOINS (Main ↔ Branch)", True),
+        ("  JOIN (Branch → Main): on a Main row, set Fitting = 'Tee Join Branch Flow N'.", False),
+        ("  The Nth Branch block sharing that row's Line No is auto-matched by ordinal count;", False),
+        ("  its real flashed outlet (flow + composition) is blended into Main at that row — no", False),
+        ("  manual entry needed on the Branch side.", False),
+        ("  SPLIT (Main → Branch): on a Main row, set Fitting = 'Tee Split Branch Flow N' with a", False),
+        ("  negative 'Flow Fraction from Main'.  The exact flow + composition that leaves Main at", False),
+        ("  that row is captured and auto-fed as the Branch's inlet — the Branch needs no Stream", False),
+        ("  Lookup or manual properties of its own.", False),
+        ("  Upstream Line No (Branch, optional): which Main Line No this Branch splits from.", False),
+        ("    Blank → defaults to the most recently seen Main Line No.", False),
+        ("  Upstream Seq (Branch, optional): the exact Seq of the Main 'Tee Split Branch Flow N' row.", False),
+        ("    Blank → matched by ordinal count, same as the Join side (N = 1, 2, 3 … up to 6).", False),
+        ("  A Branch with no Upstream Line No match falls back to standalone marching (own Stream", False),
+        ("  Lookup / manual properties / circuit default).", False),
     ]
     note_lines += [
         ("", False),
@@ -2971,6 +3008,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
     current_start_p: float | None = None # start P carried within circuit
     current_hmb:     str | None = None   # HMB File carried within circuit
     current_case:    str | None = None   # Case carried within circuit
+    current_main_line: str | None = None # most recent Main Line No (default Upstream Line No)
 
     for rv in ws.iter_rows(min_row=3, values_only=True):
         if not rv or all(v is None for v in rv):
@@ -2998,6 +3036,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             current_start_p = None
             current_hmb     = None
             current_case    = None
+            current_main_line = None
 
         sl = txt(g(rv, "Stream Lookup"))
         if sl:
@@ -3021,6 +3060,14 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             seq_ctr[seq_key] = seq_ctr.get(seq_key, 0) + 1
             seq = seq_ctr[seq_key]
 
+        # Upstream Line No / Seq (Branch only): where this branch splits off
+        # Main.  Blank Upstream Line No → most recent Main Line No seen so far.
+        ul_raw = txt(g(rv, "Upstream Line No"))
+        upstream_line = ul_raw or (current_main_line if run_type == "Branch" else None)
+        upstream_seq  = num(g(rv, "Upstream Seq"))
+        if run_type == "Main":
+            current_main_line = line_no
+
         rows.append({
             "Circuit":          circuit,
             "Line No":          line_no,
@@ -3028,6 +3075,8 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Case":             current_case,
             "Stream Lookup":    current_stream,
             "Start P (psia)":   sp_val,          # raw (only non-None on explicit rows)
+            "Upstream Line No": upstream_line,
+            "Upstream Seq":     int(upstream_seq) if upstream_seq is not None else None,
             "Run Type":         run_type,
             "Seq":              seq,
             "Flow Fraction from Main":      num(g(rv, "Flow Fraction from Main")),
@@ -3318,6 +3367,15 @@ def _is_tee_join(fitting: str | None) -> int | None:
     return None
 
 
+def _is_tee_split_branch(fitting: str | None) -> int | None:
+    """If ``fitting`` is a 'Tee Split Branch Flow N', return N; else None."""
+    f = (fitting or "").lower()
+    if "tee" in f and "split" in f and "branch" in f:
+        m = re.search(r"(\d+)\s*$", f)
+        return int(m.group(1)) if m else 1
+    return None
+
+
 def _feed_comp_flows(feed, fr, vap_mult: float = 1.0, liq_mult: float = 1.0) -> dict:
     """Per-component molar flow (lb-mol/hr) for a station's (scaled) flash.
 
@@ -3548,6 +3606,10 @@ def build_profile_flash_noiso(
         default_sp: HE.StreamProps | None = None,
         injections: dict | None = None,
         cv_overrides: dict | None = None,
+        default_feed=None,
+        default_vap_cf: float = 1.0,
+        default_liq_cf: float = 1.0,
+        splits_out: dict | None = None,
 ) -> tuple[list[HE.Station], list, list, dict]:
     """
     March pressure along ``block_rows`` with flash-coupled VLE.
@@ -3560,6 +3622,20 @@ def build_profile_flash_noiso(
     Tee split / merge:
       A ``Flow Fraction from Main`` on a Tee fitting row scales the running
       vapour & liquid mass flows (negative = split, positive = merge).
+
+    Main→Branch split (the reverse of a Branch→Main join):
+      ``default_feed``/``default_vap_cf``/``default_liq_cf`` seed the FIRST
+      row of a Branch block — used to auto-feed a Branch with the actual
+      mixture + mass flow that left Main at a matching 'Tee Split Branch
+      Flow N' row (see ``splits_out`` below and ``run_noiso``'s Upstream
+      Line No / Upstream Seq matching).
+
+    ``splits_out``, if given, is populated with one entry per encountered
+    'Tee Split Branch Flow N' row, keyed by (Line No, Seq) of that row:
+    ``{"n": N, "feed": ..., "sp": ..., "vap_cf": ..., "liq_cf": ...}`` — the
+    composition/properties feed and mass-fraction multipliers of the flow
+    that left Main there, ready to be passed back in as a downstream
+    Branch's ``default_feed``/``default_vap_cf``/``default_liq_cf``.
 
     Mass Vapor / Liquid carry-over:
       ``Mass Vapor/Liquid Fraction Carry Over`` scale the running vapour and
@@ -3603,10 +3679,13 @@ def build_profile_flash_noiso(
         key = (row.get("Stream Lookup"), row.get("HMB File"), row.get("Case"))
         # First row, or a genuinely NEW stream → (re)set the active mixture.
         if last_key is None or key != last_key:
-            cur_feed = row_feed
+            cur_feed = row_feed if row_feed is not None else (
+                default_feed if ridx == 0 else None)
             cur_sp   = row_sp if row_sp is not None else default_sp
             last_key = key
-            flow_scale = vap_cf = liq_cf = 1.0
+            flow_scale = 1.0
+            vap_cf = default_vap_cf if ridx == 0 else 1.0
+            liq_cf = default_liq_cf if ridx == 0 else 1.0
             override_state = {}
         elif cur_feed is None and row_sp is not None:
             cur_sp = row_sp                       # manual rows refresh sp
@@ -3641,10 +3720,14 @@ def build_profile_flash_noiso(
         # original Main flow (an ABSOLUTE target), e.g. 0.125 → 0.25 → 0.5 → 1.0
         # builds a header up in stages as branches join it.
         frac = num(row.get("Flow Fraction from Main"))
+        split_n = _is_tee_split_branch(fitting)
+        pending_split_scale = None    # filled below if this row splits off a branch
         if frac is not None and _is_tee(fitting):
             new_scale = frac if frac > 0 else max(0.0, flow_scale + frac)
             verb = "merge" if frac > 0 else "split"
             scale_tag += f" | Tee {verb} {frac:+.3f} → flow×{new_scale:.3f}"
+            if frac < 0 and split_n is not None:
+                pending_split_scale = flow_scale - new_scale   # magnitude removed
             flow_scale = new_scale
 
         # ── Mass Vapor/Liquid carry-over (phase MASS fraction, compounding) ──
@@ -3687,6 +3770,7 @@ def build_profile_flash_noiso(
         vap_eff = flow_scale * vap_cf
         liq_eff = flow_scale * liq_cf
         comp_vec: dict = {}
+        fr_full = None
         if a_feed is not None:
             for i, n in enumerate(a_feed.names):
                 if n not in mw_map and i < len(a_feed.mw):
@@ -3695,11 +3779,21 @@ def build_profile_flash_noiso(
             fr = _scale_flash_result(fr_full, vap_eff, liq_eff)
             comp_vec = _feed_comp_flows(a_feed, fr_full, vap_eff, liq_eff)
         elif a_sp is not None and (a_sp.vap_mass or a_sp.liq_mass):
-            fr = _scale_flash_result(_synth_flash_result(a_sp, p_eval),
-                                     vap_eff, liq_eff)        # manual mode
+            fr_full = _synth_flash_result(a_sp, p_eval)
+            fr = _scale_flash_result(fr_full, vap_eff, liq_eff)  # manual mode
         else:
             fr = None
         sp = a_sp                       # used by the ΔP dispatch below
+
+        # ── Main→Branch split capture: stash the flow that LEFT here ─────
+        if pending_split_scale is not None and splits_out is not None and fr_full is not None:
+            splits_out[(row.get("Line No"), int(num(row.get("Seq")) or 0))] = {
+                "n":      split_n,
+                "feed":   a_feed,
+                "sp":     a_sp,
+                "vap_cf": pending_split_scale * vap_cf,
+                "liq_cf": pending_split_scale * liq_cf,
+            }
         if override_state:
             sp, fr = _apply_property_overrides(sp, fr, override_state)
             scale_tag += (" | manual override: "
@@ -3873,6 +3967,10 @@ def build_profile_solved(
         injections: dict | None = None,
         max_pass: int = 24,
         tol: float = 0.01,
+        default_feed=None,
+        default_vap_cf: float = 1.0,
+        default_liq_cf: float = 1.0,
+        splits_out: dict | None = None,
 ) -> tuple[list[HE.Station], list, list, dict]:
     """March a block, solving flow-control Control Valves to their Destination.
 
@@ -3898,7 +3996,9 @@ def build_profile_solved(
                 targets[ri] = (di, num(block_rows[di].get("Set P (psia)")))
 
     common = dict(p_floor=p_floor, flash_mode=flash_mode,
-                  default_sp=default_sp, injections=injections)
+                  default_sp=default_sp, injections=injections,
+                  default_feed=default_feed, default_vap_cf=default_vap_cf,
+                  default_liq_cf=default_liq_cf, splits_out=splits_out)
     if not targets:
         return build_profile_flash_noiso(block_rows, resolver, p_start, **common)
 
@@ -4656,20 +4756,64 @@ def run_noiso(
         branch_blocks = c["branch_blocks"]
         p_start = p0 or sp.pres_psia or 100.0
 
+        # ── Preliminary Main march (no branch injections) ────────────────
+        # Captures the flow/composition that leaves Main at every
+        # 'Tee Split Branch Flow N' row, so any Branch block that splits off
+        # of Main can be auto-seeded below (mirrors the Branch→Main join
+        # injection further down, but in the opposite direction).
+        splits_out: dict[tuple, dict] = {}
+        build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
+                              default_sp=sp, splits_out=splits_out)
+
         # ── March branch blocks FIRST (independent sub-runs) ─────────────
         # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
         # the same line is INJECTED into the Main at that row (its outlet flow +
         # composition merge in); others stay standalone Branch sheets.
+        # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
+        # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
+        # captured split-off flow/composition instead of marching standalone.
         branch_runs: list = []            # (label, sts, fls, cmps, b_lns)
         injections: dict[int, dict] = {}  # main_rows index → branch outlet
         line_branch_count: dict[str, int] = {}
+        line_split_count: dict[str, int] = {}
         for bi, block in enumerate(branch_blocks):
             bp = _start_p_of_block(block) or p_start
-            sts, fls, cmps, _bmw = build_profile_solved(
-                block, resolver, bp, flash_mode=flash_mode, default_sp=sp)
+            b0 = block[0] if block else {}
+            up_line = b0.get("Upstream Line No")
+            up_seq  = b0.get("Upstream Seq")
+            split_cap = None
+            if up_line:
+                if up_seq is not None:
+                    split_cap = splits_out.get((up_line, up_seq))
+                else:
+                    line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
+                    split_n = line_split_count[up_line]
+                    split_row = next(
+                        (mr for mr in main_rows
+                         if mr.get("Line No") == up_line
+                         and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
+                        None)
+                    if split_row is not None:
+                        split_cap = splits_out.get((up_line, split_row.get("Seq")))
+                if split_cap is None:
+                    print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
+                          f"Upstream Line No '{up_line}' but no matching "
+                          f"'Tee Split Branch Flow N' output was found on Main.")
+
+            solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp)
+            if split_cap is not None:
+                solve_kwargs.update(default_feed=split_cap["feed"],
+                                     default_vap_cf=split_cap["vap_cf"],
+                                     default_liq_cf=split_cap["liq_cf"])
+                if split_cap.get("sp") is not None:
+                    solve_kwargs["default_sp"] = split_cap["sp"]
+            sts, fls, cmps, _bmw = build_profile_solved(block, resolver, bp, **solve_kwargs)
             b_lns = [r["Line No"] for r in block]
             label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
             branch_runs.append((label, sts, fls, cmps, b_lns))
+            if split_cap is not None:
+                print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
+                      f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
 
             bline  = block[0].get("Line No") if block else None
             line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
