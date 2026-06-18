@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openpyxl import load_workbook
+from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
@@ -122,6 +123,9 @@ CASE_FIELDS: list[tuple] = [
     ("Builtup BP", None, _U("P"),
      "CALCULATED on run — peak pressure rise in the tailpipe caused by this "
      "valve's own flow", "calc"),
+    ("Vessel MDMT", -20.0, _U("T"),
+     "Minimum Design Metal Temperature — flagged FAIL if the computed vessel "
+     "temperature drops below this at any point in the run", "in"),
 
     ("RELIEF GAS PROPERTIES (Stream Lookup optional — composition reporting only)",
      None, None, "", "sec"),
@@ -408,6 +412,8 @@ class CaseResult:
     total_vol_ft3: float = 0.0
     peak_builtup_bp_psia: float = 0.0
     feed_names: list[str] | None = None
+    min_t_f: float | None = None
+    min_t_at_s: float = 0.0
 
 
 def run_case(case: dict, pipeline_rows: list[dict], base_dir: str = ".") -> CaseResult:
@@ -466,8 +472,13 @@ def run_case(case: dict, pipeline_rows: list[dict], base_dir: str = ".") -> Case
             except Exception:
                 comp = None
 
+        t_f_now = _to_f(t_k)
+        if result.min_t_f is None or t_f_now < result.min_t_f:
+            result.min_t_f = t_f_now
+            result.min_t_at_s = t
+
         result.rows.append(TimeRow(
-            t_s=t, p_psia=_to_psia(p_pa), t_f=_to_f(t_k),
+            t_s=t, p_psia=_to_psia(p_pa), t_f=t_f_now,
             mdot_lbhr=_kgs_to_lbhr(mdot_kgs), qvol_ft3hr=qvol_ft3hr,
             builtup_bp_psia=builtup_psia, choked=choked, comp=comp,
         ))
@@ -519,11 +530,21 @@ def design_checks(case: dict, result: CaseResult) -> list[tuple]:
     return checks
 
 
+def mdmt_check(case: dict, result: CaseResult) -> tuple | None:
+    """(mdmt_f, min_t_f, min_t_at_s, verdict) or None if no MDMT set / no run."""
+    mdmt = case.get("Vessel MDMT")
+    if mdmt is None or result.min_t_f is None:
+        return None
+    verdict = "FAIL" if result.min_t_f < mdmt else "PASS"
+    return (mdmt, result.min_t_f, result.min_t_at_s, verdict)
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Output workbook
 # ════════════════════════════════════════════════════════════════════════
 def write_output(case: dict, usys: "UN.UnitSystem", result: CaseResult,
-                 checks: list[tuple], out_path: str) -> str:
+                 checks: list[tuple], out_path: str,
+                 mdmt: tuple | None = None) -> str:
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
@@ -559,6 +580,31 @@ def write_output(case: dict, usys: "UN.UnitSystem", result: CaseResult,
     for col, w in zip("ABCDEFG", (10, 12, 12, 14, 14, 12, 8)):
         ws.column_dimensions[col].width = w
 
+    # ── Curves: P, T, mass flow, vol flow vs time ───────────────────
+    n_rows = len(result.rows)
+    if n_rows > 0:
+        last_row = 2 + n_rows
+        cats = Reference(ws, min_col=1, min_row=3, max_row=last_row)
+        chart_specs = [
+            ("Pressure vs Time", 2, usys.label("P")),
+            ("Temperature vs Time", 3, usys.label("T")),
+            ("Mass Flow vs Time", 4, usys.label("mflow")),
+            ("Vol Flow vs Time", 5, usys.label("qvol")),
+        ]
+        anchor_row = 2
+        for title, col, unit_lbl in chart_specs:
+            chart = LineChart()
+            chart.title = title
+            chart.style = 12
+            chart.x_axis.title = "Time (s)"
+            chart.y_axis.title = unit_lbl
+            chart.height, chart.width = 8, 16
+            data = Reference(ws, min_col=col, min_row=2, max_row=last_row)
+            chart.add_data(data, titles_from_data=True)
+            chart.set_categories(cats)
+            ws.add_chart(chart, f"J{anchor_row}")
+            anchor_row += 17
+
     # ── Design_Checks ───────────────────────────────────────────────
     ws2 = wb.create_sheet(CHECKS_SHEET)
     ws2.sheet_view.showGridLines = False
@@ -576,6 +622,18 @@ def write_output(case: dict, usys: "UN.UnitSystem", result: CaseResult,
     rows.append(("Peak Builtup BP over the run",
                  round(usys.from_internal("P", result.peak_builtup_bp_psia), 4),
                  usys.label("P"), ""))
+    rows.append(("MDMT CHECK", None, None, "sec"))
+    if mdmt is None:
+        rows.append(("MDMT not set / no run data", "—", "", ""))
+    else:
+        mdmt_f, min_t_f, min_t_at_s, verdict = mdmt
+        rows.append(("Vessel MDMT", round(usys.from_internal("T", mdmt_f), 4),
+                     usys.label("T"), ""))
+        rows.append(("Minimum vessel temperature reached",
+                     round(usys.from_internal("T", min_t_f), 4), usys.label("T"),
+                     f"at t = {min_t_at_s:.1f} s"))
+        rows.append(("MDMT Check", verdict, "",
+                     "FAIL = computed temperature dropped below MDMT (brittle-fracture risk)"))
     _result_rows(ws2, 2, rows)
 
     # ── Notes ───────────────────────────────────────────────────────
@@ -623,9 +681,10 @@ def run(input_path: str, out_path: str | None = None) -> str:
     base_dir = os.path.dirname(os.path.abspath(input_path))
     result = run_case(case, pipeline_rows, base_dir)
     checks = design_checks(case, result)
+    mdmt = mdmt_check(case, result)
     out_path = out_path or (os.path.splitext(os.path.basename(input_path))[0]
                             + "_depressurization_output.xlsx")
-    return write_output(case, usys, result, checks, out_path)
+    return write_output(case, usys, result, checks, out_path, mdmt)
 
 
 # ════════════════════════════════════════════════════════════════════════
