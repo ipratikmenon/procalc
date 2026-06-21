@@ -7235,36 +7235,6 @@ def _decode_pf_pseudo(name_upper: str) -> dict | None:
     return {"tc_f": tc_r - 459.67, "pc_psia": pc_psia, "omega": omega}
 
 
-_KPA_TO_PSIA = 0.14503774
-
-# Short PRO/II component IDs (as they appear in stream composition tables)
-# that don't match the library's full chemical name verbatim.
-_PROII_ALIAS = {
-    "H2": "HYDROGEN", "N2": "NITROGEN", "O2": "OXYGEN", "CO": "CARBON MONOXIDE",
-    "CO2": "CARBON DIOXIDE", "H2S": "HYDROGEN SULFIDE", "H2O": "WATER",
-    "NH3": "AMMONIA", "HCL": "HYDROGEN CHLORIDE",
-    "NC4": "N-BUTANE", "IC4": "ISOBUTANE",
-    "NC5": "N-PENTANE", "IC5": "ISOPENTANE",
-    "NC6": "N-HEXANE", "NC7": "N-HEPTANE", "NC8": "N-OCTANE",
-    "NC9": "N-NONANE", "NC10": "N-DECANE",
-}
-
-def _proii_cm(n_up: str) -> dict | None:
-    """Real Tc/Pc/omega for a named (non-pseudo) component from the embedded
-    PRO/II library, converted to the tc_f/pc_psia/omega format the rest of
-    _build_feed expects. Returns None if the component isn't in the library
-    or is missing Tc/Pc (e.g. some lumps only carry MW/NBP)."""
-    p = PROII_PROPS.get(n_up) or PROII_PROPS.get(_PROII_ALIAS.get(n_up, ""))
-    if not p:
-        return None
-    tc_k, pc_kpa = p.get("TC"), p.get("PC")
-    if tc_k is None or pc_kpa is None:
-        return None
-    return {"tc_f": tc_k * 9.0 / 5.0 - 459.67,
-            "pc_psia": pc_kpa * _KPA_TO_PSIA,
-            "omega": p.get("ACENTRIC")}
-
-
 def _build_feed(z_d, x_d, mass_d, mole_d, sp,
                 y_d: dict | None = None,
                 const_map: dict | None = None) -> FlashFeed | None:
@@ -7309,16 +7279,9 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         else:
             k_raw.append((float(zi) / xi) if xi > 1e-12 else 1e6)
         mw.append(mwi)
-        # criticals — real PRO/II library values take priority for named
-        # (non-pseudo) components; the PF<nbp>A<api>D cut-set pseudos keep
-        # the predicted Lee-Kesler/Edmister path (no exact library match is
-        # meaningful for those — see _decode_pf_pseudo's docstring).
+        # criticals
         n_up = str(n).strip().upper()
-        cm = None
-        if not _PF_NAME_RE.match(n_up):
-            cm = _proii_cm(n_up)
-        if cm is None:
-            cm = (const_map or {}).get(n_up)
+        cm = (const_map or {}).get(n_up)
         if cm is None or cm.get("tc_f") is None:
             cm = _decode_pf_pseudo(n_up)
         if cm and cm.get("tc_f") is not None:
