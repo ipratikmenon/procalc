@@ -259,6 +259,16 @@ WATSON_K_CALIB_MAX = 8.83340340697643
 _TC_CORR = (0.017620683346006086, 0.70214429996119)   # ratio = m*K + b
 _PC_CORR = (0.09609709590376307, -0.2960334335286057)
 
+# Above K=8.83 there's no PRO/II-verified correction (yet), so raw Twu
+# is used as-is through K=14 (the upper edge of Twu's own stated fitted
+# range). Beyond that, 3 PRO/II points (K=14.8, 25.2, 31.4) show Twu
+# overshooting badly -- up to 630% on Tc for the two with K>20, where
+# multiple perturbation terms hit TWU_F_CLAMP (clamp saturation, not a
+# smooth trend, so not fittable from 3 points). Even the K=14.8 point,
+# where no f-term is clamped, is still off by 7-14%, so flag *any*
+# K > TWU_K_FITTED_MAX rather than relying on the clamp alone to catch it.
+TWU_K_FITTED_MAX = 14.0
+
 def _watson_k(tb_r, sg):
     return tb_r**(1/3) / sg
 
@@ -285,6 +295,7 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     K = _watson_k(tb_r, sg)
     in_calib = WATSON_K_CALIB_MIN <= K <= WATSON_K_CALIB_MAX
     below_calib = K < WATSON_K_CALIB_MIN
+    above_fitted = K > TWU_K_FITTED_MAX
     tc_f = tc_r - 459.67   # correction was fit in °F, not °R -- the
                            # 459.67 offset would distort a direct ratio
                            # applied to the absolute Rankine value
@@ -306,6 +317,8 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         method = 'Twu (1984), Watson-K calibrated'
     elif below_calib:
         method = 'Twu (1984), Watson-K calibration extrapolated'
+    elif above_fitted:
+        method = 'Twu (1984), Watson K above fitted range'
     else:
         method = 'Twu (1984)'
 
@@ -317,7 +330,7 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         'Zc':       round(zc, 4),
         'omega':    round(omega, 6) if omega is not None else None,
         'SG':       round(sg, 6),
-        'extrapolated': was_clamped or below_calib,
+        'extrapolated': was_clamped or below_calib or above_fitted,
         'method':   method,
     }
 
@@ -380,7 +393,7 @@ def read_constants(path):
                 if est.get('Pc_psia') is not None and est['Pc_psia'] < 10:
                     entry['method'] = f'{base_method} (⚠ unreliable — Pc < 10 psia, use PROII Extracted)'
                 elif est.get('extrapolated'):
-                    entry['method'] = f'{base_method} (⚠ extrapolated — Watson K outside fitted range, perturbation clamped)'
+                    entry['method'] = f'{base_method} (⚠ extrapolated — Watson K outside Twu\'s fitted/calibrated range)'
                 elif est.get('omega') is None:
                     entry['method'] = f'{base_method} (⚠ partial — Frost-Kalkwarf-Thodos failed, ω unavailable)'
                 else:
