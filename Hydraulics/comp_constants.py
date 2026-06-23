@@ -2,8 +2,8 @@
 """
 Component Constants Builder  —  HyCalign
 ==========================================
-Reads Constants.xlsx, estimates Tc/Pc/ω for pseudo-components using
-Lee-Kesler (1975) + Edmister (1958) correlations, and either:
+Reads Constants.xlsx, estimates Tc/Pc/Vc/ω for pseudo-components using
+the Twu (1984) correlation, and either:
   (a) Enriches an existing HMB workbook by adding a COMP_CONSTANTS sheet
   (b) Produces a standalone enriched Constants file
 
@@ -12,18 +12,15 @@ For pseudo-components (petroleum fractions), given:
   NBP (°F)    — normal boiling point
   SLD (lb/ft³)— standard liquid density at 60°F
 
-Lee-Kesler (1975):
-  SG  = SLD / 62.428
-  Tb  = NBP + 459.67  (°R)
-  Tc  = 341.7 + 811.1·SG + (0.4244 + 0.1174·SG)·Tb
-        + (0.4669 - 3.2623·SG)·1e5/Tb                       [°R → °F]
-  ln(Pc) = 8.3634 - 0.0566/SG
-           - (0.24244 + 2.2898/SG + 0.11857/SG²)·1e-3·Tb
-           + (1.4685 + 3.648/SG + 0.47227/SG²)·1e-7·Tb²
-           - (0.42019 + 1.6977/SG²)·1e-10·Tb³               [psia]
-
+Twu, C.H. (1984), Fluid Phase Equilibria 16: 137-150. Perturbs a
+hypothetical n-alkane reference (same Tb) by the real component's
+specific-gravity deviation to get Tc, Vc, Pc, MW; ω then follows from
 Edmister (1958):
   ω = (3/7) · log10(Pc/14.696) / (Tc/Tb - 1) - 1
+
+The Twu perturbation terms (f_T, f_V, f_P, f_M) are clamped (see
+TWU_F_CLAMP) to avoid the (1+2f)/(1-2f) re-summation singularity for
+components far outside the correlation's fitted range.
 
 Usage:
     python comp_constants.py Constants.xlsx                  # standalone enriched xlsx
@@ -87,30 +84,7 @@ def fmtv(v, dp=6):
         return round(v, dp)
     return v
 
-# ── Lee-Kesler (1975) correlations ────────────────────────────────────
 WATER_DENSITY_60F = 62.428   # lb/ft³ at 60°F
-
-def estimate_tc_r(tb_r, sg):
-    """Lee-Kesler Tc in °R."""
-    return (341.7 + 811.1*sg
-            + (0.4244 + 0.1174*sg)*tb_r
-            + (0.4669 - 3.2623*sg)*1e5/tb_r)
-
-def estimate_pc_psia(tb_r, sg):
-    """Lee-Kesler Pc in psia."""
-    ln_pc = (8.3634
-             - 0.0566/sg
-             - (0.24244 + 2.2898/sg + 0.11857/(sg**2))*1e-3*tb_r
-             + (1.4685 + 3.648/sg + 0.47227/(sg**2))*1e-7*(tb_r**2)
-             - (0.42019 + 1.6977/(sg**2))*1e-10*(tb_r**3))
-    return math.exp(ln_pc)
-
-def estimate_vc_ftlbmol(tc_r, pc_psia):
-    """Rough Vc from Tc and Pc using Zc≈0.27."""
-    # Vc = Zc·R·Tc/Pc
-    R_psia_ft3 = 10.7316   # psia·ft³/(lbmol·°R)
-    Zc = 0.27
-    return Zc * R_psia_ft3 * tc_r / pc_psia if pc_psia > 0 else None
 
 def estimate_acentric(tb_r, tc_r, pc_psia):
     """Edmister (1958) acentric factor."""
@@ -123,9 +97,7 @@ def estimate_acentric(tb_r, tc_r, pc_psia):
 # Twu, C.H., "An internally consistent correlation for predicting the
 # critical properties and molecular weights of petroleum and coal-tar
 # liquids," Fluid Phase Equilibria, 16 (1984) 137-150.
-# Used for heavy fractions (MW >= TWU_MW_THRESHOLD) where Lee-Kesler
-# degrades (flagged via the Pc < 10 psia warning below).
-TWU_MW_THRESHOLD = 265.0
+# Sole correlation for all pseudo-component (petroleum-fraction) Tc/Vc/Pc/MW.
 
 def _twu_tc0(tb_r):
     """Eqn (1): hypothetical n-alkane critical temperature (°R)."""
@@ -168,11 +140,29 @@ def _twu_mw0(tb_r):
             hi, fhi = mid, fm
     return 0.5*(lo+hi)
 
+# Twu's re-summation g = g0*[(1+2f)/(1-2f)]^2 is singular as f -> 0.5
+# (the ratio diverges). Real fractions far from the n-alkane reference
+# (very aromatic/naphthenic, or outside the paper's fitted Watson K range
+# of ~8-14) can push f past that point, producing nonphysical Tc/Vc/Pc/MW.
+# Clamp f so (1+2f)/(1-2f), squared, stays within ~5.4x of g0 — generous
+# enough for legitimate heavy-fraction deviations, tight enough to kill
+# the runaway blow-up seen for out-of-range Watson K inputs.
+TWU_F_CLAMP = 0.20
+
+def _clamp_f(f):
+    clamped = abs(f) > TWU_F_CLAMP
+    return max(-TWU_F_CLAMP, min(TWU_F_CLAMP, f)), clamped
+
 def estimate_twu_props(tb_r, sg):
     """
     Twu (1984) perturbation about the n-alkane reference system.
-    Given Tb(°R) and SG(60°F), returns (Tc_R, Vc_ft3lbmol, Pc_psia, MW)
-    or None if the reference solve fails.
+    Given Tb(°R) and SG(60°F), returns
+    (Tc_R, Vc_ft3lbmol, Pc_psia, MW, was_clamped) or None if the
+    reference solve fails. The perturbation terms f_T, f_V, f_P, f_M are
+    clamped (see TWU_F_CLAMP) to avoid the singularity in the
+    (1+2f)/(1-2f) re-summation for components far outside the
+    correlation's fitted range; was_clamped is True if any of them hit
+    the clamp, flagging the result as an extrapolation.
     """
     tc0 = _twu_tc0(tb_r)
     if tc0 <= 0:
@@ -187,38 +177,36 @@ def estimate_twu_props(tb_r, sg):
 
     # Eqns (11)-(13): critical temperature
     dsg_t = math.exp(5*(sg0 - sg)) - 1
-    f_t = dsg_t * (-0.362456/tb_r**0.5
-                   + (0.0398285 - 0.948125/tb_r**0.5)*dsg_t)
+    f_t, c_t = _clamp_f(dsg_t * (-0.362456/tb_r**0.5
+                        + (0.0398285 - 0.948125/tb_r**0.5)*dsg_t))
     tc = tc0 * ((1 + 2*f_t)/(1 - 2*f_t))**2
 
     # Eqns (14)-(16): critical volume
     dsg_v = math.exp(4*(sg0**2 - sg**2)) - 1
-    f_v = dsg_v * (0.466590/tb_r**0.5
-                   + (-0.182421 + 3.01721/tb_r**0.5)*dsg_v)
+    f_v, c_v = _clamp_f(dsg_v * (0.466590/tb_r**0.5
+                        + (-0.182421 + 3.01721/tb_r**0.5)*dsg_v))
     vc = vc0 * ((1 + 2*f_v)/(1 - 2*f_v))**2
 
     # Eqns (17)-(19): critical pressure
     dsg_p = math.exp(0.5*(sg0 - sg)) - 1
-    f_p = dsg_p * ((2.53262 - 46.1955/tb_r**0.5 - 0.00127885*tb_r)
-                   + (-11.4277 + 252.140/tb_r**0.5 + 0.00230535*tb_r)*dsg_p)
+    f_p, c_p = _clamp_f(dsg_p * ((2.53262 - 46.1955/tb_r**0.5 - 0.00127885*tb_r)
+                        + (-11.4277 + 252.140/tb_r**0.5 + 0.00230535*tb_r)*dsg_p))
     pc = pc0 * (tc/tc0) * (vc0/vc) * ((1 + 2*f_p)/(1 - 2*f_p))**2
 
     # Eqns (20)-(23): molecular weight
     dsg_m = math.exp(5*(sg0 - sg)) - 1
     abs_x = abs(0.0123420 - 0.328086/tb_r**0.5)
-    f_m = dsg_m * (abs_x + (-0.0175691 + 0.193168/tb_r**0.5)*dsg_m)
+    f_m, c_m = _clamp_f(dsg_m * (abs_x + (-0.0175691 + 0.193168/tb_r**0.5)*dsg_m))
     ln_mw = math.log(mw0) * ((1 + 2*f_m)/(1 - 2*f_m))**2
     mw = math.exp(ln_mw)
 
-    return tc, vc, pc, mw
+    return tc, vc, pc, mw, (c_t or c_v or c_p or c_m)
 
 def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     """
     Given MW, NBP(°F), SLD(lb/ft³) for a pseudo-component,
-    estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω.
-    Uses Twu (1984) for MW >= TWU_MW_THRESHOLD (more reliable for heavy
-    fractions), Lee-Kesler (1975) + Edmister (1958) otherwise.
-    Returns dict.
+    estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω via Twu (1984).
+    Returns dict (empty if the reference solve fails).
     """
     if None in (mw, nbp_f, sld_lbft3) or sld_lbft3 <= 0:
         return {}
@@ -227,30 +215,13 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     if tb_r <= 0 or sg <= 0:
         return {}
 
-    if mw >= TWU_MW_THRESHOLD:
-        twu = estimate_twu_props(tb_r, sg)
-        if twu is not None:
-            tc_r, vc, pc_psia, mw_twu = twu
-            tc_f  = tc_r - 459.67
-            zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
-            omega = estimate_acentric(tb_r, tc_r, pc_psia)
-            return {
-                'Tc_F':     round(tc_f, 4),
-                'Tc_R':     round(tc_r, 4),
-                'Pc_psia':  round(pc_psia, 4),
-                'Vc_ft3lbmol': round(vc, 4) if vc else None,
-                'Zc':       round(zc, 4),
-                'omega':    round(omega, 6) if omega is not None else None,
-                'SG':       round(sg, 6),
-                'method':   'Twu (1984)',
-            }
-
-    tc_r    = estimate_tc_r(tb_r, sg)
-    tc_f    = tc_r - 459.67
-    pc_psia = estimate_pc_psia(tb_r, sg)
-    vc      = estimate_vc_ftlbmol(tc_r, pc_psia) if pc_psia > 0 else None
-    zc      = 0.27   # assumed
-    omega   = estimate_acentric(tb_r, tc_r, pc_psia)
+    twu = estimate_twu_props(tb_r, sg)
+    if twu is None:
+        return {}
+    tc_r, vc, pc_psia, mw_twu, was_clamped = twu
+    tc_f  = tc_r - 459.67
+    zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
+    omega = estimate_acentric(tb_r, tc_r, pc_psia)
 
     return {
         'Tc_F':     round(tc_f, 4),
@@ -260,7 +231,8 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         'Zc':       round(zc, 4),
         'omega':    round(omega, 6) if omega is not None else None,
         'SG':       round(sg, 6),
-        'method':   'Lee-Kesler (1975) + Edmister (1958)',
+        'extrapolated': was_clamped,
+        'method':   'Twu (1984)',
     }
 
 # ── Read Constants.xlsx ────────────────────────────────────────────────
@@ -314,11 +286,15 @@ def read_constants(path):
                 entry['omega']         = est.get('omega')
                 entry['SG']            = est.get('SG')
                 entry['estimated']     = True
-                base_method = est.get('method', 'Lee-Kesler + Edmister')
+                base_method = est.get('method', 'Twu (1984)')
                 # Flag unreliable estimates (very heavy fractions where the
-                # correlation in use breaks down)
+                # correlation in use breaks down, or inputs whose Watson K
+                # lies far outside Twu's fitted ~8-14 range, where the
+                # perturbation terms had to be clamped)
                 if est.get('Pc_psia') is not None and est['Pc_psia'] < 10:
                     entry['method'] = f'{base_method} (⚠ unreliable — Pc < 10 psia, use PROII Extracted)'
+                elif est.get('extrapolated'):
+                    entry['method'] = f'{base_method} (⚠ extrapolated — Watson K outside fitted range, perturbation clamped)'
                 elif est.get('omega') is None:
                     entry['method'] = f'{base_method} (⚠ partial — Edmister failed, ω unavailable)'
                 else:
@@ -373,8 +349,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     ws.merge_cells(f"B1:{LC}1")
     _c(ws,1,2,
        f"COMPONENT CONSTANTS  —  {len(comp_list)} components  |  "
-       f"Lee-Kesler (1975)+Edmister (1958) below MW {TWU_MW_THRESHOLD:.0f}, "
-       f"Twu (1984) at/above, for pseudo-fractions",
+       f"Twu (1984) + Edmister (1958) for pseudo-fractions",
        bg=C['NAVY'], fg=C['WHITE'], sz=11, bold=True)
     rh(ws,1,22)
 
@@ -440,7 +415,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     for lbl, bg, desc in [
         ('PURE',     C['PURE'],   'Library component — Tc/Pc/ω from PRO/II database'),
         ('PSEUDO',   C['PSEUDO'], 'Petroleum fraction — estimated from MW + NBP + SLD'),
-        ('ESTIMATED',C['ESTIM'],  f'Lee-Kesler+Edmister (MW<{TWU_MW_THRESHOLD:.0f}) or Twu 1984 (MW>={TWU_MW_THRESHOLD:.0f}) — use for EOS flash'),
+        ('ESTIMATED',C['ESTIM'],  'Twu (1984) + Edmister (1958) — use for EOS flash'),
     ]:
         _c(ws,r,2,lbl,  bg=bg, sz=8, bold=True, ha='center')
         _c(ws,r,3,desc, bg=C['WHITE'], sz=8, italic=True)
