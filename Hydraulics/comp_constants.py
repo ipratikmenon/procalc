@@ -119,10 +119,105 @@ def estimate_acentric(tb_r, tc_r, pc_psia):
     if theta <= 0: return None
     return (3.0/7.0) * math.log10(pc_psia / 14.696) / theta - 1.0
 
+# ── Twu (1984) correlation ─────────────────────────────────────────────
+# Twu, C.H., "An internally consistent correlation for predicting the
+# critical properties and molecular weights of petroleum and coal-tar
+# liquids," Fluid Phase Equilibria, 16 (1984) 137-150.
+# Used for heavy fractions (MW >= TWU_MW_THRESHOLD) where Lee-Kesler
+# degrades (flagged via the Pc < 10 psia warning below).
+TWU_MW_THRESHOLD = 265.0
+
+def _twu_tc0(tb_r):
+    """Eqn (1): hypothetical n-alkane critical temperature (°R)."""
+    return tb_r / (0.533272 + 0.191017e-3*tb_r + 0.779681e-7*tb_r**2
+                   - 0.284376e-10*tb_r**3 + 0.959468e28/tb_r**13)
+
+def _twu_vc0(alpha):
+    """Eqn (2): hypothetical n-alkane critical volume (ft³/lbmol)."""
+    inner = 0.419869 - 0.505839*alpha - 1.56436*alpha**3 - 9481.70*alpha**14
+    return (1 - inner) ** -8
+
+def _twu_sg0(alpha):
+    """Eqn (3): hypothetical n-alkane specific gravity."""
+    return 0.843593 - 0.128624*alpha - 3.36159*alpha**3 - 13749.5*alpha**12
+
+def _twu_pc0(alpha):
+    """Eqn (8): hypothetical n-alkane critical pressure (psia)."""
+    bracket = (3.83354 + 1.19629*alpha**0.5 + 34.8888*alpha
+               + 36.1952*alpha**2 + 104.193*alpha**4)
+    return bracket ** 2
+
+def _twu_mw0(tb_r):
+    """Eqn (4)/(7): hypothetical n-alkane molecular weight, solved by
+    bisection (eqn. 4 is explicit in Tb, not MW)."""
+    def tb_from_mw(mw_):
+        theta = math.log(mw_)
+        return (math.exp(5.71419 + 2.71579*theta - 0.286590*theta**2
+                          - 39.8544/theta - 0.122488/theta**2)
+                - 24.7522*theta + 35.3155*theta**2)
+    lo, hi = 2.0, 5000.0
+    flo, fhi = tb_from_mw(lo) - tb_r, tb_from_mw(hi) - tb_r
+    if flo * fhi > 0:
+        return None
+    for _ in range(100):
+        mid = 0.5*(lo+hi)
+        fm = tb_from_mw(mid) - tb_r
+        if (fm > 0) == (flo > 0):
+            lo, flo = mid, fm
+        else:
+            hi, fhi = mid, fm
+    return 0.5*(lo+hi)
+
+def estimate_twu_props(tb_r, sg):
+    """
+    Twu (1984) perturbation about the n-alkane reference system.
+    Given Tb(°R) and SG(60°F), returns (Tc_R, Vc_ft3lbmol, Pc_psia, MW)
+    or None if the reference solve fails.
+    """
+    tc0 = _twu_tc0(tb_r)
+    if tc0 <= 0:
+        return None
+    alpha = 1 - tb_r/tc0
+    vc0 = _twu_vc0(alpha)
+    sg0 = _twu_sg0(alpha)
+    pc0 = _twu_pc0(alpha)
+    mw0 = _twu_mw0(tb_r)
+    if mw0 is None:
+        return None
+
+    # Eqns (11)-(13): critical temperature
+    dsg_t = math.exp(5*(sg0 - sg)) - 1
+    f_t = dsg_t * (-0.362456/tb_r**0.5
+                   + (0.0398285 - 0.948125/tb_r**0.5)*dsg_t)
+    tc = tc0 * ((1 + 2*f_t)/(1 - 2*f_t))**2
+
+    # Eqns (14)-(16): critical volume
+    dsg_v = math.exp(4*(sg0**2 - sg**2)) - 1
+    f_v = dsg_v * (0.466590/tb_r**0.5
+                   + (-0.182421 + 3.01721/tb_r**0.5)*dsg_v)
+    vc = vc0 * ((1 + 2*f_v)/(1 - 2*f_v))**2
+
+    # Eqns (17)-(19): critical pressure
+    dsg_p = math.exp(0.5*(sg0 - sg)) - 1
+    f_p = dsg_p * ((2.53262 - 46.1955/tb_r**0.5 - 0.00127885*tb_r)
+                   + (-11.4277 + 252.140/tb_r**0.5 + 0.00230535*tb_r)*dsg_p)
+    pc = pc0 * (tc/tc0) * (vc0/vc) * ((1 + 2*f_p)/(1 - 2*f_p))**2
+
+    # Eqns (20)-(23): molecular weight
+    dsg_m = math.exp(5*(sg0 - sg)) - 1
+    abs_x = abs(0.0123420 - 0.328086/tb_r**0.5)
+    f_m = dsg_m * (abs_x + (-0.0175691 + 0.193168/tb_r**0.5)*dsg_m)
+    ln_mw = math.log(mw0) * ((1 + 2*f_m)/(1 - 2*f_m))**2
+    mw = math.exp(ln_mw)
+
+    return tc, vc, pc, mw
+
 def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     """
     Given MW, NBP(°F), SLD(lb/ft³) for a pseudo-component,
     estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω.
+    Uses Twu (1984) for MW >= TWU_MW_THRESHOLD (more reliable for heavy
+    fractions), Lee-Kesler (1975) + Edmister (1958) otherwise.
     Returns dict.
     """
     if None in (mw, nbp_f, sld_lbft3) or sld_lbft3 <= 0:
@@ -131,6 +226,24 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     tb_r = nbp_f + 459.67   # °F → °R
     if tb_r <= 0 or sg <= 0:
         return {}
+
+    if mw >= TWU_MW_THRESHOLD:
+        twu = estimate_twu_props(tb_r, sg)
+        if twu is not None:
+            tc_r, vc, pc_psia, mw_twu = twu
+            tc_f  = tc_r - 459.67
+            zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
+            omega = estimate_acentric(tb_r, tc_r, pc_psia)
+            return {
+                'Tc_F':     round(tc_f, 4),
+                'Tc_R':     round(tc_r, 4),
+                'Pc_psia':  round(pc_psia, 4),
+                'Vc_ft3lbmol': round(vc, 4) if vc else None,
+                'Zc':       round(zc, 4),
+                'omega':    round(omega, 6) if omega is not None else None,
+                'SG':       round(sg, 6),
+                'method':   'Twu (1984)',
+            }
 
     tc_r    = estimate_tc_r(tb_r, sg)
     tc_f    = tc_r - 459.67
@@ -201,13 +314,15 @@ def read_constants(path):
                 entry['omega']         = est.get('omega')
                 entry['SG']            = est.get('SG')
                 entry['estimated']     = True
-                # Flag unreliable estimates (very heavy fractions where LK breaks down)
+                base_method = est.get('method', 'Lee-Kesler + Edmister')
+                # Flag unreliable estimates (very heavy fractions where the
+                # correlation in use breaks down)
                 if est.get('Pc_psia') is not None and est['Pc_psia'] < 10:
-                    entry['method'] = 'Lee-Kesler (⚠ unreliable — Pc < 10 psia, use PROII Extracted)'
+                    entry['method'] = f'{base_method} (⚠ unreliable — Pc < 10 psia, use PROII Extracted)'
                 elif est.get('omega') is None:
-                    entry['method'] = 'Lee-Kesler (⚠ partial — Edmister failed, ω unavailable)'
+                    entry['method'] = f'{base_method} (⚠ partial — Edmister failed, ω unavailable)'
                 else:
-                    entry['method'] = est.get('method', 'Lee-Kesler + Edmister')
+                    entry['method'] = base_method
         elif not is_pseudo:
             # Pure components: SLD from Constants.xlsx is in PRO/II internal units
             # (not lb/ft3), so SG conversion not applicable. Tc/Pc/omega used directly.
@@ -258,7 +373,8 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     ws.merge_cells(f"B1:{LC}1")
     _c(ws,1,2,
        f"COMPONENT CONSTANTS  —  {len(comp_list)} components  |  "
-       f"Lee-Kesler (1975) + Edmister (1958) for pseudo-fractions",
+       f"Lee-Kesler (1975)+Edmister (1958) below MW {TWU_MW_THRESHOLD:.0f}, "
+       f"Twu (1984) at/above, for pseudo-fractions",
        bg=C['NAVY'], fg=C['WHITE'], sz=11, bold=True)
     rh(ws,1,22)
 
@@ -324,7 +440,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     for lbl, bg, desc in [
         ('PURE',     C['PURE'],   'Library component — Tc/Pc/ω from PRO/II database'),
         ('PSEUDO',   C['PSEUDO'], 'Petroleum fraction — estimated from MW + NBP + SLD'),
-        ('ESTIMATED',C['ESTIM'],  'Lee-Kesler (Tc, Pc) + Edmister (ω) — use for EOS flash'),
+        ('ESTIMATED',C['ESTIM'],  f'Lee-Kesler+Edmister (MW<{TWU_MW_THRESHOLD:.0f}) or Twu 1984 (MW>={TWU_MW_THRESHOLD:.0f}) — use for EOS flash'),
     ]:
         _c(ws,r,2,lbl,  bg=bg, sz=8, bold=True, ha='center')
         _c(ws,r,3,desc, bg=C['WHITE'], sz=8, italic=True)
