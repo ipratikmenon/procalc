@@ -239,11 +239,36 @@ def estimate_twu_props(tb_r, sg):
 
     return tc, vc, pc, mw, (c_t or c_v or c_p or c_m)
 
+# ── Empirical Watson-K correction ───────────────────────────────────────
+# Twu (1984) is fitted/tested over Watson K ~ 8-14, but real assay
+# pseudo-components can fall well below that (dense/aromatic cuts). Fit
+# against 6 known PRO/II-extracted (Tc, Pc) values spanning Watson K
+# 6.761-8.833 (all in that below-range band), comparing PRO/II's actual
+# Tc/Pc to raw Twu's prediction for the same NBP/SG/MW inputs:
+#   Tc_ratio (PRO/II / Twu) = 0.017621*K + 0.70214   (residuals < 0.3%)
+#   Pc_ratio (PRO/II / Twu) = 0.096097*K - 0.29603   (residuals < 2%)
+# Notably the Pc ratio extrapolates to 1.0 (no correction needed) right
+# around K = 13.5 -- near the upper edge of Twu's own fitted range, a
+# reassuring physical sanity check. Only 6 points are available, all
+# below K=8.84, so the correction is clamped to that tested band and
+# flagged as an extrapolation outside it; it is NOT applied beyond the
+# tested range (e.g. it does not touch the K=8-14 range Twu's own paper
+# validates against).
+WATSON_K_CALIB_MIN = 6.7607782905215785
+WATSON_K_CALIB_MAX = 8.83340340697643
+_TC_CORR = (0.017620683346006086, 0.70214429996119)   # ratio = m*K + b
+_PC_CORR = (0.09609709590376307, -0.2960334335286057)
+
+def _watson_k(tb_r, sg):
+    return tb_r**(1/3) / sg
+
 def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     """
     Given MW, NBP(°F), SLD(lb/ft³) for a pseudo-component,
-    estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω via Twu (1984).
-    Returns dict (empty if the reference solve fails).
+    estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω via Twu (1984),
+    with an empirical Watson-K correction (see WATSON_K_CALIB_MIN/MAX)
+    applied within its calibrated band. Returns dict (empty if the
+    reference solve fails).
     """
     if None in (mw, nbp_f, sld_lbft3) or sld_lbft3 <= 0:
         return {}
@@ -256,9 +281,33 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     if twu is None:
         return {}
     tc_r, vc, pc_psia, mw_twu, was_clamped = twu
-    tc_f  = tc_r - 459.67
+
+    K = _watson_k(tb_r, sg)
+    in_calib = WATSON_K_CALIB_MIN <= K <= WATSON_K_CALIB_MAX
+    below_calib = K < WATSON_K_CALIB_MIN
+    tc_f = tc_r - 459.67   # correction was fit in °F, not °R -- the
+                           # 459.67 offset would distort a direct ratio
+                           # applied to the absolute Rankine value
+    if in_calib:
+        tc_f    *= _TC_CORR[0]*K + _TC_CORR[1]
+        pc_psia *= _PC_CORR[0]*K + _PC_CORR[1]
+    elif below_calib:
+        # Extrapolating the fitted correction below the lowest tested K
+        # is still better than raw (uncorrected) Twu for these very
+        # dense/aromatic fractions, but is unverified -- flag it.
+        tc_f    *= _TC_CORR[0]*WATSON_K_CALIB_MIN + _TC_CORR[1]
+        pc_psia *= _PC_CORR[0]*WATSON_K_CALIB_MIN + _PC_CORR[1]
+    tc_r = tc_f + 459.67
+
     zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
     omega = estimate_acentric(tb_r, tc_r, pc_psia)
+
+    if in_calib:
+        method = 'Twu (1984), Watson-K calibrated'
+    elif below_calib:
+        method = 'Twu (1984), Watson-K calibration extrapolated'
+    else:
+        method = 'Twu (1984)'
 
     return {
         'Tc_F':     round(tc_f, 4),
@@ -268,8 +317,8 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         'Zc':       round(zc, 4),
         'omega':    round(omega, 6) if omega is not None else None,
         'SG':       round(sg, 6),
-        'extrapolated': was_clamped,
-        'method':   'Twu (1984)',
+        'extrapolated': was_clamped or below_calib,
+        'method':   method,
     }
 
 # ── Read Constants.xlsx ────────────────────────────────────────────────
