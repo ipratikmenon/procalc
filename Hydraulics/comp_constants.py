@@ -15,8 +15,9 @@ For pseudo-components (petroleum fractions), given:
 Twu, C.H. (1984), Fluid Phase Equilibria 16: 137-150. Perturbs a
 hypothetical n-alkane reference (same Tb) by the real component's
 specific-gravity deviation to get Tc, Vc, Pc, MW; ω then follows from
-Edmister (1958):
-  ω = (3/7) · log10(Pc/14.696) / (Tc/Tb - 1) - 1
+PRO/II's SIMSCI/TWU generalized Frost-Kalkwarf-Thodos vapor pressure
+correlation (back-solving Ω at the NBP and applying Pitzer's definition
+at Tr = 0.7).
 
 The Twu perturbation terms (f_T, f_V, f_P, f_M) are clamped (see
 TWU_F_CLAMP) to avoid the (1+2f)/(1-2f) re-summation singularity for
@@ -86,12 +87,48 @@ def fmtv(v, dp=6):
 
 WATER_DENSITY_60F = 62.428   # lb/ft³ at 60°F
 
+# ── PRO/II "SIMSCI/TWU" acentric factor (generalized Frost-Kalkwarf-Thodos
+# vapor pressure correlation) ───────────────────────────────────────────
+# AVEVA PRO/II Simulation Reference Manual, "SIMSCI/TWU Characterization
+# Method", Eqns (1-14)-(1-18) and Table 1-4:
+#   ln(Pr) = (A1 + Ω·A4) + (A2 + Ω·A5)/Tr + (A3 + Ω·A6)·ln(Tr) + A7·Pr/Tr²
+# Ω is back-solved from this equation at the (known) NBP boundary
+# condition, Tr,b = Tb/Tc, Pr,b = 1 atm / Pc. Ω is then substituted back
+# into the same equation to get Pr at Tr = 0.7 (solved implicitly, since
+# Pr appears on both sides via the A7 term), and the Pitzer definition
+# (Eqn 1-18) gives ω = -log10(Pr at Tr=0.7) - 1.
+# Verified against accepted ω: n-heptane 0.349 (lit. 0.349), n-octane
+# 0.394 (lit. ~0.398), benzene 0.217 (lit. 0.212).
+_FK_A = (10.2005, -10.6317, -5.58058, 2.09167, -2.09167, -1.70214, 0.4312)
+
+def _fk_f0(tr):
+    return _FK_A[0] + _FK_A[1]/tr + _FK_A[2]*math.log(tr)
+
+def _fk_f1(tr):
+    return _FK_A[3] + _FK_A[4]/tr + _FK_A[5]*math.log(tr)
+
 def estimate_acentric(tb_r, tc_r, pc_psia):
-    """Edmister (1958) acentric factor."""
-    if tc_r <= tb_r or pc_psia <= 14.696: return None
-    theta = tc_r / tb_r - 1.0
-    if theta <= 0: return None
-    return (3.0/7.0) * math.log10(pc_psia / 14.696) / theta - 1.0
+    """PRO/II SIMSCI/TWU acentric factor (Frost-Kalkwarf-Thodos vapor
+    pressure correlation, Eqns 1-14-1-18)."""
+    if tc_r <= tb_r or pc_psia <= 0: return None
+    a7 = _FK_A[6]
+    tr_b = tb_r / tc_r
+    pr_b = 14.696 / pc_psia
+    f0_b, f1_b = _fk_f0(tr_b), _fk_f1(tr_b)
+    if f1_b == 0: return None
+    omega_cap = (math.log(pr_b) - a7*pr_b/tr_b**2 - f0_b) / f1_b
+
+    tr = 0.7
+    rhs = _fk_f0(tr) + omega_cap*_fk_f1(tr)
+    pr = math.exp(rhs)
+    for _ in range(50):
+        g  = math.log(pr) - a7*pr/tr**2 - rhs
+        dg = 1.0/pr - a7/tr**2
+        step = g/dg
+        pr -= step
+        if abs(step) < 1e-12: break
+    if pr <= 0: return None
+    return -math.log10(pr) - 1.0
 
 # ── Twu (1984) correlation ─────────────────────────────────────────────
 # Twu, C.H., "An internally consistent correlation for predicting the
@@ -296,7 +333,7 @@ def read_constants(path):
                 elif est.get('extrapolated'):
                     entry['method'] = f'{base_method} (⚠ extrapolated — Watson K outside fitted range, perturbation clamped)'
                 elif est.get('omega') is None:
-                    entry['method'] = f'{base_method} (⚠ partial — Edmister failed, ω unavailable)'
+                    entry['method'] = f'{base_method} (⚠ partial — Frost-Kalkwarf-Thodos failed, ω unavailable)'
                 else:
                     entry['method'] = base_method
         elif not is_pseudo:
@@ -349,7 +386,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     ws.merge_cells(f"B1:{LC}1")
     _c(ws,1,2,
        f"COMPONENT CONSTANTS  —  {len(comp_list)} components  |  "
-       f"Twu (1984) + Edmister (1958) for pseudo-fractions",
+       f"Twu (1984) + PRO/II SIMSCI/TWU vapor pressure ω for pseudo-fractions",
        bg=C['NAVY'], fg=C['WHITE'], sz=11, bold=True)
     rh(ws,1,22)
 
@@ -405,7 +442,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     _c(ws,r,2,
        f"  Total: {len(comp_list)} components  |  "
        f"Pure: {n_pure} (library)  |  "
-       f"Pseudo: {n_pseudo} ({n_estimated} estimated by LK+Edmister)  |  "
+       f"Pseudo: {n_pseudo} ({n_estimated} estimated by Twu+SIMSCI-ω)  |  "
        f"Estimated cells shown in yellow italic",
        bg=C['LGRAY'], fg=C['DGRAY'], sz=8, italic=True)
     rh(ws,r,15)
@@ -415,7 +452,7 @@ def build_comp_constants_sheet(wb, comp_list, position='after_components'):
     for lbl, bg, desc in [
         ('PURE',     C['PURE'],   'Library component — Tc/Pc/ω from PRO/II database'),
         ('PSEUDO',   C['PSEUDO'], 'Petroleum fraction — estimated from MW + NBP + SLD'),
-        ('ESTIMATED',C['ESTIM'],  'Twu (1984) + Edmister (1958) — use for EOS flash'),
+        ('ESTIMATED',C['ESTIM'],  'Twu (1984) + PRO/II SIMSCI/TWU vapor pressure ω — use for EOS flash'),
     ]:
         _c(ws,r,2,lbl,  bg=bg, sz=8, bold=True, ha='center')
         _c(ws,r,3,desc, bg=C['WHITE'], sz=8, italic=True)
