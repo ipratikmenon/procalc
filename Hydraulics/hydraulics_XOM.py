@@ -1786,8 +1786,17 @@ class TPInputs:
     gvf: float          # gas volume fraction (input, no-slip)
 
 
-def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
-    """Build SI two-phase inputs for a station, or None if geometry missing."""
+def station_tp_inputs(station, sp, gas_density_fn, flash_result=None) -> "TPInputs | None":
+    """Build SI two-phase inputs for a station, or None if geometry missing.
+
+    ``flash_result``, when given, is this station's own locally-flashed
+    FlashResult (same object the pressure-march / Flash_Profile sheet uses) —
+    its vap_mass/liq_mass (re-equilibrated at THIS station's local pressure)
+    drive the phase split, exactly as ``_dp_flashed`` already does for the
+    Δp calc.  Without it (e.g. the no-flash legacy ``run()`` path) the static
+    feed-level ``sp.vap_mass``/``sp.liq_mass`` is used as before — correct
+    only when the phase split truly does not change along the line.
+    """
     d_in = station.id_in
     if not d_in:
         return None
@@ -1800,8 +1809,14 @@ def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
     mu_l = (sp.liq_visc or 0.5) * CP_TO_PAS
     sigma = (sp.liq_surf_tens or 20.0) * DYNCM_TO_NM
 
-    mg = (sp.vap_mass or 0.0) * LBHR_TO_KGS      # kg/s
-    ml = (sp.liq_mass or 0.0) * LBHR_TO_KGS
+    if flash_result is not None:
+        vap_mass = flash_result.vap_mass or 0.0
+        liq_mass = flash_result.liq_mass or 0.0
+    else:
+        vap_mass = sp.vap_mass or 0.0
+        liq_mass = sp.liq_mass or 0.0
+    mg = vap_mass * LBHR_TO_KGS      # kg/s
+    ml = liq_mass * LBHR_TO_KGS
     qg = mg / rho_g if rho_g > 0 else 0.0
     ql = ml / rho_l if rho_l > 0 else 0.0
     vsg = qg / area
@@ -2045,8 +2060,17 @@ def _regime_cell(ws, r, ci, regime):
     _c(ws, r, ci, regime, bg=_REGIME_BG.get(regime, WHITE), ha="center")
 
 
-def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
-    """Two-phase flow-regime map across all stations + slug summary."""
+def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
+                        flashes=None):
+    """Two-phase flow-regime map across all stations + slug summary.
+
+    ``flashes``, when given, is the per-station list of FlashResult objects
+    from the rigorous pressure march (same list Flash_Profile/Pressure_Profile
+    use) — station i's local vap_mass/liq_mass drive its GVF, instead of the
+    static feed-level ``sp`` used for every station.  Without it, the sheet
+    falls back to the old feed-level behaviour (correct only when ``sp`` is
+    known not to vary along the line, e.g. the no-flash legacy path).
+    """
     ws = wb.create_sheet("Two_Phase_Regime")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -2066,8 +2090,9 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
     regime_counts: dict[str, int] = {}
     max_force = (0.0, None)
     single_phase_label = None
-    for s in stations:
-        t = station_tp_inputs(s, sp, gas_density_fn)
+    for i, s in enumerate(stations):
+        fr = flashes[i] if flashes is not None and i < len(flashes) else None
+        t = station_tp_inputs(s, sp, gas_density_fn, fr)
         _c(ws, r, 1, s.seq, ha="center")
         _c(ws, r, 2, s.comp_id or "", ha="center")
         _c(ws, r, 3, s.fitting or "", ha="center")
@@ -5077,7 +5102,8 @@ def run_noiso(
                                 circuit_label, sk,
                                 station_lines=station_lines, line_colors=lc)
             HE.build_regime_sheet(wb, main_stations, sp,
-                                   circuit_label, sk, gas_density_fn=gdf)
+                                   circuit_label, sk, gas_density_fn=gdf,
+                                   flashes=main_flashes)
         else:
             wb.create_sheet("Component_Detail")
             HE.build_stream_sheet(wb, sp, phase)
