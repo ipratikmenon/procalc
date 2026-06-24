@@ -239,90 +239,91 @@ def estimate_twu_props(tb_r, sg):
 
     return tc, vc, pc, mw, (c_t or c_v or c_p or c_m)
 
-# ── Empirical Watson-K correction ───────────────────────────────────────
+# ── Direct empirical curve fits (replace Twu's Tc/Pc within 3 verified
+#    Watson-K bands; Vc/MW/omega always come from raw Twu) ───────────────
 # Twu (1984) is fitted/tested over Watson K ~ 8-14, but real assay
-# pseudo-components can fall well below that (dense/aromatic cuts). Fit
-# against 6 known PRO/II-extracted (Tc, Pc) values spanning Watson K
-# 6.761-8.833 (all in that below-range band), comparing PRO/II's actual
-# Tc/Pc to raw Twu's prediction for the same NBP/SG/MW inputs:
-#   Tc_ratio (PRO/II / Twu) = 0.017621*K + 0.70214   (residuals < 0.3%)
-#   Pc_ratio (PRO/II / Twu) = 0.096097*K - 0.29603   (residuals < 2%)
-# Notably the Pc ratio extrapolates to 1.0 (no correction needed) right
-# around K = 13.5 -- near the upper edge of Twu's own fitted range, a
-# reassuring physical sanity check. Only 6 points are available, all
-# below K=8.84, so the correction is clamped to that tested band and
-# flagged as an extrapolation outside it; it is NOT applied beyond the
-# tested range (e.g. it does not touch the K=8-14 range Twu's own paper
-# validates against).
-WATSON_K_CALIB_MIN = 6.7607782905215785
-WATSON_K_CALIB_MAX = 8.83340340697643
-_TC_CORR = (0.017620683346006086, 0.70214429996119)   # ratio = m*K + b
-_PC_CORR = (0.09609709590376307, -0.2960334335286057)
-
-# Above K=8.83 there's no PRO/II-verified correction (yet), so raw Twu
-# is used as-is through K=14 (the upper edge of Twu's own stated fitted
-# range). Beyond that, 3 PRO/II points (K=14.8, 25.2, 31.4) show Twu
-# overshooting badly -- up to 630% on Tc for the two with K>20, where
-# multiple perturbation terms hit TWU_F_CLAMP (clamp saturation, not a
-# smooth trend, so not fittable from 3 points). Even the K=14.8 point,
-# where no f-term is clamped, is still off by 7-14%, so flag *any*
-# K > TWU_K_FITTED_MAX rather than relying on the clamp alone to catch it.
-TWU_K_FITTED_MAX = 14.0
-
+# pseudo-components routinely fall well outside that (dense/aromatic
+# cuts below K~9, or highly paraffinic heavy ends above K~14, where raw
+# Twu's perturbation re-summation runs away -- up to 600-800% error, see
+# TWU_F_CLAMP). Within the K=11.8-12.8 band, the error also turns out to
+# be driven almost entirely by Tb/MW rather than by K itself (correlation
+# with K ~0.04 vs ~0.90-0.96 with Tb), so a Watson-K-indexed ratio
+# correction doesn't fit it well either.
+#
+# Instead, every band below uses the same direct-fit recipe: regress
+# ln(Tc_R) and ln(Pc_psia) by OLS against Tb(R) and SG against PRO/II-
+# extracted ground truth for that band, bypassing Twu's n-alkane
+# reference machinery entirely. This is curve-fitting against real
+# assay data, not a physical model -- each band is only trustworthy
+# inside the K range its fit data actually covers; outside all three
+# bands this falls back to raw Twu (1984), flagged as unverified.
 def _watson_k(tb_r, sg):
     return tb_r**(1/3) / sg
 
-# ── Direct empirical curve fit (Watson K 11.8-12.8 band) ────────────────
-# Twu's raw error within this band turns out to be driven almost entirely
-# by Tb/MW, not by Watson K itself (correlation with K ~ 0.04 vs ~0.90-0.96
-# with Tb), so a Watson-K-indexed ratio correction (as used above for
-# K=6.76-8.83) doesn't fit it. Instead, fit ln(Tc)/ln(Pc) directly against
-# Tb(R) and SG by OLS against 192 PRO/II-extracted (Tb, SG, Tc, Pc) points,
-# all at Watson K = 11.8-12.7 (a dense real assay cut spanning
-# PF302A54D_1 ... PF945A18D_6). This bypasses the Twu n-alkane-reference
-# machinery entirely for this band.
-#   ln(Tc_R)  = 5.590764506444447 + 0.0029685792492121364*Tb
-#               - 1.7947555347076429e-06*Tb**2 + 4.1976156492609715e-10*Tb**3
-#   ln(Pc_psia) = 6.465569387740622 - 0.0018819405054470392*Tb
-#               - 2.3235653045236493e-06*Tb**2 + 5.957762301208521e-10*Tb**3
-#               + 1.2024265509172134*SG + 0.0018836734457846071*Tb*SG
-# Validated against the 192-point fit set (per-component, actual-unit
-# error): Tc max 3.66%, mean 0.45%; Pc max 7.38%, mean 0.79% (R2 of the
-# underlying ln-space OLS fits: 0.9995/0.9996). Independently verified
-# against a real PRO/II stream (HMB.xlsx, "DXX5-BTM", 109 components, 92
-# in-band) via Kay's-rule mixture Tc/Pc, which averages out much of the
-# per-component scatter: +1.18% Tc, +0.91% Pc vs PRO/II's own reported
-# Kay's-rule values. Band is kept tight (11.8-12.8) to the region actually
-# covered by the fit data; outside it this falls back to Twu (1984) +/-
-# the Watson-K ratio correction above. Vc/MW/omega still come from Twu
-# (the fit only covers Tc/Pc) -- this is a targeted patch, not a
-# replacement characterization method.
-CURVEFIT_K_MIN = 11.8
-CURVEFIT_K_MAX = 12.8
-_CF_TC_COEF = (5.590764506444447, 0.0029685792492121364,
-               -1.7947555347076429e-06, 4.1976156492609715e-10)
-_CF_PC_COEF = (6.465569387740622, -0.0018819405054470392,
-               -2.3235653045236493e-06, 5.957762301208521e-10)
-_CF_PC_SG, _CF_PC_TBSG = 1.2024265509172134, 0.0018836734457846071
+def _ln_quad_sg(tb_r, sg, c):
+    return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*sg
 
-def _curvefit_tc_r(tb_r):
-    c = _CF_TC_COEF
-    x = c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
-    return math.exp(x)
+def _ln_cubic(tb_r, c):
+    return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
 
-def _curvefit_pc_psia(tb_r, sg):
-    c = _CF_PC_COEF
-    x = (c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
-         + _CF_PC_SG*sg + _CF_PC_TBSG*tb_r*sg)
-    return math.exp(x)
+def _ln_cubic_sg(tb_r, sg, c):
+    return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3 + c[4]*sg + c[5]*tb_r*sg
+
+# Low-K band (Watson K 6.76-8.83): dense/aromatic cuts below Twu's fitted
+# range. Fit against 5 PRO/II points (PF129A73D_1...PF233A62D_1, K=7.08-
+# 8.83); per earlier analysis a 6th point at K~6.76 set this band's lower
+# edge but its raw values are no longer on hand, so the boundary is kept
+# at the originally-calibrated 6.7608 (a ~0.3 K extrapolation below the
+# lowest point now verified). 4-param ln(Tc)/ln(Pc) ~ Tb,Tb^2,SG fit on 5
+# points (1 DOF) -- max error 0.04%/0.34% on Tc/Pc vs the old linear-K
+# ratio correction's 0.3%/2% on the same kind of data, so a clear upgrade,
+# but treat the tight fit as expected given how few points back it.
+LOWK_MIN = 6.7607782905215785
+LOWK_MAX = 8.83340340697643
+_LOWK_TC_COEF = (5.766098096230981, 0.0025337034293379246,
+                  -1.1262657683195125e-06, -0.054638445325821954)
+_LOWK_PC_COEF = (8.591471691684111, -0.0033889469476900227,
+                  5.386748769979846e-07, -0.4372636875858088)
+
+# Mid-K band (Watson K 11.8-12.8): a dense real assay cut, 192 PRO/II
+# points (PF302A54D_1...PF945A18D_6). 4-term ln(Tc) fit, 6-term ln(Pc)
+# fit (see _ln_cubic / _ln_cubic_sg). Per-component error: Tc max 3.66%
+# mean 0.45%; Pc max 7.38% mean 0.79% (R2 0.9995/0.9996). Independently
+# verified against a real PRO/II stream (HMB.xlsx "DXX5-BTM", 92 in-band
+# of 109 components) via Kay's-rule mixture Tc/Pc, which averages out
+# much of the per-component scatter: +1.18% Tc, +0.91% Pc vs PRO/II's
+# own reported Kay's-rule values.
+MIDK_MIN = 11.8
+MIDK_MAX = 12.8
+_MIDK_TC_COEF = (5.590764506444447, 0.0029685792492121364,
+                 -1.7947555347076429e-06, 4.1976156492609715e-10)
+_MIDK_PC_COEF = (6.465569387740622, -0.0018819405054470392,
+                 -2.3235653045236493e-06, 5.957762301208521e-10,
+                 1.2024265509172134, 0.0018836734457846071)
+
+# High-K band (Watson K 14.35-32.42): heavy paraffinic ends where raw
+# Twu's resummation runs away -- observed errors up to 630% (Tc) / 800%
+# (Pc) on the very points fit here. Fit against 23 PRO/II points
+# (3-point set PF511A41D_1/PF809A26D_1/PF936A22D_1 plus the 20-row table
+# PF464A42D_3...PF1128A22_3, K=14.35-32.42), 6-term ln(Tc)/ln(Pc) ~
+# Tb,Tb^2,Tb^3,SG,Tb*SG fit, 17 DOF. Max error 0.07% (Tc) / 0.41% (Pc).
+HIGHK_MIN = 14.35
+HIGHK_MAX = 32.42
+_HIGHK_TC_COEF = (6.40654941811319, 0.0015836670402865425,
+                  -9.282299715566654e-07, 2.3023361934905623e-10,
+                  -0.2501136073709286, 6.992916439173787e-05)
+_HIGHK_PC_COEF = (8.562229754057064, -0.0004603983512121999,
+                  -2.793830724613253e-06, 9.131279365869762e-10,
+                  -0.9265707077139733, -0.0003578164261284782)
 
 def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     """
-    Given MW, NBP(°F), SLD(lb/ft³) for a pseudo-component,
-    estimate Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω via Twu (1984),
-    with an empirical Watson-K correction (see WATSON_K_CALIB_MIN/MAX)
-    applied within its calibrated band. Returns dict (empty if the
-    reference solve fails).
+    Given MW, NBP(°F), SLD(lb/ft³) for a pseudo-component, estimate
+    Tc(°F), Pc(psia), Vc(ft³/lbmol), Zc, ω. Tc/Pc come from a direct
+    Tb/SG curve fit within one of three PRO/II-verified Watson-K bands
+    (see LOWK/MIDK/HIGHK _MIN/_MAX above); outside all three, falls back
+    to raw Twu (1984), flagged as unverified. Vc/MW/omega always come
+    from Twu. Returns dict (empty if the reference solve fails).
     """
     if None in (mw, nbp_f, sld_lbft3) or sld_lbft3 <= 0:
         return {}
@@ -337,45 +338,31 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
     tc_r, vc, pc_psia, mw_twu, was_clamped = twu
 
     K = _watson_k(tb_r, sg)
-    in_curvefit = CURVEFIT_K_MIN <= K <= CURVEFIT_K_MAX
-    in_calib = (not in_curvefit) and (WATSON_K_CALIB_MIN <= K <= WATSON_K_CALIB_MAX)
-    below_calib = (not in_curvefit) and (K < WATSON_K_CALIB_MIN)
-    above_fitted = (not in_curvefit) and (K > TWU_K_FITTED_MAX)
+    in_lowk  = LOWK_MIN  <= K <= LOWK_MAX
+    in_midk  = MIDK_MIN  <= K <= MIDK_MAX
+    in_highk = HIGHK_MIN <= K <= HIGHK_MAX
 
-    if in_curvefit:
-        # Direct empirical fit replaces Twu's Tc/Pc entirely in this band;
-        # Vc/MW/omega still come from raw Twu (see CURVEFIT_K_MIN/MAX note).
-        tc_r    = _curvefit_tc_r(tb_r)
-        pc_psia = _curvefit_pc_psia(tb_r, sg)
-        tc_f    = tc_r - 459.67
-    else:
-        tc_f = tc_r - 459.67   # correction was fit in °F, not °R -- the
-                               # 459.67 offset would distort a direct ratio
-                               # applied to the absolute Rankine value
-        if in_calib:
-            tc_f    *= _TC_CORR[0]*K + _TC_CORR[1]
-            pc_psia *= _PC_CORR[0]*K + _PC_CORR[1]
-        elif below_calib:
-            # Extrapolating the fitted correction below the lowest tested K
-            # is still better than raw (uncorrected) Twu for these very
-            # dense/aromatic fractions, but is unverified -- flag it.
-            tc_f    *= _TC_CORR[0]*WATSON_K_CALIB_MIN + _TC_CORR[1]
-            pc_psia *= _PC_CORR[0]*WATSON_K_CALIB_MIN + _PC_CORR[1]
-        tc_r = tc_f + 459.67
-
-    zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
-    omega = estimate_acentric(tb_r, tc_r, pc_psia)
-
-    if in_curvefit:
-        method = 'Direct Tb/SG curve fit (Watson K 11.8-12.8)'
-    elif in_calib:
-        method = 'Twu (1984), Watson-K calibrated'
-    elif below_calib:
-        method = 'Twu (1984), Watson-K calibration extrapolated'
-    elif above_fitted:
-        method = 'Twu (1984), Watson K above fitted range'
+    if in_lowk:
+        tc_r    = math.exp(_ln_quad_sg(tb_r, sg, _LOWK_TC_COEF))
+        pc_psia = math.exp(_ln_quad_sg(tb_r, sg, _LOWK_PC_COEF))
+        method  = 'Direct Tb/SG curve fit (Watson K 6.76-8.83)'
+    elif in_midk:
+        tc_r    = math.exp(_ln_cubic(tb_r, _MIDK_TC_COEF))
+        pc_psia = math.exp(_ln_cubic_sg(tb_r, sg, _MIDK_PC_COEF))
+        method  = 'Direct Tb/SG curve fit (Watson K 11.8-12.8)'
+    elif in_highk:
+        tc_r    = math.exp(_ln_cubic_sg(tb_r, sg, _HIGHK_TC_COEF))
+        pc_psia = math.exp(_ln_cubic_sg(tb_r, sg, _HIGHK_PC_COEF))
+        method  = 'Direct Tb/SG curve fit (Watson K 14.35-32.42)'
     else:
         method = 'Twu (1984)'
+
+    tc_f = tc_r - 459.67
+    zc    = pc_psia * vc / (10.7316 * tc_r) if pc_psia and vc else 0.27
+    omega = estimate_acentric(tb_r, tc_r, pc_psia)
+    extrapolated = was_clamped or not (in_lowk or in_midk or in_highk)
+    if extrapolated and method == 'Twu (1984)':
+        method = 'Twu (1984), Watson K outside all verified curve-fit bands'
 
     return {
         'Tc_F':     round(tc_f, 4),
@@ -385,7 +372,7 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         'Zc':       round(zc, 4),
         'omega':    round(omega, 6) if omega is not None else None,
         'SG':       round(sg, 6),
-        'extrapolated': was_clamped or below_calib or above_fitted,
+        'extrapolated': extrapolated,
         'method':   method,
     }
 
