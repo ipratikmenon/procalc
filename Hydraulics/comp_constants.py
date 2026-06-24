@@ -263,11 +263,12 @@ def _watson_k(tb_r, sg):
 def _ln_quad_sg(tb_r, sg, c):
     return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*sg
 
-def _ln_cubic(tb_r, c):
-    return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
-
 def _ln_cubic_sg(tb_r, sg, c):
     return c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3 + c[4]*sg + c[5]*tb_r*sg
+
+def _ln_cubic_sg2_mw(tb_r, sg, mw, c):
+    return (c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
+            + c[4]*sg + c[5]*sg**2 + c[6]*tb_r*sg + c[7]*tb_r**2*sg + c[8]*mw)
 
 # Low-K band (Watson K 6.76-8.83): dense/aromatic cuts below Twu's fitted
 # range. Fit against 5 PRO/II points (PF129A73D_1...PF233A62D_1, K=7.08-
@@ -286,20 +287,29 @@ _LOWK_PC_COEF = (8.591471691684111, -0.0033889469476900227,
                   5.386748769979846e-07, -0.4372636875858088)
 
 # Mid-K band (Watson K 11.8-12.8): a dense real assay cut, 192 PRO/II
-# points (PF302A54D_1...PF945A18D_6). 4-term ln(Tc) fit, 6-term ln(Pc)
-# fit (see _ln_cubic / _ln_cubic_sg). Per-component error: Tc max 3.66%
-# mean 0.45%; Pc max 7.38% mean 0.79% (R2 0.9995/0.9996). Independently
-# verified against a real PRO/II stream (HMB.xlsx "DXX5-BTM", 92 in-band
-# of 109 components) via Kay's-rule mixture Tc/Pc, which averages out
-# much of the per-component scatter: +1.18% Tc, +0.91% Pc vs PRO/II's
-# own reported Kay's-rule values.
+# points (PF302A54D_1...PF945A18D_6). Per-component error figures below
+# are measured in °R (the physically meaningful absolute scale for Tc --
+# measuring %error against °F inflates it, since °F has an arbitrary
+# zero point not far from these Tc values): 6-term ln(Tc) ~ Tb,Tb^2,Tb^3,
+# SG,Tb*SG fit, max 0.58% (was 1.39% without the SG terms); 9-term
+# ln(Pc) ~ Tb,Tb^2,Tb^3,SG,SG^2,Tb*SG,Tb^2*SG,MW fit, max 0.74% (was
+# 7.38% with only Tb^3+SG+Tb*SG -- adding SG^2/MW/Tb^2*SG removed most
+# of the remaining curvature this band's Tb range (302-1128°F NBP) needs).
+# Independently verified against a real PRO/II stream (HMB.xlsx
+# "DXX5-BTM", 92 in-band of 109 components) via Kay's-rule mixture
+# Tc/Pc: +1.18% Tc, +0.91% Pc vs PRO/II's own reported Kay's-rule values
+# (pre-refinement coefficients; mixture-level error already averages out
+# most of the per-component scatter either way).
 MIDK_MIN = 11.8
 MIDK_MAX = 12.8
-_MIDK_TC_COEF = (5.590764506444447, 0.0029685792492121364,
-                 -1.7947555347076429e-06, 4.1976156492609715e-10)
-_MIDK_PC_COEF = (6.465569387740622, -0.0018819405054470392,
-                 -2.3235653045236493e-06, 5.957762301208521e-10,
-                 1.2024265509172134, 0.0018836734457846071)
+_MIDK_TC_COEF = (5.472014640787081, 0.002906977108843005,
+                 -2.0608790239635333e-06, 5.140176441915848e-10,
+                 0.20063882301068448, 0.00021998834606587822)
+_MIDK_PC_COEF = (7.7636344628018366, -0.01905336715100828,
+                 -4.592670205406373e-06, 4.9959520682467e-09,
+                 8.845321317563176, -19.16442185201497,
+                 0.04154961695330614, -1.4608661387351344e-05,
+                 -0.0008872805333807642)
 
 # High-K band (Watson K 14.35-32.42): heavy paraffinic ends where raw
 # Twu's resummation runs away -- observed errors up to 630% (Tc) / 800%
@@ -347,8 +357,8 @@ def estimate_pseudo_props(mw, nbp_f, sld_lbft3):
         pc_psia = math.exp(_ln_quad_sg(tb_r, sg, _LOWK_PC_COEF))
         method  = 'Direct Tb/SG curve fit (Watson K 6.76-8.83)'
     elif in_midk:
-        tc_r    = math.exp(_ln_cubic(tb_r, _MIDK_TC_COEF))
-        pc_psia = math.exp(_ln_cubic_sg(tb_r, sg, _MIDK_PC_COEF))
+        tc_r    = math.exp(_ln_cubic_sg(tb_r, sg, _MIDK_TC_COEF))
+        pc_psia = math.exp(_ln_cubic_sg2_mw(tb_r, sg, mw, _MIDK_PC_COEF))
         method  = 'Direct Tb/SG curve fit (Watson K 11.8-12.8)'
     elif in_highk:
         tc_r    = math.exp(_ln_cubic_sg(tb_r, sg, _HIGHK_TC_COEF))
