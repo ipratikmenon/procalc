@@ -970,6 +970,7 @@ class Station:
     dp_elev_psi: float
     dp_total_psi: float
     note: str = ""
+    cv_raw: dict | None = None      # control-valve sizing capture (CV datasheet)
 
 
 def build_profile(rows, sp, phase, p_start_psia) -> list[Station]:
@@ -2642,10 +2643,19 @@ INPUT_HEADERS: list[str] = [
     # ── Boundaries / control valves ─────────────────────────────────────────
     "Set P (psia)",           # boundary pressure for Source / Destination rows
     "Control Valve Type",     # P | T | F | L  (Control Valve rows only)
-    "Exch Max Allow dP (psi)",  # T-control floor: max allowable dP across exchanger
+    "Exch Max Allow dP (psi)",  # T-control floor / P & T min-dP floor
+    # ── Control-valve sizing / datasheet (Control Valve rows) ────────────────
+    "Valve Body Style",       # Globe | Angle | Ball | Butterfly | Eccentric
+    "Valve Characteristic",   # Linear | Equal% | Quick-Open  (F & L)
+    "Design Opening %",       # target max-flow % travel for auto rated-Cv pick
+    "Rated Cv",               # existing valve rated Cv100 (blank ⇒ engine sizes)
+    "Min Flow Mult",          # turndown: Min-flow multiple of normal (default 0.35)
+    "Max Flow Mult",          # turndown: Max-flow multiple of normal (default 1.20)
+    "Noise Limit dBA",        # project noise limit (default 85)
+    "Seat Leakage Class",     # II | III | IV | V | VI (default IV)
     "Notes",                  # free notes
 ]
-_NCOL = len(INPUT_HEADERS)   # 37
+_NCOL = len(INPUT_HEADERS)   # 45
 
 # Manual stream-property columns (styled yellow in the template; used when no stream)
 _MANUAL_PROP_COLS = [
@@ -2688,6 +2698,14 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Set P (psia)": ("Set P", "P"),
     "Control Valve Type": ("Control Valve Type", None),
     "Exch Max Allow dP (psi)": ("Exch Max Allow dP", "dP"),
+    "Valve Body Style": ("Valve Body Style", None),
+    "Valve Characteristic": ("Valve Characteristic", None),
+    "Design Opening %": ("Design Opening %", None),
+    "Rated Cv": ("Rated Cv", None),
+    "Min Flow Mult": ("Min Flow Mult", None),
+    "Max Flow Mult": ("Max Flow Mult", None),
+    "Noise Limit dBA": ("Noise Limit dBA", None),
+    "Seat Leakage Class": ("Seat Leakage Class", None),
     "Notes": ("Notes", None),
 }
 # display base name → canonical key (for unit-suffix-tolerant header matching)
@@ -2801,7 +2819,11 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         "Elev Change (ft)": 13, "Direction": 10, "Fixed K": 9,
         "Fixed dP (psi)": 12, "Instr Type": 10, "Instr Tag": 12,
         "Instr dP (psi)": 12, "Set P (psia)": 12, "Control Valve Type": 14,
-        "Exch Max Allow dP (psi)": 16, "Notes": 30,
+        "Exch Max Allow dP (psi)": 16,
+        "Valve Body Style": 15, "Valve Characteristic": 16,
+        "Design Opening %": 13, "Rated Cv": 10, "Min Flow Mult": 12,
+        "Max Flow Mult": 12, "Noise Limit dBA": 13, "Seat Leakage Class": 15,
+        "Notes": 30,
     }
     for ci, name in enumerate(INPUT_HEADERS, 1):
         cw(ws, ci, width_map.get(name, 12))
@@ -2821,6 +2843,21 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         errorTitle="Control Valve Type")
     ws.add_data_validation(dv_cvt)
     dv_cvt.add(f"{cvt_col}3:{cvt_col}2000")
+
+    # ── Drop-downs: control-valve datasheet columns ───────────────────
+    for hdr, opts, err in [
+        ("Valve Body Style", "Globe,Angle,Ball,Butterfly,Eccentric",
+         "Valve body style"),
+        ("Valve Characteristic", "Linear,Equal%,Quick-Open",
+         "Inherent trim characteristic (F & L valves)"),
+        ("Seat Leakage Class", "II,III,IV,V,VI",
+         "FCI 70-2 / IEC 60534-4 seat leakage class"),
+    ]:
+        col = _hcol_letter(hdr)
+        dv = DataValidation(type="list", formula1=f'"{opts}"', allow_blank=True,
+                            showErrorMessage=True, error=err, errorTitle=hdr)
+        ws.add_data_validation(dv)
+        dv.add(f"{col}3:{col}2000")
 
     # ── Drop-down: Fitting Name — hidden list sheet ───────────────────
     ws_fit = wb.create_sheet("_FittingList")
@@ -2858,12 +2895,12 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         # ── Circuit C3 — Source → line → Control Valve (flow control) → Destination ──
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-01","Fitting Name":"Source","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":150.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Upstream source pressure"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":2,"Comp ID":"P-301","Fitting Name":"Straight Pipeline","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":40,"Elev Change (ft)":0,"Notes":"Run to valve"},
-        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Length (ft)":0,"Elev Change (ft)":0,"Notes":"Flow control — ΔP floats to Destination P"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Valve Body Style":"Globe","Valve Characteristic":"Equal%","Design Opening %":80,"Min Flow Mult":0.35,"Max Flow Mult":1.2,"Noise Limit dBA":85,"Seat Leakage Class":"IV","Length (ft)":0,"Elev Change (ft)":0,"Notes":"Flow control — datasheet auto-sizes Rated Cv (leave Rated Cv blank)"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":4,"Comp ID":"DST-01","Fitting Name":"Destination","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":60.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Downstream destination pressure"},
         # ── Circuit C4 — two parallel control valves (Tee split, ratio control) ──
         {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-02","Fitting Name":"Source","Bore (in)":8,"Piping Spec":"G1A-5","Set P (psia)":200.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Header source"},
         {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":2,"Comp ID":"TEE-40","Fitting Name":"Tee Split Branch Flow 1","Bore (in)":8,"Piping Spec":"G1A-5","Flow Fraction from Main":-0.5,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"50% splits to parallel branch"},
-        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":3,"Comp ID":"FCV-40A","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Main-leg valve (50% flow)"},
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":3,"Comp ID":"FCV-40A","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Valve Body Style":"Globe","Valve Characteristic":"Equal%","Rated Cv":50,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Existing valve — Rated Cv 50 given → adequacy check"},
         {"Circuit":"C4","Line No":"L-401","Run Type":"Branch","Seq":1,"Start P (psia)":200.0,"Comp ID":"FCV-40B","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Parallel-leg valve (other 50% flow)"},
     ]
     manual_idx = {_hcol(n) for n in _MANUAL_PROP_COLS}
@@ -2940,10 +2977,26 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  F (flow): ΔP floats so the running pressure lands on the downstream Destination 'Set P'.", False),
         ("  P / L: fixed design ΔP — enter it in 'Fixed dP (psi)' (or a resistance in 'Fixed K').", False),
         ("  T (temperature): like a fixed ΔP, but floored at 'Exch Max Allow dP (psi)' (exchanger limit).", False),
+        ("  P & T both honour 'Exch Max Allow dP (psi)' as a MINIMUM ΔP floor across the valve.", False),
         ("  β ratio = valve Bore (in) ÷ upstream line bore is reported in the Notes column.", False),
         ("  SERIES valves: place several Control Valve rows in Seq order on the same run.", False),
         ("  PARALLEL valves: split flow at a Tee (negative 'Flow Fraction from Main'), put one Control", False),
         ("    Valve on the Main leg and one on a Branch (Run Type = Branch, with its own Start P).", False),
+        ("", False),
+        ("CONTROL VALVE DATASHEET  (one sheet per Control Valve, IEC 60534)", True),
+        ("  Each Control Valve row produces a 'CV_<tag>' datasheet: Min/Norm/Max sizing, cavitation,", False),
+        ("  seat leakage, β ratio and IEC 60534-8-3/-8-4 dB(A) noise vs the limit.", False),
+        ("  Valve Body Style : Globe / Angle / Ball / Butterfly / Eccentric (sets typical FL/xT/Fd).", False),
+        ("  Valve Characteristic : Linear / Equal% / Quick-Open (F & L valves) — drives % travel.", False),
+        ("  Rated Cv : enter the EXISTING valve's Cv100 → ADEQUACY CHECK mode (verifies that valve).", False),
+        ("             Leave BLANK → SIZING/SELECTION mode (engine picks a generic Rated Cv so the", False),
+        ("             required Cv, travel window and dB(A) limit are met where physically possible).", False),
+        ("  Design Opening % : target max-flow % travel used when the engine auto-selects Rated Cv.", False),
+        ("  Min/Max Flow Mult : turndown multiples of the marched Normal flow (defaults 0.35 / 1.20).", False),
+        ("  Noise Limit dBA : project sound limit (default 85).  Exceedance is flagged + mitigations", False),
+        ("             recommended (Rated-Cv choice cannot change service ΔP/noise — use low-noise /", False),
+        ("             multistage trim, a larger body, or split the ΔP across two valves).", False),
+        ("  Seat Leakage Class : II/III/IV/V/VI (FCI 70-2 / IEC 60534-4); default IV.", False),
         ("", False),
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
@@ -3142,6 +3195,15 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Set P (psia)":     gnum(rv, "Set P (psia)"),
             "Control Valve Type": txt(g(rv, "Control Valve Type")),
             "Exch Max Allow dP (psi)": gnum(rv, "Exch Max Allow dP (psi)"),
+            # ── Control-valve sizing / datasheet ────────────────────────
+            "Valve Body Style":     txt(g(rv, "Valve Body Style")),
+            "Valve Characteristic": txt(g(rv, "Valve Characteristic")),
+            "Design Opening %":     num(g(rv, "Design Opening %")),
+            "Rated Cv":             num(g(rv, "Rated Cv")),
+            "Min Flow Mult":        num(g(rv, "Min Flow Mult")),
+            "Max Flow Mult":        num(g(rv, "Max Flow Mult")),
+            "Noise Limit dBA":      num(g(rv, "Noise Limit dBA")),
+            "Seat Leakage Class":   txt(g(rv, "Seat Leakage Class")),
             "Notes":            txt(g(rv, "Notes")),
         })
     wb.close()
@@ -3884,6 +3946,7 @@ def build_profile_flash_noiso(
 
         phase_str = (_phase_of(fr.quality) if fr else (sp.phase if sp else ""))
         flash_tag = (f" (flash β={fr.beta:.3f})" if fr else "") + scale_tag
+        cv_raw = None                      # set only on Control Valve rows
 
         # ── Dispatch by special fitting type ────────────────────────────
         if _is_fix_pressure(fitting):
@@ -3952,11 +4015,12 @@ def build_profile_flash_noiso(
             else:
                 base_dp = 0.0
                 src_tag = "no ΔP basis (set Control Valve Type / Fixed dP / Fixed K)"
-            # Temperature control: ΔP floored at the exchanger max-allowable ΔP.
+            # P & T control: ΔP floored at the min-allowable ΔP in col AJ
+            # (exchanger max-allowable for T; specified min drop for P).
             floor_tag = ""
-            if ctype == "T" and exch_dp is not None and exch_dp > base_dp:
-                floor_tag = (f"; T-control floor → exchanger max-allow "
-                             f"ΔP {exch_dp:.3f} psi")
+            if ctype in ("P", "T") and exch_dp is not None and exch_dp > base_dp:
+                lbl = "exchanger max-allow" if ctype == "T" else "min-allow"
+                floor_tag = f"; {ctype}-control floor → {lbl} ΔP {exch_dp:.3f} psi"
                 base_dp = exch_dp
             # β ratio = valve port bore / upstream line bore
             v_bore = num(row.get("Bore (in)"))
@@ -3968,6 +4032,32 @@ def build_profile_flash_noiso(
             res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
             note  = (f"Control Valve [{ctype}]: −{dp_t:.3f} psi "
                      f"({src_tag}{floor_tag}{beta_tag}){flash_tag}")
+            # capture everything the CV datasheet needs (sized later, outside
+            # the march, from the authoritative post-choke station pressures)
+            _cv_sp, _cv_fr = a_sp, fr
+            cv_raw = {
+                "row": dict(row), "ctype": ctype, "dest_p": dest_p,
+                "p_src": p_start, "line_bore_in": line_bore_before,
+                "bore_in": v_bore, "exch_dp": exch_dp, "fixed_dp": fixed_dp,
+                "feed": a_feed,
+                "temp_f": getattr(_cv_sp, "temp_f", None),
+                "phase": getattr(_cv_sp, "phase", None),
+                "pc_psia": getattr(_cv_sp, "pc_psia", None),
+                "mol_weight": getattr(_cv_sp, "mol_weight", None),
+                "vap_mw": getattr(_cv_fr, "vap_mw", None) if _cv_fr else None,
+                "liq_density": getattr(_cv_sp, "liq_density", None),
+                "vap_density": getattr(_cv_sp, "vap_density", None),
+                "liq_visc": getattr(_cv_sp, "liq_visc", None),
+                "vap_visc": getattr(_cv_sp, "vap_visc", None),
+                "vap_z": getattr(_cv_sp, "vap_z", None),
+                "gamma": (getattr(_cv_sp, "vap_cp_cv", None)
+                          or (_cv_sp.gamma_estimate() if _cv_sp else None)),
+                "quality": getattr(_cv_fr, "quality", None) if _cv_fr else None,
+                "vap_mass": (getattr(_cv_fr, "vap_mass", None) if _cv_fr
+                             else getattr(_cv_sp, "vap_mass", None)),
+                "liq_mass": (getattr(_cv_fr, "liq_mass", None) if _cv_fr
+                             else getattr(_cv_sp, "liq_mass", None)),
+            }
 
         else:
             # Standard Darcy-Weisbach  (includes Fix K)
@@ -4027,6 +4117,7 @@ def build_profile_flash_noiso(
             dp_elev_psi  = round(dp_z, 5),
             dp_total_psi = round(dp_t, 5),
             note         = note,
+            cv_raw       = cv_raw,
         ))
         flashes.append(fr)
         comps.append(comp_vec)
@@ -5090,6 +5181,15 @@ def run_noiso(
                 wb, sts, fls, cfracs, sp,
                 circuit_id=cid, stream_name=sk, run_label=label))
 
+        # ── Control-valve datasheets (one per Control Valve in the circuit) ──
+        cv_sheets = _build_cv_datasheets(wb, main_stations, stream_name=sk,
+                                         run_label="Main")
+        for (label, sts, fls, cmps, b_lns, cfracs) in branch_runs:
+            cv_sheets += _build_cv_datasheets(wb, sts, stream_name=sk,
+                                              run_label=label)
+        if cv_sheets:
+            print(f"  Control-valve datasheets: {', '.join(cv_sheets)}")
+
         # ── Screening / analysis sheets (all main stations, whole circuit)
         circuit_label = f"Circuit {cid}  ({', '.join(lns)})"
         if main_stations:
@@ -5132,7 +5232,7 @@ def run_noiso(
         order = (pp_sheets + fp_sheets +
                  ["Composition Splits",
                   "Component_Detail", "Stream_Props"]
-                 + sp_sheets +
+                 + sp_sheets + cv_sheets +
                  ["FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
                  + fp_map_sheets
                  + ["Input_Pipeline", "README"])
@@ -8125,6 +8225,935 @@ def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_
     build_param_table(wb, rows, line_no, stream_name, ctrl_seq)
     sheets = build_map_sheets(wb, rows, ctrl_seq)
     return ["Flow_Pattern_Data"] + sheets
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ║  SECTION: CONTROL VALVE SIZING & DATASHEET  (IEC 60534)
+# ══════════════════════════════════════════════════════════════════════════
+# Sizing (IEC 60534-2-1 liquid/gas/two-phase), cavitation (ISA RP75.23),
+# seat leakage (FCI 70-2 / IEC 60534-4) and % travel are ported from the
+# companion CV/cv.py tool so the two stay numerically identical.  Extended
+# here with (a) IEC 60534-8-3 (aerodynamic) and 60534-8-4 (hydrodynamic)
+# sound-pressure-level (dB(A)) prediction, (b) a generic Rated-Cv selection
+# library, and (c) a Min/Norm/Max vendor-style datasheet — all driven
+# directly from the control-valve stations of the hydraulic march.
+#
+# Two operating modes, auto-detected per valve:
+#   * Adequacy check   — a Rated Cv is supplied (existing valve): the tool
+#                        reports required Cv / % travel / cavitation / noise
+#                        and PASS/FAIL verdicts against that valve; on a noise
+#                        exceedance it flags and recommends (never silently
+#                        re-sizes the user's real valve).
+#   * Sizing/selection — no Rated Cv supplied (new valve): the tool selects a
+#                        Rated Cv from the generic library so that required Cv,
+#                        the travel window AND the dB(A) limit are all met
+#                        where physically possible.
+#
+# US-customary Cv basis (gpm·√SG/√psi liquid; lb/h, psia, lb/ft³ gas) per
+# datasheet convention, independent of the workbook's unit system.
+
+_CV_PSI_TO_PA  = 6894.757293
+_CV_R_KMOL     = 8314.462618          # J/(kmol*K)  (module R_UNIV is per-mol)
+_CV_KGS_TO_LBH = 7936.6414            # kg/s -> lb/h
+_CV_M3S_TO_GPM = 15850.323            # m3/s -> US gpm
+_CV_ATM_PA     = 101_325.0
+_CV_PREF_PA    = 2e-5                 # reference sound pressure (20 uPa)
+
+# Class II/III/IV seat leakage as % of rated Cv (FCI 70-2 / IEC 60534-4)
+_CV_CLASS_PCT_CV = {"II": 0.5, "III": 0.1, "IV": 0.01}
+# Class VI — max bubbles/min of air at standard test dP, by port dia (in)
+_CV_CLASS_VI_TABLE = [
+    (1.0, 0.15), (1.5, 0.30), (2.0, 0.45), (2.5, 0.60),
+    (3.0, 0.90), (4.0, 1.70), (6.0, 4.00), (8.0, 6.75),
+]
+
+# Typical body-style factors (IEC 60534-2-1 Table 2 "typical values"):
+#   fl  = liquid pressure-recovery factor FL (flow-to-open, mid-travel)
+#   xt  = terminal pressure-drop ratio xT (gas choke)
+#   fd  = valve-style modifier Fd (jet diameter, for -8-3/-8-4 noise)
+#   cd  = generic full-open rated-Cv coefficient  Cv100 ~= cd * NPS**2
+# These are indicative; a real selection confirms them against vendor data.
+_CV_BODY = {
+    "GLOBE":     dict(label="Globe",              fl=0.90, xt=0.72, fd=0.46, cd=16.0),
+    "ANGLE":     dict(label="Angle",              fl=0.85, xt=0.72, fd=0.44, cd=16.0),
+    "BALL":      dict(label="Ball (segmented)",   fl=0.66, xt=0.30, fd=0.98, cd=32.0),
+    "BUTTERFLY": dict(label="Butterfly (60 deg)", fl=0.68, xt=0.38, fd=0.57, cd=28.0),
+    "ECCENTRIC": dict(label="Eccentric rotary",   fl=0.85, xt=0.61, fd=0.42, cd=20.0),
+}
+_CV_BODY_ALIASES = {
+    "GLOBE": "GLOBE", "ANGLE": "ANGLE", "BALL": "BALL",
+    "SEGMENTED BALL": "BALL", "V-BALL": "BALL", "VBALL": "BALL",
+    "BUTTERFLY": "BUTTERFLY", "BFLY": "BUTTERFLY",
+    "ECCENTRIC": "ECCENTRIC", "ECCENTRIC ROTARY": "ECCENTRIC",
+    "ROTARY": "ECCENTRIC", "CAMFLEX": "ECCENTRIC",
+}
+# Standard reduced-trim rated-Cv ladder (indicative ISA-style steps).  The
+# selection picks the smallest rung that satisfies capacity/travel/noise,
+# capped by the body-style full-open maximum for the valve NPS.
+_CV_RATED_LADDER = [
+    0.5, 0.8, 1.2, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0,
+    22.0, 28.0, 36.0, 46.0, 60.0, 75.0, 95.0, 120.0, 150.0, 195.0, 250.0,
+    320.0, 400.0, 520.0, 650.0, 850.0, 1100.0,
+]
+
+_CV_TRIM_CHARS = {
+    "LINEAR": "Linear", "EQUAL%": "Equal Percentage",
+    "EQUAL PERCENTAGE": "Equal Percentage", "EQ%": "Equal Percentage",
+    "EQUALPCT": "Equal Percentage", "QUICK": "Quick Opening",
+    "QUICK-OPEN": "Quick Opening", "QUICK OPENING": "Quick Opening",
+    "QO": "Quick Opening",
+}
+
+
+def _cv_body_key(name: str | None) -> str:
+    k = (name or "GLOBE").strip().upper()
+    return _CV_BODY_ALIASES.get(k, "GLOBE")
+
+
+def _cv_trim_name(name: str | None) -> str:
+    return _CV_TRIM_CHARS.get((name or "").strip().upper(), "Linear")
+
+
+# ── Core IEC 60534-2-1 sizing (ported verbatim from CV/cv.py) ──────────────
+def _cv_ff_factor(pv_pa, pc_pa) -> float:
+    """Liquid critical-pressure-ratio factor FF = 0.96 − 0.28·√(Pv/Pc)."""
+    if not pv_pa or not pc_pa or pc_pa <= 0:
+        return 0.96
+    return max(0.0, min(1.0, 0.96 - 0.28 * math.sqrt(max(0.0, pv_pa) / pc_pa)))
+
+
+def _cv_sigma_index(p1_pa, p2_pa, pv_pa):
+    """Service cavitation index σ = (P1 − Pv)/(P1 − P2)  (ISA RP75.23)."""
+    dp = p1_pa - p2_pa
+    if dp <= 0:
+        return None
+    return (p1_pa - (pv_pa or 0.0)) / dp
+
+
+def _cv_liquid_dp_choked(fl, p1_pa, pv_pa, ff) -> float:
+    """Choked ΔP for liquids: FL²·(P1 − FF·Pv)."""
+    fl = fl or 0.9
+    return (fl ** 2) * (p1_pa - ff * (pv_pa or 0.0))
+
+
+def _cv_required_liquid(w_kgs, rho, dp_eff_pa) -> float:
+    """Required Cv (US basis) — liquid, IEC 60534-2-1: Cv = Q[gpm]·√(SG/ΔP[psi])."""
+    if w_kgs <= 0 or rho <= 0 or dp_eff_pa <= 0:
+        return 0.0
+    q_gpm = (w_kgs / rho) * _CV_M3S_TO_GPM
+    sg = rho / 999.0
+    dp_psi = dp_eff_pa / _CV_PSI_TO_PA
+    return q_gpm * math.sqrt(sg / dp_psi)
+
+
+def _cv_gas_xy(p1_pa, p2_pa, k, xt):
+    """Gas ratio x, choked limit xT_eff = Fk·xT, effective x, expansion Y,
+    and choked flag — IEC 60534-2-1 §5.5/5.6."""
+    if p1_pa <= 0:
+        return 0.0, 0.0, 0.0, 1.0, False
+    fk = max(0.1, (k or 1.4) / 1.4)
+    x = max(0.0, (p1_pa - p2_pa) / p1_pa)
+    x_choked = max(1e-6, fk * (xt or 0.7))
+    x_eff = min(x, x_choked)
+    y = max(2.0 / 3.0, 1.0 - x_eff / (3.0 * x_choked))
+    return x, x_choked, x_eff, y, (x >= x_choked)
+
+
+def _cv_required_gas(w_kgs, p1_pa, rho1, x_eff, y) -> float:
+    """Required Cv (US basis) — gas/vapor, mass-flow form:
+    Cv = W[lb/h] / (63.3·Y·√(x_eff·P1[psia]·ρ1[lb/ft³]))."""
+    if w_kgs <= 0 or p1_pa <= 0 or rho1 <= 0 or x_eff <= 0 or y <= 0:
+        return 0.0
+    w_lbh = w_kgs * _CV_KGS_TO_LBH
+    p1_psia = p1_pa / _CV_PSI_TO_PA
+    rho1_lbft3 = rho1 / 16.018463
+    return w_lbh / (63.3 * y * math.sqrt(x_eff * p1_psia * rho1_lbft3))
+
+
+def _cv_required_two_phase(w_kgs, x_quality, rho_l, rho_v, dp_eff_pa):
+    """Required Cv — flashing/two-phase, homogeneous-mixture estimate (mixes
+    liquid+vapor densities at the mass quality, then the liquid equation).
+    For severe flashing/cavitating service confirm with a vendor method."""
+    if w_kgs <= 0 or dp_eff_pa <= 0:
+        return 0.0, None
+    rho_l = rho_l or 999.0
+    rho_v = rho_v or 1.2
+    x_quality = max(0.0, min(1.0, x_quality or 0.0))
+    rho_mix = 1.0 / (x_quality / rho_v + (1.0 - x_quality) / rho_l)
+    return _cv_required_liquid(w_kgs, rho_mix, dp_eff_pa), rho_mix
+
+
+def _cv_travel_pct(cv_req, cv100, char, rangeability=50.0):
+    """Estimated % travel from required Cv, rated Cv100 & inherent trim
+    characteristic (Linear / Equal Percentage / Quick Opening)."""
+    if not cv100 or cv100 <= 0 or cv_req is None:
+        return None
+    ratio = cv_req / cv100
+    c = (char or "Linear").strip().lower()
+    if c.startswith("equal"):
+        if ratio <= 0:
+            return 0.0
+        r = max(rangeability or 50.0, 2.0)
+        travel = 100.0 * (1.0 + math.log(ratio) / math.log(r))
+    elif c.startswith("quick"):
+        travel = 100.0 * math.sqrt(max(0.0, ratio))
+    else:
+        travel = 100.0 * ratio
+    return max(0.0, min(100.0, travel))
+
+
+def _cv_beta_ratio(bore_m, pipe_m):
+    if not bore_m or not pipe_m or pipe_m <= 0:
+        return None
+    return bore_m / pipe_m
+
+
+def _cv_seat_leakage(klass, cv100, dp_pa, seat_dia_mm) -> dict:
+    """Seat leakage estimate by class (FCI 70-2 / IEC 60534-4)."""
+    k = (klass or "IV").strip().upper()
+    if k in _CV_CLASS_PCT_CV:
+        pct = _CV_CLASS_PCT_CV[k]
+        leak_cv = cv100 * pct / 100.0 if cv100 else None
+        return {"class": k, "pct_cv": pct, "leak_cv": leak_cv,
+                "desc": f"Class {k}: <= {pct}% of rated Cv (FCI 70-2 / IEC 60534-4)"}
+    if k == "V":
+        dp_bar = max(0.0, dp_pa) / 1e5
+        leak = 0.18 * (seat_dia_mm or 0.0) * math.sqrt(dp_bar)
+        return {"class": "V", "leak_ml_min": leak,
+                "desc": "Class V: indicative liquid leakage (order-of-magnitude) "
+                        "- confirm against FCI 70-2 / certified test data"}
+    if k == "VI":
+        seat_in = (seat_dia_mm or 0.0) / 25.4
+        bubbles = _CV_CLASS_VI_TABLE[-1][1]
+        for dia, b in _CV_CLASS_VI_TABLE:
+            if seat_in <= dia:
+                bubbles = b
+                break
+        return {"class": "VI", "bubbles_per_min": bubbles,
+                "desc": "Class VI: max bubbles/min of air by port size "
+                        "(FCI 70-2 Table 2 - indicative)"}
+    return {"class": k, "desc": "Unrecognized leakage class - see IEC 60534-4"}
+
+
+def _cv_sonic_velocity_gas(k, z, t_k, mw):
+    if not t_k or not mw:
+        return None
+    return math.sqrt((k or 1.4) * (z or 1.0) * _CV_R_KMOL * t_k / mw)
+
+
+# ── IEC 60534-8-3 / -8-4  external dB(A) noise prediction ──────────────────
+# Engineering implementation of the standards' method chain.  Aerodynamic
+# (-8-3): mechanical stream power -> acoustic power via a regime-dependent
+# acoustical efficiency (η) -> internal sound pressure at the pipe wall ->
+# external SPL at 1 m through the pipe-wall transmission loss (TL).
+# Hydrodynamic (-8-4): turbulent baseline SPL from valve ΔP and style, with a
+# cavitation increment once the service σ falls below the incipient value.
+# Coefficient tables are simplified relative to the full standards; results
+# are screening-grade dB(A) for adequacy against a project limit (e.g. 85
+# dB(A)), not a substitute for a vendor's certified acoustic prediction.
+_CV_SPEED_SOUND_PIPE = 5000.0    # m/s, longitudinal wave speed in steel wall
+_CV_RHO_STEEL        = 7800.0    # kg/m³
+
+def _cv_pipe_wall_thk_m(pipe_id_m):
+    """Approximate carbon-steel (Sch-40) wall thickness from ID, m."""
+    if not pipe_id_m or pipe_id_m <= 0:
+        return 0.005
+    d_in = pipe_id_m / 0.0254
+    # Sch-40 wall grows ~ with NPS; bounded to a sane 3–15 mm band.
+    return max(0.003, min(0.015, 0.0033 + 0.0015 * d_in))
+
+
+def _cv_pipe_tl_db(pipe_id_m, fp_hz, c2):
+    """Pipe-wall transmission loss TL [dB, negative] — simplified IEC 60534-8-3
+    Annex form: coincidence-limited mass-law loss, referenced to the ring
+    frequency fr of the pipe.  Screening-grade."""
+    di = max(0.01, pipe_id_m)
+    tp = _cv_pipe_wall_thk_m(pipe_id_m)
+    fr = _CV_SPEED_SOUND_PIPE / (math.pi * di)                 # ring frequency
+    fo = 0.25 * fr                                             # first coincidence
+    # mass-law surface density term, normalised
+    gy = (_CV_RHO_STEEL * tp) * fp_hz / ((c2 or 340.0) * 1.2 * 101325.0 / 1e5)
+    tl = -(10.0 + 10.0 * math.log10(max(1e-6, gy))
+           - 10.0 * math.log10(1.0 + (fo / max(1.0, fp_hz)) ** 1.5))
+    return max(-75.0, min(-25.0, tl))                          # bounded band
+
+
+def _cv_noise_aero(w_kgs, p1_pa, p2_pa, t1_k, mw, z, k, xt, fl, fd,
+                    pipe_id_m, rho2, c2):
+    """IEC 60534-8-3-style external A-weighted SPL at 1 m for a gas/vapor
+    valve.  Returns (Lpe_dBA, detail_dict).
+
+    Chain: mechanical stream power Wm=½·ṁ·Uvc² → acoustic power Wa=η·Wm →
+    sound-power level Lw → internal pipe-wall SPL Lpi (IEC 8-3 relation, pipe
+    ID in mm) → external SPL at 1 m through the wall transmission loss TL."""
+    if (not w_kgs or w_kgs <= 0 or not p1_pa or p1_pa <= 0 or not pipe_id_m
+            or pipe_id_m <= 0 or not rho2 or rho2 <= 0):
+        return None, {}
+    k = max(1.001, k or 1.4)
+    x = max(1e-6, (p1_pa - p2_pa) / p1_pa)
+    fk = k / 1.4
+    x_choked = max(1e-6, fk * (xt or 0.7))
+    c1 = c2 or _cv_sonic_velocity_gas(k, z, t1_k, mw) or 340.0
+    if x < x_choked:                                   # subsonic
+        uvc = min(c1, c1 * math.sqrt(max(0.0, x / x_choked)))
+        regime = "subsonic"
+    else:                                              # choked
+        uvc = c1
+        regime = "choked"
+    wm = 0.5 * w_kgs * uvc ** 2                         # mechanical power, W
+    mach_vc = uvc / c1 if c1 else 0.0
+    # acoustical efficiency η (IEC 8-3 regime form): ~1e-4·M³ subsonic,
+    # saturating near ~1e-3 when choked; Fd nudges the jet efficiency.
+    eta = 1.0e-4 * (mach_vc ** 3)
+    if regime == "choked":
+        eta = max(eta, 3.0e-4 * (fd or 0.5) / 0.5)
+    eta = min(eta, 3.0e-3)
+    wa = max(1e-30, eta * wm)                           # acoustic power, W
+    lw = 10.0 * math.log10(wa / 1e-12)                 # sound-power level, dB
+    di_mm = pipe_id_m * 1000.0
+    # internal pipe SPL — IEC 60534-8-3 relation (di in mm, Wa in W):
+    #   Lpi = 10·log10( 3.2e9 · Wa · ρ2 · c2 / di² )   [dB re 2e-5 Pa]
+    lpi = 10.0 * math.log10(
+        max(1e-30, 3.2e9 * wa * rho2 * (c2 or c1) / (di_mm ** 2)))
+    fp = max(1.0, 0.2 * uvc / max(1e-3, pipe_id_m))    # peak frequency, Hz
+    tl = _cv_pipe_tl_db(pipe_id_m, fp, c2 or c1)
+    lpe = lpi + tl - 1.0                               # external at 1 m, dB(A)
+    lpe = max(20.0, lpe)
+    return lpe, {"regime": regime, "uvc": uvc, "mach_vc": mach_vc,
+                 "eta": eta, "wa": wa, "lw": lw, "lpi": lpi, "tl": tl, "fp": fp}
+
+
+def _cv_noise_hydro(w_kgs, p1_pa, p2_pa, pv_pa, fl, rho_l, pipe_id_m, sigma):
+    """IEC 60534-8-4-style external A-weighted SPL at 1 m for liquid / flashing
+    service, with a cavitation increment once σ drops below the incipient
+    value.  Returns (Lpe_dBA, detail_dict).  Screening-grade."""
+    if (not w_kgs or w_kgs <= 0 or not p1_pa or not pipe_id_m
+            or pipe_id_m <= 0 or not rho_l or rho_l <= 0):
+        return None, {}
+    dp = max(1.0, p1_pa - p2_pa)
+    area = math.pi / 4.0 * pipe_id_m ** 2
+    u = (w_kgs / rho_l) / area                          # downstream velocity
+    # turbulent (non-cavitating) internal SPL baseline: grows with ΔP & U.
+    lpi = 85.0 + 10.0 * math.log10(dp / 1e5) + 18.0 * math.log10(max(0.3, u))
+    sigma_i = 1.0 / max(1e-6, (fl or 0.9) ** 2)         # incipient index proxy
+    cav = ""
+    if sigma is not None and sigma < sigma_i:
+        inc = min(25.0, 18.0 * math.log10(max(1.0, sigma_i / max(1e-6, sigma))))
+        lpi += inc
+        cav = f"cavitating (σ {sigma:.2f} < σi {sigma_i:.2f}); +{inc:.0f} dB"
+    fp = max(1.0, u / max(1e-3, pipe_id_m))
+    tl = _cv_pipe_tl_db(pipe_id_m, fp, 1400.0)          # c ~ water sound speed
+    lpe = max(20.0, lpi + tl)
+    return lpe, {"u": u, "sigma_i": sigma_i, "cav": cav, "tl": tl, "lpi": lpi}
+
+
+# ── Valve inputs, per-case sizing, rated-Cv selection, two-mode evaluation ──
+@dataclass
+class CvInputs:
+    """Normalised per-valve inputs for datasheet sizing (SI internally)."""
+    tag: str | None = None
+    service: str | None = None
+    line_no: str | None = None
+    fluid: str | None = None
+    temp_f: float | None = None
+    nps: float | None = None
+    body_key: str = "GLOBE"
+    char: str = "Equal Percentage"
+    rangeability: float = 50.0
+    leak_class: str = "IV"
+    action: str = "F"                      # F | P | T | L
+    design_dp_pa: float | None = None      # fixed design ΔP (P/L; T floor base)
+    exch_floor_pa: float | None = None     # AJ min-ΔP floor (P & T)
+    cv100: float | None = None             # None -> selection mode
+    design_open_pct: float = 80.0          # target max-flow % travel
+    noise_limit_dba: float = 85.0
+    min_mult: float = 0.35
+    max_mult: float = 1.20
+    bore_m: float | None = None
+    line_in_m: float | None = None
+    line_out_m: float | None = None
+    fl: float = 0.90
+    xt: float = 0.72
+    fd: float = 0.46
+    # normal-flow hydraulic state (from the march)
+    p_src_pa: float | None = None
+    p_dest_pa: float | None = None
+    p1_norm_pa: float | None = None
+    p2_norm_pa: float | None = None
+    w_norm_kgs: float | None = None
+    # fluid properties at the valve
+    phase: str | None = None
+    quality: float | None = None
+    rho_l: float | None = None
+    rho_v: float | None = None
+    mu_l_cp: float | None = None
+    mu_v_cp: float | None = None
+    mw: float | None = None
+    z: float | None = None
+    k: float | None = None
+    pv_pa: float | None = None
+    pc_pa: float | None = None
+    sg: float | None = None
+
+
+def _cv_case_pressures(inp: CvInputs, mult: float):
+    """(P1, P2, ΔP) [Pa] for a flow multiplier.
+
+    Fixed-ΔP control (P/L, and T with its floor) holds ΔP constant across the
+    turndown; flow control (F) floats — line losses grow ~flow², so the valve
+    inlet falls and the valve ΔP shrinks as flow rises (the classic
+    min-ΔP-at-max-flow datasheet trend)."""
+    p1n, p2n = inp.p1_norm_pa, inp.p2_norm_pa
+    if not p1n or not p2n:
+        return None, None, None
+    act = (inp.action or "F").upper()[:1]
+    if act in ("P", "L", "T"):
+        dp = p1n - p2n
+        return p1n, p1n - dp, dp                        # constant ΔP, constant P1
+    # flow control: scale the up/down line losses by mult²
+    m2 = mult * mult
+    if inp.p_src_pa and inp.p_dest_pa:
+        l_up = max(0.0, inp.p_src_pa - p1n)
+        l_dn = max(0.0, p2n - inp.p_dest_pa)
+        p1 = inp.p_src_pa - l_up * m2
+        p2 = inp.p_dest_pa + l_dn * m2
+        if p1 - p2 < 1.0:
+            p1, p2 = p1n, p2n                           # degenerate; hold normal
+        return p1, p2, p1 - p2
+    # no boundary info: hold P1, keep ΔP at normal (documented fallback)
+    return p1n, p2n, p1n - p2n
+
+
+def _cv_regime(inp: CvInputs):
+    ph = (inp.phase or "").strip().lower()
+    if "two" in ph or "mixed" in ph:
+        return "two-phase", (inp.quality if inp.quality is not None else 0.5)
+    if "liq" in ph:
+        if inp.quality is not None and inp.quality > 0.01:
+            return "two-phase", inp.quality
+        return "liquid", 0.0
+    if "vap" in ph or "gas" in ph:
+        return "gas", 1.0
+    if inp.rho_l and not inp.rho_v:
+        return "liquid", 0.0
+    return "gas", (inp.quality if inp.quality is not None else 1.0)
+
+
+def _cv_size_case(inp: CvInputs, mult: float, cv100):
+    """Full sizing + noise for one flow case.  Returns a result dict."""
+    r = {"mult": mult}
+    p1, p2, dp = _cv_case_pressures(inp, mult)
+    if not p1 or not p2 or p2 >= p1:
+        r["valid"] = False
+        return r
+    r.update(valid=True, p1=p1, p2=p2, dp=dp)
+    w = (inp.w_norm_kgs or 0.0) * mult
+    r["w"] = w
+    regime, x_q = _cv_regime(inp)
+    r["regime"] = regime
+    ff = _cv_ff_factor(inp.pv_pa, inp.pc_pa)
+    sigma = _cv_sigma_index(p1, p2, inp.pv_pa)
+    r["ff"], r["sigma"] = ff, sigma
+
+    if regime == "gas":
+        x, x_ch, x_eff, y, choked = _cv_gas_xy(p1, p2, inp.k, inp.xt)
+        rho1 = inp.rho_v
+        if not rho1:
+            t1_k = None
+            rho1 = None
+        cv_req = _cv_required_gas(w, p1, rho1 or 0.0, x_eff, y)
+        r.update(x=x, x_choked=x_ch, y=y, choked=choked, cv_req=cv_req,
+                 rho_eff=rho1)
+    else:
+        dp_choked = _cv_liquid_dp_choked(inp.fl, p1, inp.pv_pa, ff)
+        choked = dp_choked > 0 and dp >= dp_choked
+        dp_eff = min(dp, dp_choked) if dp_choked > 0 else dp
+        r.update(dp_choked=dp_choked, choked=choked, dp_eff=dp_eff)
+        if regime == "liquid":
+            cv_req = _cv_required_liquid(w, inp.rho_l or 999.0, dp_eff)
+            r.update(cv_req=cv_req, rho_eff=inp.rho_l)
+        else:
+            cv_req, rho_mix = _cv_required_two_phase(
+                w, x_q, inp.rho_l, inp.rho_v, dp_eff)
+            r.update(cv_req=cv_req, rho_eff=rho_mix)
+
+    if cv100:
+        r["travel"] = _cv_travel_pct(r.get("cv_req"), cv100, inp.char,
+                                     inp.rangeability)
+        r["pct_cv"] = 100.0 * (r.get("cv_req") or 0.0) / cv100
+
+    # velocity + noise (downstream)
+    line_m = inp.line_out_m or inp.line_in_m
+    if line_m:
+        area = math.pi / 4.0 * line_m ** 2
+        if regime == "gas":
+            rho2 = inp.rho_v
+        elif regime == "liquid":
+            rho2 = inp.rho_l
+        else:
+            if inp.rho_v and inp.rho_l and x_q is not None:
+                rho2 = 1.0 / (x_q / inp.rho_v + (1.0 - x_q) / inp.rho_l)
+            else:
+                rho2 = r.get("rho_eff")
+        if rho2 and rho2 > 0:
+            r["v2"] = (w / rho2) / area
+        # gas → aerodynamic (8-3); liquid & flashing/two-phase → hydrodynamic
+        # (8-4), which carries the cavitation/flashing increment.
+        if regime == "gas":
+            c2 = _cv_sonic_velocity_gas(inp.k, inp.z, None, inp.mw)
+            lpe, det = _cv_noise_aero(w, p1, p2, None, inp.mw, inp.z, inp.k,
+                                      inp.xt, inp.fl, inp.fd, line_m,
+                                      rho2, c2)
+        else:
+            lpe, det = _cv_noise_hydro(w, p1, p2, inp.pv_pa, inp.fl,
+                                       inp.rho_l or rho2, line_m, sigma)
+        r["noise_dba"], r["noise_detail"] = lpe, det
+    return r
+
+
+def _cv_select_rated(inp: CvInputs, cases):
+    """Selection mode: pick the smallest ladder Rated Cv (≤ body full-open max)
+    that puts MAX-flow travel at/under the design opening and keeps MIN-flow
+    travel controllable.  Returns (cv100, note)."""
+    body = _CV_BODY[inp.body_key]
+    cv_max_body = body["cd"] * (inp.nps or 2.0) ** 2
+    cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
+    if cv_req_max <= 0:
+        return None, "no positive required Cv - cannot size"
+    target = inp.design_open_pct or 80.0
+    ladder = [c for c in _CV_RATED_LADDER if c <= cv_max_body * 1.001]
+    if not ladder:
+        ladder = [round(cv_max_body, 1)]
+    for rung in ladder:
+        tmax = _cv_travel_pct(cv_req_max, rung, inp.char, inp.rangeability)
+        cv_req_min = min((c.get("cv_req") or 0.0) for c in cases.values()
+                         if c.get("cv_req"))
+        tmin = _cv_travel_pct(cv_req_min, rung, inp.char, inp.rangeability)
+        if tmax is not None and tmax <= target and (tmin is None or tmin >= 8.0):
+            return rung, (f"selected {rung:g} from generic {body['label']} "
+                          f"ladder (max-flow travel {tmax:.0f}% <= target "
+                          f"{target:.0f}%; body full-open max ~{cv_max_body:.0f})")
+    # nothing satisfied the window: take the largest rung <= body max
+    rung = ladder[-1]
+    return rung, (f"selected {rung:g} (largest generic {body['label']} rung "
+                  f"<= body max ~{cv_max_body:.0f}); travel window not fully met "
+                  "- verify size/trim with vendor")
+
+
+def _cv_evaluate_valve(inp: CvInputs) -> dict:
+    """Run Min/Norm/Max, select or check the Rated Cv, apply the dB(A) limit,
+    and assemble verdicts + recommendations.  Returns the datasheet payload."""
+    mults = {"MIN": inp.min_mult, "NOR": 1.0, "MAX": inp.max_mult}
+    mode = "adequacy" if inp.cv100 else "selection"
+    cv100 = inp.cv100
+    sel_note = None
+    if mode == "selection":
+        prelim = {code: _cv_size_case(inp, m, None) for code, m in mults.items()}
+        cv100, sel_note = _cv_select_rated(inp, prelim)
+    cases = {code: _cv_size_case(inp, m, cv100) for code, m in mults.items()}
+
+    # verdicts
+    cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
+    cap_ok = bool(cv100) and cv100 >= cv_req_max
+    travels = [c.get("travel") for c in cases.values() if c.get("travel") is not None]
+    travel_ok = bool(travels) and all(5.0 <= t <= 95.0 for t in travels)
+    noises = [c.get("noise_dba") for c in cases.values() if c.get("noise_dba")]
+    noise_max = max(noises) if noises else None
+    noise_ok = (noise_max is None) or (noise_max <= inp.noise_limit_dba)
+    choked_any = any(c.get("choked") for c in cases.values())
+
+    recs = []
+    if not noise_ok:
+        recs.append(
+            f"Predicted noise {noise_max:.0f} dB(A) exceeds the "
+            f"{inp.noise_limit_dba:.0f} dB(A) limit at max flow. Rated-Cv "
+            "choice does not change service ΔP/noise - mitigate with low-noise "
+            "/ multistage trim, a larger body (lower outlet velocity), or split "
+            "the ΔP across two valves in series.")
+    if choked_any:
+        recs.append("Choked / cavitating flow present - confirm trim and "
+                    "material against the manufacturer's σ curves (ISA RP75.23) "
+                    "and consider anti-cavitation trim.")
+    if travels and (min(travels) < 10.0):
+        recs.append("Low % travel near closed at min flow - controllability "
+                    "may suffer; consider reduced trim.")
+    if travels and (max(travels) > 90.0):
+        recs.append("High % travel near max flow - little rangeability margin; "
+                    "verify Rated Cv / body size.")
+
+    return {
+        "inp": inp, "mode": mode, "cv100": cv100, "sel_note": sel_note,
+        "cases": cases, "verdicts": {
+            "capacity": cap_ok, "travel": travel_ok, "noise": noise_ok,
+            "noise_max": noise_max, "cv_req_max": cv_req_max,
+        },
+        "recommendations": recs,
+    }
+
+
+# ── Datasheet sheet (Min/Norm/Max vendor-style layout) ─────────────────────
+_CVDS_HDR   = PatternFill("solid", fgColor="1F4E79")   # dark blue band
+_CVDS_SEC   = PatternFill("solid", fgColor="D6E4F0")   # light blue section
+_CVDS_LBL   = PatternFill("solid", fgColor="F2F2F2")   # label tint
+_CVDS_PASS  = PatternFill("solid", fgColor="C6EFCE")
+_CVDS_FAIL  = PatternFill("solid", fgColor="FFC7CE")
+_CVDS_NORM  = PatternFill("solid", fgColor="FFF2CC")   # highlight Normal col
+_cvds_thin  = Side(style="thin", color="BFBFBF")
+_CVDS_BORD  = Border(left=_cvds_thin, right=_cvds_thin,
+                     top=_cvds_thin, bottom=_cvds_thin)
+
+
+def _cvc(ws, r, c, v=None, *, bold=False, fill=None, align="left",
+         color="262626", size=10, border=True, wrap=False):
+    cell = ws.cell(row=r, column=c, value=v)
+    cell.font = Font(bold=bold, color=color, size=size)
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+    if fill:
+        cell.fill = fill
+    if border:
+        cell.border = _CVDS_BORD
+    return cell
+
+
+def _cv_disp(res, key, conv, nd=3, default="—"):
+    v = res.get(key)
+    if v is None or not res.get("valid", True):
+        return default
+    try:
+        return round(conv(v), nd)
+    except Exception:
+        return default
+
+
+def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
+    """One control-valve datasheet sheet mirroring the vendor layout:
+    header block -> Min/Norm/Max service conditions -> flowing/sizing/noise
+    results -> verdicts + recommendations."""
+    inp: CvInputs = payload["inp"]
+    cases = payload["cases"]
+    v = payload["verdicts"]
+    body = _CV_BODY[inp.body_key]
+    tag = inp.tag or "CV"
+    title = re.sub(r"[^A-Za-z0-9_-]", "_", f"CV_{tag}")[:31]
+    ws = wb.create_sheet(title)
+    ws.sheet_view.showGridLines = False
+    for col, w in {"A": 30, "B": 12, "C": 15, "D": 15, "E": 15, "F": 26}.items():
+        ws.column_dimensions[col].width = w
+
+    P = lambda pa: pa / _CV_PSI_TO_PA
+    W = lambda kg: kg * _CV_KGS_TO_LBH
+    LB = lambda kgm3: kgm3 / 16.018463
+
+    # ── Title ──
+    ws.merge_cells("A1:F1")
+    _cvc(ws, 1, 1, f"CONTROL VALVE DATASHEET  —  {tag}", bold=True,
+         fill=_CVDS_HDR, color="FFFFFF", size=13, align="center")
+    ws.row_dimensions[1].height = 22
+
+    # ── Header block ──
+    act_lbl = {"F": "Flow", "P": "Pressure", "T": "Temperature",
+               "L": "Level"}.get((inp.action or "F").upper()[:1], "Flow")
+    mode_lbl = ("Sizing / selection (new valve)" if payload["mode"] == "selection"
+                else "Adequacy check (existing valve)")
+    hdr = [
+        ("Valve Tag", tag, "Service", inp.service or "—"),
+        ("Line No", inp.line_no or "—", "Fluid", inp.fluid or "—"),
+        ("Body style", body["label"], "Characteristic", inp.char),
+        ("Valve size (NPS)", inp.nps or "—", "Control action", act_lbl),
+        ("Rated Cv (Cv100)", round(inp.cv100 or payload["cv100"] or 0, 2),
+         "Leakage class", inp.leak_class),
+        ("Seat / port bore (in)", round(inp.bore_m / 0.0254, 3) if inp.bore_m else "—",
+         "Rangeability R", inp.rangeability),
+        ("Mode", mode_lbl, "Noise limit dB(A)", inp.noise_limit_dba),
+    ]
+    r = 2
+    for l1, v1, l2, v2 in hdr:
+        _cvc(ws, r, 1, l1, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, v1)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+        _cvc(ws, r, 4, l2, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 5, v2)
+        ws.merge_cells(start_row=r, start_column=5, end_row=r, end_column=6)
+        r += 1
+    if payload.get("sel_note"):
+        _cvc(ws, r, 1, "Selection basis", bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, payload["sel_note"], wrap=True)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = 28
+        r += 1
+
+    # ── Service-conditions / results grid ──
+    def sec(label):
+        nonlocal r
+        _cvc(ws, r, 1, label, bold=True, fill=_CVDS_SEC)
+        for c in range(2, 7):
+            _cvc(ws, r, c, "", fill=_CVDS_SEC)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        r += 1
+
+    def row(label, unit, mn, no, mx, note=""):
+        nonlocal r
+        _cvc(ws, r, 1, label, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, unit, align="center")
+        _cvc(ws, r, 3, mn, align="center")
+        _cvc(ws, r, 4, no, align="center", fill=_CVDS_NORM, bold=True)
+        _cvc(ws, r, 5, mx, align="center")
+        _cvc(ws, r, 6, note, wrap=True)
+        r += 1
+
+    cMIN, cNOR, cMAX = cases["MIN"], cases["NOR"], cases["MAX"]
+    # column header
+    _cvc(ws, r, 1, "SERVICE CONDITIONS", bold=True, fill=_CVDS_HDR, color="FFFFFF")
+    _cvc(ws, r, 2, "Units", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 3, "Minimum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 4, "Normal", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 5, "Maximum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 6, "Notes", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    r += 1
+
+    row("Flow Rate", "lb/h",
+        _cv_disp(cMIN, "w", W, 1), _cv_disp(cNOR, "w", W, 1),
+        _cv_disp(cMAX, "w", W, 1),
+        f"turndown {inp.min_mult:g}× / {inp.max_mult:g}× of normal")
+    row("Inlet Pressure P1", "psia",
+        _cv_disp(cMIN, "p1", P, 2), _cv_disp(cNOR, "p1", P, 2),
+        _cv_disp(cMAX, "p1", P, 2))
+    row("Outlet Pressure P2", "psia",
+        _cv_disp(cMIN, "p2", P, 2), _cv_disp(cNOR, "p2", P, 2),
+        _cv_disp(cMAX, "p2", P, 2))
+    row("Pressure Drop ΔP", "psi",
+        _cv_disp(cMIN, "dp", P, 2), _cv_disp(cNOR, "dp", P, 2),
+        _cv_disp(cMAX, "dp", P, 2))
+    tf = round(inp.temp_f, 1) if inp.temp_f is not None else "—"
+    row("Temperature", "°F", tf, tf, tf)
+    pv = round(inp.pv_pa / _CV_PSI_TO_PA, 3) if inp.pv_pa else "—"
+    pc = round(inp.pc_pa / _CV_PSI_TO_PA, 2) if inp.pc_pa else "—"
+    row("Vapor Pressure Pv", "psia", pv, pv, pv)
+    row("Critical Pressure Pc", "psia", pc, pc, pc)
+    muv = round(inp.mu_l_cp or inp.mu_v_cp or 0, 4) if (inp.mu_l_cp or inp.mu_v_cp) else "—"
+    row("Viscosity", "cP", muv, muv, muv)
+    sg = round(inp.sg, 4) if inp.sg else "—"
+    row("Liquid Gf / SG", "—", sg, sg, sg)
+
+    sec("FLOWING CONDITIONS / SIZING")
+    row("Flow regime", "",
+        cMIN.get("regime", "—"), cNOR.get("regime", "—"), cMAX.get("regime", "—"))
+    row("Choked / cavitating?", "",
+        "Y" if cMIN.get("choked") else "N", "Y" if cNOR.get("choked") else "N",
+        "Y" if cMAX.get("choked") else "N")
+    row("Required Cv", "",
+        _cv_disp(cMIN, "cv_req", lambda x: x, 4),
+        _cv_disp(cNOR, "cv_req", lambda x: x, 4),
+        _cv_disp(cMAX, "cv_req", lambda x: x, 4),
+        "IEC 60534-2-1 (US Cv basis)")
+    row("Oversized Req. Cv (×1.25)", "",
+        _cv_disp(cMIN, "cv_req", lambda x: x * 1.25, 4),
+        _cv_disp(cNOR, "cv_req", lambda x: x * 1.25, 4),
+        _cv_disp(cMAX, "cv_req", lambda x: x * 1.25, 4))
+    row("% of Rated Cv", "%",
+        _cv_disp(cMIN, "pct_cv", lambda x: x, 2),
+        _cv_disp(cNOR, "pct_cv", lambda x: x, 2),
+        _cv_disp(cMAX, "pct_cv", lambda x: x, 2))
+    row("% Travel", "%",
+        _cv_disp(cMIN, "travel", lambda x: x, 1),
+        _cv_disp(cNOR, "travel", lambda x: x, 1),
+        _cv_disp(cMAX, "travel", lambda x: x, 1),
+        f"trim: {inp.char}")
+    row("FL / xT", "",
+        round(inp.fl, 3), round(inp.fl, 3), round(inp.fl, 3),
+        f"body typical (xT={inp.xt:g})")
+    # sizing var: liquid ΔP_choked or gas Y
+    if cNOR.get("regime") == "gas":
+        row("Expansion factor Y", "",
+            _cv_disp(cMIN, "y", lambda x: x, 3), _cv_disp(cNOR, "y", lambda x: x, 3),
+            _cv_disp(cMAX, "y", lambda x: x, 3))
+    else:
+        row("ΔP choked = FL²(P1−FF·Pv)", "psia",
+            _cv_disp(cMIN, "dp_choked", P, 2), _cv_disp(cNOR, "dp_choked", P, 2),
+            _cv_disp(cMAX, "dp_choked", P, 2))
+    row("Cavitation index σ", "",
+        _cv_disp(cMIN, "sigma", lambda x: x, 2), _cv_disp(cNOR, "sigma", lambda x: x, 2),
+        _cv_disp(cMAX, "sigma", lambda x: x, 2), "ISA RP75.23")
+    row("Valve/outlet velocity", "m/s",
+        _cv_disp(cMIN, "v2", lambda x: x, 2), _cv_disp(cNOR, "v2", lambda x: x, 2),
+        _cv_disp(cMAX, "v2", lambda x: x, 2))
+    row("Sound Level", "dB(A)",
+        _cv_disp(cMIN, "noise_dba", lambda x: x, 0),
+        _cv_disp(cNOR, "noise_dba", lambda x: x, 0),
+        _cv_disp(cMAX, "noise_dba", lambda x: x, 0),
+        "IEC 60534-8-3/-8-4 (screening)")
+
+    # ── Verdicts ──
+    sec("ADEQUACY VERDICTS")
+    def verdict(label, ok, detail=""):
+        nonlocal r
+        _cvc(ws, r, 1, label, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, "PASS" if ok else "FAIL", align="center", bold=True,
+             fill=_CVDS_PASS if ok else _CVDS_FAIL)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+        _cvc(ws, r, 4, detail, wrap=True)
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=6)
+        r += 1
+    verdict("Capacity (Cv100 ≥ Cv req)", v["capacity"],
+            f"Rated {inp.cv100 or payload['cv100']:.2f} vs max req {v['cv_req_max']:.3f}")
+    verdict("Travel window (5–95%)", v["travel"])
+    nmax = v["noise_max"]
+    verdict(f"Noise ≤ {inp.noise_limit_dba:.0f} dB(A)", v["noise"],
+            f"max predicted {nmax:.0f} dB(A)" if nmax else "not evaluated")
+    # beta ratio
+    b_in = _cv_beta_ratio(inp.bore_m, inp.line_in_m)
+    b_out = _cv_beta_ratio(inp.bore_m, inp.line_out_m)
+    _cvc(ws, r, 1, "β ratio (in / out)", bold=True, fill=_CVDS_LBL)
+    _cvc(ws, r, 2, f"{b_in:.3f}" if b_in else "—", align="center")
+    _cvc(ws, r, 3, f"{b_out:.3f}" if b_out else "—", align="center")
+    _cvc(ws, r, 4, "bore ÷ line ID", wrap=True)
+    ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=6)
+    r += 1
+    # seat leakage
+    leak = _cv_seat_leakage(inp.leak_class, inp.cv100 or payload["cv100"],
+                            (cNOR.get("dp") or 0.0),
+                            (inp.bore_m / 0.0254 * 25.4) if inp.bore_m else None)
+    _cvc(ws, r, 1, f"Seat leakage (Class {leak.get('class', '—')})",
+         bold=True, fill=_CVDS_LBL)
+    _cvc(ws, r, 2, leak.get("desc", ""), wrap=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+    ws.row_dimensions[r].height = 26
+    r += 1
+
+    # ── Recommendations ──
+    if payload["recommendations"]:
+        sec("RECOMMENDATIONS")
+        for rec in payload["recommendations"]:
+            _cvc(ws, r, 1, "•", align="center", fill=_CVDS_LBL)
+            _cvc(ws, r, 2, rec, wrap=True)
+            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+            ws.row_dimensions[r].height = max(26, 13 * (1 + len(rec) // 60))
+            r += 1
+
+    # ── Method footer ──
+    sec("METHOD")
+    for line in [
+        "Sizing: IEC 60534-2-1 / ISA 75.01.01 (liquid FF/FL choked; gas x/xT/Y; "
+        "two-phase homogeneous).  US Cv basis (gpm·√SG/√psi liquid; lb/h,psia,"
+        "lb/ft³ gas).",
+        "Cavitation: ISA RP75.23 σ.  Seat leakage: FCI 70-2 / IEC 60534-4.",
+        "Noise: IEC 60534-8-3 (aerodynamic) / -8-4 (hydrodynamic) — screening-"
+        "grade dB(A); confirm severe/critical service with vendor acoustic data.",
+        "Min/Max are turndown multiples of the marched Normal operating point; "
+        "FL/xT/Fd are body-style typicals — confirm against the selected valve.",
+    ]:
+        _cvc(ws, r, 1, line, wrap=True, size=9, color="595959")
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = max(24, 12 * (1 + len(line) // 90))
+        r += 1
+    return title
+
+
+def _cv_bubble_point_psia(feed, temp_f, p_hi_psia):
+    """Bubble-point pressure [psia] at temp_f: the P where the first vapour
+    appears (β≈0).  Bisection between a low bound and P1.  None on failure."""
+    if feed is None or not p_hi_psia or p_hi_psia <= 0:
+        return None
+    def beta_at(pp):
+        try:
+            fr = flash(feed, pp, temp_f=temp_f)
+            return (fr.beta if fr and fr.beta is not None else 0.0)
+        except Exception:
+            return None
+    b_hi = beta_at(p_hi_psia)
+    if b_hi is None:
+        return None
+    if b_hi > 1e-3:
+        return None                    # already flashing at P1 (no subcooling)
+    lo, hi = max(1e-3, p_hi_psia * 1e-4), p_hi_psia
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        b = beta_at(mid)
+        if b is None:
+            return None
+        if b > 1e-3:
+            lo = mid
+        else:
+            hi = mid
+        if hi / lo < 1.0001:
+            break
+    return 0.5 * (lo + hi)
+
+
+def _cv_inputs_from_station(station, stream_name=None) -> "CvInputs | None":
+    """Build a CvInputs from a control-valve Station's captured cv_raw."""
+    raw = getattr(station, "cv_raw", None)
+    if not raw:
+        return None
+    row = raw.get("row", {})
+    PA = _CV_PSI_TO_PA
+    to_pa = lambda psia: (psia * PA) if psia is not None else None
+    lbft3 = 16.018463
+    w_lbhr = (raw.get("vap_mass") or 0.0) + (raw.get("liq_mass") or 0.0)
+    rho_l = (raw["liq_density"] * lbft3) if raw.get("liq_density") else None
+    rho_v = (raw["vap_density"] * lbft3) if raw.get("vap_density") else None
+    p1 = station.p_in_psia
+    pv = _cv_bubble_point_psia(raw.get("feed"), raw.get("temp_f"), p1)
+    nps = raw.get("bore_in")
+    body_key = _cv_body_key(row.get("Valve Body Style"))
+    body = _CV_BODY[body_key]
+    cv_over = row.get("Rated Cv")
+    return CvInputs(
+        tag=row.get("Comp ID") or station.comp_id,
+        service=row.get("Notes"),
+        line_no=row.get("Line No"),
+        fluid=stream_name,
+        temp_f=raw.get("temp_f"),
+        nps=nps,
+        body_key=body_key,
+        char=_cv_trim_name(row.get("Valve Characteristic")),
+        rangeability=50.0,
+        leak_class=(row.get("Seat Leakage Class") or "IV"),
+        action=raw.get("ctype") or "F",
+        design_dp_pa=to_pa(raw.get("fixed_dp") or None),
+        exch_floor_pa=to_pa(raw.get("exch_dp")),
+        cv100=(float(cv_over) if cv_over else None),
+        design_open_pct=(row.get("Design Opening %") or 80.0),
+        noise_limit_dba=(row.get("Noise Limit dBA") or 85.0),
+        min_mult=(row.get("Min Flow Mult") or 0.35),
+        max_mult=(row.get("Max Flow Mult") or 1.20),
+        bore_m=(nps * 0.0254) if nps else None,
+        line_in_m=(raw["line_bore_in"] * 0.0254) if raw.get("line_bore_in") else None,
+        line_out_m=(raw["line_bore_in"] * 0.0254) if raw.get("line_bore_in") else None,
+        fl=body["fl"], xt=body["xt"], fd=body["fd"],
+        p_src_pa=to_pa(raw.get("p_src")),
+        p_dest_pa=to_pa(raw.get("dest_p")),
+        p1_norm_pa=to_pa(station.p_in_psia),
+        p2_norm_pa=to_pa(station.p_out_psia),
+        w_norm_kgs=(w_lbhr / _CV_KGS_TO_LBH) if w_lbhr else None,
+        phase=raw.get("phase"),
+        quality=raw.get("quality"),
+        rho_l=rho_l, rho_v=rho_v,
+        mu_l_cp=raw.get("liq_visc"), mu_v_cp=raw.get("vap_visc"),
+        mw=(raw.get("vap_mw") or raw.get("mol_weight")),
+        z=raw.get("vap_z"), k=raw.get("gamma"),
+        pv_pa=to_pa(pv), pc_pa=to_pa(raw.get("pc_psia")),
+        sg=((rho_l / 999.0) if rho_l else None),
+    )
+
+
+def _build_cv_datasheets(wb, stations, stream_name=None, run_label="Main"):
+    """Build one datasheet sheet per control valve in `stations`.  Returns the
+    list of created sheet titles (empty if the block has no control valves)."""
+    titles = []
+    for st in stations:
+        if not getattr(st, "cv_raw", None):
+            continue
+        try:
+            inp = _cv_inputs_from_station(st, stream_name=stream_name)
+            if inp is None:
+                continue
+            payload = _cv_evaluate_valve(inp)
+            titles.append(_build_cv_datasheet_sheet(wb, payload, run_label))
+        except Exception as exc:
+            print(f"  (CV datasheet for {getattr(st, 'comp_id', '?')} "
+                  f"skipped: {exc})")
+    return titles
 
 
 if __name__ == "__main__":
