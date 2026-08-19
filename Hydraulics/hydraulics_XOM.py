@@ -2648,6 +2648,8 @@ INPUT_HEADERS: list[str] = [
     "Valve Body Style",       # Globe | Angle | Ball | Butterfly | Eccentric
     "Valve Characteristic",   # Linear | Equal% | Quick-Open  (F & L)
     "Design Opening %",       # target max-flow % travel for auto rated-Cv pick
+    "Inlet Line Size (in)",   # inlet pipe ID for reducer/β/FP (blank ⇒ upstream bore)
+    "Outlet Line Size (in)",  # outlet pipe ID for reducer/β/FP (blank ⇒ downstream bore)
     "Rated Cv",               # existing valve rated Cv100 (blank ⇒ engine sizes)
     "Min Flow Mult",          # turndown: Min-flow multiple of normal (default 0.35)
     "Max Flow Mult",          # turndown: Max-flow multiple of normal (default 1.20)
@@ -2701,6 +2703,8 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Valve Body Style": ("Valve Body Style", None),
     "Valve Characteristic": ("Valve Characteristic", None),
     "Design Opening %": ("Design Opening %", None),
+    "Inlet Line Size (in)": ("Inlet Line Size (in)", None),
+    "Outlet Line Size (in)": ("Outlet Line Size (in)", None),
     "Rated Cv": ("Rated Cv", None),
     "Min Flow Mult": ("Min Flow Mult", None),
     "Max Flow Mult": ("Max Flow Mult", None),
@@ -2821,7 +2825,8 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         "Instr dP (psi)": 12, "Set P (psia)": 12, "Control Valve Type": 14,
         "Exch Max Allow dP (psi)": 16,
         "Valve Body Style": 15, "Valve Characteristic": 16,
-        "Design Opening %": 13, "Rated Cv": 10, "Min Flow Mult": 12,
+        "Design Opening %": 13, "Inlet Line Size (in)": 15,
+        "Outlet Line Size (in)": 16, "Rated Cv": 10, "Min Flow Mult": 12,
         "Max Flow Mult": 12, "Noise Limit dBA": 13, "Seat Leakage Class": 15,
         "Notes": 30,
     }
@@ -2895,7 +2900,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         # ── Circuit C3 — Source → line → Control Valve (flow control) → Destination ──
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-01","Fitting Name":"Source","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":150.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Upstream source pressure"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":2,"Comp ID":"P-301","Fitting Name":"Straight Pipeline","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":40,"Elev Change (ft)":0,"Notes":"Run to valve"},
-        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Valve Body Style":"Globe","Valve Characteristic":"Equal%","Design Opening %":80,"Min Flow Mult":0.35,"Max Flow Mult":1.2,"Noise Limit dBA":85,"Seat Leakage Class":"IV","Length (ft)":0,"Elev Change (ft)":0,"Notes":"Flow control — datasheet auto-sizes Rated Cv (leave Rated Cv blank)"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Valve Body Style":"Globe","Valve Characteristic":"Equal%","Design Opening %":80,"Inlet Line Size (in)":6,"Outlet Line Size (in)":6,"Min Flow Mult":0.35,"Max Flow Mult":1.2,"Noise Limit dBA":85,"Seat Leakage Class":"IV","Length (ft)":0,"Elev Change (ft)":0,"Notes":"4in valve on 6in line; datasheet auto-sizes Rated Cv (leave Rated Cv blank)"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":4,"Comp ID":"DST-01","Fitting Name":"Destination","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":60.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Downstream destination pressure"},
         # ── Circuit C4 — two parallel control valves (Tee split, ratio control) ──
         {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-02","Fitting Name":"Source","Bore (in)":8,"Piping Spec":"G1A-5","Set P (psia)":200.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Header source"},
@@ -2992,7 +2997,11 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("             Leave BLANK → SIZING/SELECTION mode (engine picks a generic Rated Cv so the", False),
         ("             required Cv, travel window and dB(A) limit are met where physically possible).", False),
         ("  Design Opening % : target max-flow % travel used when the engine auto-selects Rated Cv.", False),
-        ("  Min/Max Flow Mult : turndown multiples of the marched Normal flow (defaults 0.35 / 1.20).", False),
+        ("  Valve size = the row's Bore (in) (valve port / seat).  Inlet/Outlet Line Size (in) set the", False),
+        ("   reducer sizes for β and the IEC piping-geometry factor FP; blank ⇒ the real upstream and", False),
+        ("   downstream pipe bores from the march (e.g. a 4-in valve on an 8-in inlet / 10-in outlet).", False),
+        ("  Min/Max Flow Mult : inlet-flow multiples for the full Min/Max hydraulic re-marches", False),
+        ("   (defaults 0.35 / 1.20); the flow reaching the valve follows upstream Tee splits.", False),
         ("  Noise Limit dBA : project sound limit (default 85).  Exceedance is flagged + mitigations", False),
         ("             recommended (Rated-Cv choice cannot change service ΔP/noise — use low-noise /", False),
         ("             multistage trim, a larger body, or split the ΔP across two valves).", False),
@@ -3199,6 +3208,8 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Valve Body Style":     txt(g(rv, "Valve Body Style")),
             "Valve Characteristic": txt(g(rv, "Valve Characteristic")),
             "Design Opening %":     num(g(rv, "Design Opening %")),
+            "Inlet Line Size (in)":  num(g(rv, "Inlet Line Size (in)")),
+            "Outlet Line Size (in)": num(g(rv, "Outlet Line Size (in)")),
             "Rated Cv":             num(g(rv, "Rated Cv")),
             "Min Flow Mult":        num(g(rv, "Min Flow Mult")),
             "Max Flow Mult":        num(g(rv, "Max Flow Mult")),
@@ -4035,8 +4046,19 @@ def build_profile_flash_noiso(
             # capture everything the CV datasheet needs (sized later, outside
             # the march, from the authoritative post-choke station pressures)
             _cv_sp, _cv_fr = a_sp, fr
+            # downstream line bore = the next row that carries a pipe bore (the
+            # outlet reducer size); falls back to the inlet line bore.
+            _dn_bore = None
+            for _nr in block_rows[ridx + 1:]:
+                if _is_control_valve(_nr.get("Fitting Name")):
+                    continue
+                _b = num(_nr.get("Bore (in)"))
+                if _b:
+                    _dn_bore = _b
+                    break
             cv_raw = {
                 "row": dict(row), "ctype": ctype, "dest_p": dest_p,
+                "dn_bore_in": _dn_bore,
                 "p_src": p_start, "line_bore_in": line_bore_before,
                 "bore_in": v_bore, "exch_dp": exch_dp, "fixed_dp": fixed_dp,
                 "feed": a_feed,
@@ -8527,6 +8549,32 @@ def _cv_sonic_velocity_gas(k, z, t_k, mw):
     return math.sqrt((k or 1.4) * (z or 1.0) * _CV_R_KMOL * t_k / mw)
 
 
+def _cv_piping_factor(cv, d_in, d1_in, d2_in) -> float:
+    """Piping-geometry factor FP for inlet/outlet reducers (IEC 60534-2-1 /
+    ISA 75.01.01, N2=890 with d in inches and Cv in US units):
+
+        FP = [ 1 + (ΣK / 890)·(Cv/d²)² ]^(-1/2)
+        ΣK = K1 + K2 + KB1 − KB2,
+        K1 = 0.5(1−(d/D1)²)²,  K2 = 1.0(1−(d/D2)²)²   (reducer resistances)
+        KB1 = 1−(d/D1)⁴,       KB2 = 1−(d/D2)⁴         (Bernoulli terms)
+
+    d = valve port size, D1 = inlet line ID, D2 = outlet line ID (all inches).
+    Returns 1.0 when both lines equal the valve size (no reducers)."""
+    if not cv or cv <= 0 or not d_in or not d1_in or not d2_in:
+        return 1.0
+    if abs(d1_in - d_in) < 1e-6 and abs(d2_in - d_in) < 1e-6:
+        return 1.0
+    r1 = (d_in / d1_in) ** 2
+    r2 = (d_in / d2_in) ** 2
+    k1 = 0.5 * (1.0 - r1) ** 2
+    k2 = 1.0 * (1.0 - r2) ** 2
+    kb1 = 1.0 - r1 ** 2
+    kb2 = 1.0 - r2 ** 2
+    sumk = k1 + k2 + kb1 - kb2
+    fp = 1.0 / math.sqrt(1.0 + (sumk / 890.0) * (cv / (d_in ** 2)) ** 2)
+    return max(0.3, min(1.0, fp))
+
+
 # ── IEC 60534-8-3 / -8-4  external dB(A) noise prediction ──────────────────
 # Engineering implementation of the standards' method chain.  Aerodynamic
 # (-8-3): mechanical stream power -> acoustic power via a regime-dependent
@@ -8723,7 +8771,7 @@ def _cv_size_state(state: dict, inp: "CvInputs", cv100):
     if regime == "gas":
         x, x_ch, x_eff, y, choked = _cv_gas_xy(p1, p2, state.get("k"), inp.xt)
         cv_req = _cv_required_gas(w, p1, rho_v or 0.0, x_eff, y)
-        r.update(x=x, x_choked=x_ch, y=y, choked=choked, cv_req=cv_req)
+        r.update(x=x, x_choked=x_ch, y=y, choked=choked)
     else:
         dp_choked = _cv_liquid_dp_choked(inp.fl, p1, pv, ff)
         dp = p1 - p2
@@ -8734,7 +8782,25 @@ def _cv_size_state(state: dict, inp: "CvInputs", cv100):
             cv_req = _cv_required_liquid(w, rho_l or 999.0, dp_eff)
         else:
             cv_req, _rm = _cv_required_two_phase(w, x_q, rho_l, rho_v, dp_eff)
-        r["cv_req"] = cv_req
+
+    # ── piping-geometry (reducer) factor FP: required installed Cv = Cv/FP ──
+    d_in = (inp.bore_m / 0.0254) if inp.bore_m else None
+    d1_in = (inp.line_in_m / 0.0254) if inp.line_in_m else None
+    d2_in = (inp.line_out_m / 0.0254) if inp.line_out_m else None
+    fp = 1.0
+    if d_in and d1_in and d2_in and cv_req > 0:
+        # FP uses the valve flow coefficient; iterate from the rated (if given)
+        # or the turbulent required Cv.
+        seed = cv100 or cv_req
+        fp = _cv_piping_factor(seed, d_in, d1_in, d2_in)
+        fp = _cv_piping_factor(cv100 or (cv_req / max(fp, 1e-3)),
+                               d_in, d1_in, d2_in)
+        cv_req = cv_req / max(fp, 1e-3)
+    r["fp"] = fp
+    r["d_in"], r["d1_in"], r["d2_in"] = d_in, d1_in, d2_in
+    r["beta_in"] = (d_in / d1_in) if (d_in and d1_in) else None
+    r["beta_out"] = (d_in / d2_in) if (d_in and d2_in) else None
+    r["cv_req"] = cv_req
 
     if cv100:
         r["travel"] = _cv_travel_pct(r.get("cv_req"), cv100, inp.char,
@@ -8923,6 +8989,10 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
          "Leakage class", inp.leak_class),
         ("Seat / port bore (in)", round(inp.bore_m / 0.0254, 3) if inp.bore_m else "—",
          "Rangeability R", inp.rangeability),
+        ("Inlet line size (in)",
+         round(inp.line_in_m / 0.0254, 3) if inp.line_in_m else "—",
+         "Outlet line size (in)",
+         round(inp.line_out_m / 0.0254, 3) if inp.line_out_m else "—"),
         ("Mode", mode_lbl, "Noise limit dB(A)", inp.noise_limit_dba),
     ]
     r = 2
@@ -9052,6 +9122,10 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     row("FL / xT", "",
         round(inp.fl, 3), round(inp.fl, 3), round(inp.fl, 3),
         f"body typical (xT={inp.xt:g})")
+    row("Piping factor FP (reducers)", "",
+        _cv_disp(cMIN, "fp", lambda x: x, 3), _cv_disp(cNOR, "fp", lambda x: x, 3),
+        _cv_disp(cMAX, "fp", lambda x: x, 3),
+        "IEC 60534-2-1; req. Cv already ÷FP")
     # sizing var: liquid ΔP_choked or gas Y
     if cNOR.get("regime") == "gas":
         row("Expansion factor Y", "",
@@ -9190,6 +9264,11 @@ def _cv_inputs_from_station(station, stream_name=None) -> "CvInputs | None":
     body_key = _cv_body_key(row.get("Valve Body Style"))
     body = _CV_BODY[body_key]
     cv_over = row.get("Rated Cv")
+    # inlet / outlet line sizes for reducers & FP: explicit override, else the
+    # real upstream (inlet) and downstream (outlet) pipe bores from the march.
+    _line_in_in = row.get("Inlet Line Size (in)") or raw.get("line_bore_in")
+    _line_out_in = (row.get("Outlet Line Size (in)") or raw.get("dn_bore_in")
+                    or raw.get("line_bore_in"))
     return CvInputs(
         tag=row.get("Comp ID") or station.comp_id,
         service=row.get("Notes"),
@@ -9210,8 +9289,8 @@ def _cv_inputs_from_station(station, stream_name=None) -> "CvInputs | None":
         min_mult=(row.get("Min Flow Mult") or 0.35),
         max_mult=(row.get("Max Flow Mult") or 1.20),
         bore_m=(nps * 0.0254) if nps else None,
-        line_in_m=(raw["line_bore_in"] * 0.0254) if raw.get("line_bore_in") else None,
-        line_out_m=(raw["line_bore_in"] * 0.0254) if raw.get("line_bore_in") else None,
+        line_in_m=(_line_in_in * 0.0254) if _line_in_in else None,
+        line_out_m=(_line_out_in * 0.0254) if _line_out_in else None,
         fl=body["fl"], xt=body["xt"], fd=body["fd"],
         p_src_pa=to_pa(raw.get("p_src")),
         p_dest_pa=to_pa(raw.get("dest_p")),
