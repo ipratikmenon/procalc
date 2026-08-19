@@ -4057,6 +4057,18 @@ def build_profile_flash_noiso(
                              else getattr(_cv_sp, "vap_mass", None)),
                 "liq_mass": (getattr(_cv_fr, "liq_mass", None) if _cv_fr
                              else getattr(_cv_sp, "liq_mass", None)),
+                # extended property / composition capture (datasheet fluid block)
+                "liq_mw": getattr(_cv_fr, "liq_mw", None) if _cv_fr else None,
+                "tc_f": getattr(_cv_sp, "tc_f", None),
+                "total_density": getattr(_cv_sp, "total_density", None),
+                "comb_visc": (_cv_sp.total_viscosity_cp() if _cv_sp else None),
+                "vap_cp": getattr(_cv_sp, "vap_cp", None),
+                # composition for H2/H2S ppm & partial-pressure reporting
+                "comp_names": list(getattr(a_feed, "names", []) or []),
+                "comp_z": list(getattr(a_feed, "z", []) or []),
+                "comp_mw": list(getattr(a_feed, "mw", []) or []),
+                "comp_y": list(getattr(_cv_fr, "y", []) or []) if _cv_fr else [],
+                "comp_x": list(getattr(_cv_fr, "x", []) or []) if _cv_fr else [],
             }
 
         else:
@@ -4951,6 +4963,43 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
     return resolver
 
 
+def _cv_scale_sp(sp, k: float):
+    """Copy a StreamProps with all flow-extensive quantities scaled by k
+    (intensive properties — densities, MW, viscosity, Z — unchanged)."""
+    if sp is None or k == 1.0:
+        return sp
+    from dataclasses import replace as _replace
+    def s(v):
+        return (v * k) if v is not None else None
+    return _replace(
+        sp, vap_mass=s(sp.vap_mass), liq_mass=s(sp.liq_mass),
+        total_mass=s(sp.total_mass),
+        total_std_liq=s(sp.total_std_liq), total_std_vap=s(sp.total_std_vap),
+        vap_act_vol=s(sp.vap_act_vol), liq_act_rate=s(sp.liq_act_rate))
+
+
+def _cv_scale_feed(feed, k: float):
+    """Copy a FlashFeed with total mass/moles scaled by k (composition and
+    K-values unchanged — flow scaling only)."""
+    if feed is None or k == 1.0:
+        return feed
+    from dataclasses import replace as _replace
+    return _replace(
+        feed,
+        total_mass_lbhr=(feed.total_mass_lbhr or 0.0) * k,
+        total_moles_lbmolhr=((feed.total_moles_lbmolhr or 0.0) * k))
+
+
+def _cv_scaled_resolver(resolver, k: float):
+    """Wrap a stream resolver so every (sp, feed) it returns is flow-scaled."""
+    if k == 1.0:
+        return resolver
+    def _r(row):
+        sp_, feed_ = resolver(row)
+        return _cv_scale_sp(sp_, k), _cv_scale_feed(feed_, k)
+    return _r
+
+
 def run_noiso(
         input_path: str,
         hmb_path: str,
@@ -5056,93 +5105,88 @@ def run_noiso(
         branch_blocks = c["branch_blocks"]
         p_start = p0 or sp.pres_psia or 100.0
 
-        # ── Preliminary Main march (no branch injections) ────────────────
-        # Captures the flow/composition that leaves Main at every
-        # 'Tee Split Branch Flow N' row, so any Branch block that splits off
-        # of Main can be auto-seeded below (mirrors the Branch→Main join
-        # injection further down, but in the opposite direction).
-        splits_out: dict[tuple, dict] = {}
-        build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
-                              default_sp=sp, splits_out=splits_out)
+        # ── Whole-circuit solve at a given inlet flow scale ──────────────
+        # Runs the preliminary split-capture march, the branch sub-runs (with
+        # split-seeding + Main injections) and the final Main march — all at
+        # ``resolver_x`` / ``sp_x`` (flow-scaled for the Min/Max cases).  A
+        # full re-march, NOT interpolation: pressures, flash splits and the
+        # flow reaching each valve are all recomputed, so upstream Tee splits
+        # and carry-overs are honoured at the scaled flow.
+        def march_all(resolver_x, sp_x, quiet=False):
+            splits_out: dict[tuple, dict] = {}
+            build_profile_solved(main_rows, resolver_x, p_start,
+                                  flash_mode=flash_mode, default_sp=sp_x,
+                                  splits_out=splits_out)
+            branch_runs_l: list = []
+            injections_l: dict[int, dict] = {}
+            line_branch_count: dict[str, int] = {}
+            line_split_count: dict[str, int] = {}
+            for bi, block in enumerate(branch_blocks):
+                bp = _start_p_of_block(block) or p_start
+                b0 = block[0] if block else {}
+                up_line = b0.get("Upstream Line No")
+                up_seq  = b0.get("Upstream Seq")
+                split_cap = None
+                if up_line:
+                    if up_seq is not None:
+                        split_cap = splits_out.get((up_line, up_seq))
+                    else:
+                        line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
+                        split_n = line_split_count[up_line]
+                        split_row = next(
+                            (mr for mr in main_rows
+                             if mr.get("Line No") == up_line
+                             and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
+                            None)
+                        if split_row is not None:
+                            split_cap = splits_out.get((up_line, split_row.get("Seq")))
+                    if split_cap is None and not quiet:
+                        print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
+                              f"Upstream Line No '{up_line}' but no matching "
+                              f"'Tee Split Branch Flow N' output was found on Main.")
 
-        # ── March branch blocks FIRST (independent sub-runs) ─────────────
-        # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
-        # the same line is INJECTED into the Main at that row (its outlet flow +
-        # composition merge in); others stay standalone Branch sheets.
-        # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
-        # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
-        # captured split-off flow/composition instead of marching standalone.
-        branch_runs: list = []            # (label, sts, fls, cmps, b_lns, cfracs)
-        injections: dict[int, dict] = {}  # main_rows index → branch outlet
-        line_branch_count: dict[str, int] = {}
-        line_split_count: dict[str, int] = {}
-        for bi, block in enumerate(branch_blocks):
-            bp = _start_p_of_block(block) or p_start
-            b0 = block[0] if block else {}
-            up_line = b0.get("Upstream Line No")
-            up_seq  = b0.get("Upstream Seq")
-            split_cap = None
-            if up_line:
-                if up_seq is not None:
-                    split_cap = splits_out.get((up_line, up_seq))
-                else:
-                    line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
-                    split_n = line_split_count[up_line]
-                    split_row = next(
-                        (mr for mr in main_rows
-                         if mr.get("Line No") == up_line
-                         and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
-                        None)
-                    if split_row is not None:
-                        split_cap = splits_out.get((up_line, split_row.get("Seq")))
-                if split_cap is None:
-                    print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
-                          f"Upstream Line No '{up_line}' but no matching "
-                          f"'Tee Split Branch Flow N' output was found on Main.")
+                solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp_x)
+                if split_cap is not None:
+                    solve_kwargs.update(default_feed=split_cap["feed"],
+                                         default_vap_cf=split_cap["vap_cf"],
+                                         default_liq_cf=split_cap["liq_cf"])
+                    if split_cap.get("sp") is not None:
+                        solve_kwargs["default_sp"] = split_cap["sp"]
+                sts, fls, cmps, _bmw, cfracs = build_profile_solved(block, resolver_x, bp, **solve_kwargs)
+                b_lns = [r["Line No"] for r in block]
+                label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
+                branch_runs_l.append((label, sts, fls, cmps, b_lns, cfracs))
+                if split_cap is not None and not quiet:
+                    print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
+                          f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
 
-            solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp)
-            if split_cap is not None:
-                solve_kwargs.update(default_feed=split_cap["feed"],
-                                     default_vap_cf=split_cap["vap_cf"],
-                                     default_liq_cf=split_cap["liq_cf"])
-                if split_cap.get("sp") is not None:
-                    solve_kwargs["default_sp"] = split_cap["sp"]
-            sts, fls, cmps, _bmw, cfracs = build_profile_solved(block, resolver, bp, **solve_kwargs)
-            b_lns = [r["Line No"] for r in block]
-            label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
-            branch_runs.append((label, sts, fls, cmps, b_lns, cfracs))
-            if split_cap is not None:
-                print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
-                      f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
+                bline  = block[0].get("Line No") if block else None
+                line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
+                join_n = line_branch_count[bline]
+                join_idx = next(
+                    (mi for mi, mr in enumerate(main_rows)
+                     if mr.get("Line No") == bline
+                     and _is_tee_join(mr.get("Fitting Name")) == join_n),
+                    None)
+                if join_idx is not None and fls and fls[-1] is not None:
+                    out_fr = fls[-1]
+                    b_sp, b_feed = resolver_x(block[0]) if block else (None, None)
+                    injections_l[join_idx] = {
+                        "vap_mass": out_fr.vap_mass, "liq_mass": out_fr.liq_mass,
+                        "vmol": out_fr.vap_moles, "lmol": out_fr.liq_moles,
+                        "comp": cmps[-1] if cmps else {},
+                        "feed": b_feed, "sp": b_sp, "label": label,
+                    }
+                    if not quiet:
+                        print(f"  Branch '{label}' (line {bline}) joins Main at "
+                              f"Tee Join Branch Flow {join_n}.")
+            m_sts, m_fls, m_cmps, m_mw, m_cfracs = build_profile_solved(
+                main_rows, resolver_x, p_start, flash_mode=flash_mode,
+                default_sp=sp_x, injections=injections_l)
+            return m_sts, m_fls, m_cmps, m_mw, m_cfracs, branch_runs_l
 
-            bline  = block[0].get("Line No") if block else None
-            line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
-            join_n = line_branch_count[bline]
-            join_idx = next(
-                (mi for mi, mr in enumerate(main_rows)
-                 if mr.get("Line No") == bline
-                 and _is_tee_join(mr.get("Fitting Name")) == join_n),
-                None)
-            if join_idx is not None and fls and fls[-1] is not None:
-                out_fr = fls[-1]
-                b_sp, b_feed = resolver(block[0]) if block else (None, None)
-                injections[join_idx] = {
-                    "vap_mass": out_fr.vap_mass,
-                    "liq_mass": out_fr.liq_mass,
-                    "vmol":     out_fr.vap_moles,
-                    "lmol":     out_fr.liq_moles,
-                    "comp":     cmps[-1] if cmps else {},
-                    "feed":     b_feed,
-                    "sp":       b_sp,
-                    "label":    label,
-                }
-                print(f"  Branch '{label}' (line {bline}) joins Main at "
-                      f"Tee Join Branch Flow {join_n}.")
-
-        # ── March the Main with branch injections ────────────────────────
-        main_stations, main_flashes, main_comps, main_mw, main_cfracs = build_profile_solved(
-            main_rows, resolver, p_start, flash_mode=flash_mode,
-            default_sp=sp, injections=injections)
+        (main_stations, main_flashes, main_comps, main_mw, main_cfracs,
+         branch_runs) = march_all(resolver, sp)
 
         # station_lines: map each station back to its source Line No
         station_lines = [r["Line No"] for r in main_rows
@@ -5181,12 +5225,54 @@ def run_noiso(
                 wb, sts, fls, cfracs, sp,
                 circuit_id=cid, stream_name=sk, run_label=label))
 
-        # ── Control-valve datasheets (one per Control Valve in the circuit) ──
-        cv_sheets = _build_cv_datasheets(wb, main_stations, stream_name=sk,
-                                         run_label="Main")
-        for (label, sts, fls, cmps, b_lns, cfracs) in branch_runs:
-            cv_sheets += _build_cv_datasheets(wb, sts, stream_name=sk,
-                                              run_label=label)
+        # ── Control-valve datasheets + full Min/Max hydraulic runs ─────────
+        # Datasheet Min/Norm/Max come from THREE full circuit re-marches at
+        # scaled inlet flow (not interpolation), so upstream Tee splits and
+        # carry-overs set the real flow reaching each valve.  The Min/Max
+        # marches also get their own Pressure_Profile / Flash_Profile sheets.
+        cv_sheets = []
+        scen_sheets = []
+        valve_sts_nor = _cv_valve_stations(main_stations, branch_runs)
+        if valve_sts_nor:
+            # circuit-level turndown: widest range requested across its valves
+            mins, maxs = [], []
+            for st in valve_sts_nor:
+                rw = st.cv_raw.get("row", {})
+                mins.append(num(rw.get("Min Flow Mult")) or 0.35)
+                maxs.append(num(rw.get("Max Flow Mult")) or 1.20)
+            k_min, k_max = min(mins), max(maxs)
+
+            valve_sts = {"NOR": valve_sts_nor}
+            for tag, k in (("Min", k_min), ("Max", k_max)):
+                code = "MIN" if tag == "Min" else "MAX"
+                try:
+                    (m_sts, m_fls, m_cmps, m_mw, m_cfracs, b_runs) = march_all(
+                        _cv_scaled_resolver(resolver, k),
+                        _cv_scale_sp(sp, k), quiet=True)
+                except Exception as exc:
+                    print(f"  ({tag}-flow march skipped: {exc})")
+                    valve_sts[code] = []
+                    continue
+                valve_sts[code] = _cv_valve_stations(m_sts, b_runs)
+                # full hydraulic run sheets for this flow scenario
+                scen_sheets.append(_build_pressure_profile_sheet(
+                    wb, m_sts, m_fls, sp, circuit_id=cid, stream_name=sk,
+                    run_label=tag, flash_mode=flash_mode,
+                    station_lines=station_lines, line_colors=lc))
+                scen_sheets.append(_build_flash_detail_sheet(
+                    wb, m_sts, m_fls, feed, sp, run_label=tag))
+                for (blabel, bsts, bfls, bcmps, b_lns, bcfracs) in b_runs:
+                    scen_sheets.append(_build_pressure_profile_sheet(
+                        wb, bsts, bfls, sp, circuit_id=cid, stream_name=sk,
+                        run_label=f"{blabel}_{tag}", flash_mode=flash_mode,
+                        station_lines=b_lns, line_colors=lc))
+                    scen_sheets.append(_build_flash_detail_sheet(
+                        wb, bsts, bfls, feed, sp, run_label=f"{blabel}_{tag}"))
+                print(f"  {tag}-flow run (inlet ×{k:g}) marched for CV datasheet.")
+
+            cv_sheets = _build_cv_datasheets(
+                wb, valve_sts["NOR"], valve_sts.get("MIN"), valve_sts.get("MAX"),
+                stream_name=sk, run_label="Main")
         if cv_sheets:
             print(f"  Control-valve datasheets: {', '.join(cv_sheets)}")
 
@@ -5229,7 +5315,7 @@ def run_noiso(
                             input_path, hmb_path, flash_mode)
 
         # ── Sheet order ──────────────────────────────────────────────────
-        order = (pp_sheets + fp_sheets +
+        order = (pp_sheets + fp_sheets + scen_sheets +
                  ["Composition Splits",
                   "Component_Detail", "Stream_Props"]
                  + sp_sheets + cv_sheets +
@@ -8596,117 +8682,88 @@ class CvInputs:
     sg: float | None = None
 
 
-def _cv_case_pressures(inp: CvInputs, mult: float):
-    """(P1, P2, ΔP) [Pa] for a flow multiplier.
-
-    Fixed-ΔP control (P/L, and T with its floor) holds ΔP constant across the
-    turndown; flow control (F) floats — line losses grow ~flow², so the valve
-    inlet falls and the valve ΔP shrinks as flow rises (the classic
-    min-ΔP-at-max-flow datasheet trend)."""
-    p1n, p2n = inp.p1_norm_pa, inp.p2_norm_pa
-    if not p1n or not p2n:
-        return None, None, None
-    act = (inp.action or "F").upper()[:1]
-    if act in ("P", "L", "T"):
-        dp = p1n - p2n
-        return p1n, p1n - dp, dp                        # constant ΔP, constant P1
-    # flow control: scale the up/down line losses by mult²
-    m2 = mult * mult
-    if inp.p_src_pa and inp.p_dest_pa:
-        l_up = max(0.0, inp.p_src_pa - p1n)
-        l_dn = max(0.0, p2n - inp.p_dest_pa)
-        p1 = inp.p_src_pa - l_up * m2
-        p2 = inp.p_dest_pa + l_dn * m2
-        if p1 - p2 < 1.0:
-            p1, p2 = p1n, p2n                           # degenerate; hold normal
-        return p1, p2, p1 - p2
-    # no boundary info: hold P1, keep ΔP at normal (documented fallback)
-    return p1n, p2n, p1n - p2n
-
-
-def _cv_regime(inp: CvInputs):
-    ph = (inp.phase or "").strip().lower()
+def _cv_regime2(phase, quality, rho_l, rho_v):
+    ph = (phase or "").strip().lower()
     if "two" in ph or "mixed" in ph:
-        return "two-phase", (inp.quality if inp.quality is not None else 0.5)
+        return "two-phase", (quality if quality is not None else 0.5)
     if "liq" in ph:
-        if inp.quality is not None and inp.quality > 0.01:
-            return "two-phase", inp.quality
+        if quality is not None and quality > 0.01:
+            return "two-phase", quality
         return "liquid", 0.0
     if "vap" in ph or "gas" in ph:
         return "gas", 1.0
-    if inp.rho_l and not inp.rho_v:
+    if rho_l and not rho_v:
         return "liquid", 0.0
-    return "gas", (inp.quality if inp.quality is not None else 1.0)
+    return "gas", (quality if quality is not None else 1.0)
 
 
-def _cv_size_case(inp: CvInputs, mult: float, cv100):
-    """Full sizing + noise for one flow case.  Returns a result dict."""
-    r = {"mult": mult}
-    p1, p2, dp = _cv_case_pressures(inp, mult)
+def _cv_size_state(state: dict, inp: "CvInputs", cv100):
+    """Full IEC 60534 sizing + noise for ONE measured flow case.
+
+    ``state`` carries the marched conditions & fluid properties at the valve
+    (P1, P2, W and phase split come straight from that flow scenario's full
+    hydraulic re-march — not an interpolation).  Returns a result dict that
+    also carries the per-case fluid properties for the datasheet."""
+    r = dict(state)                         # copy props through for display
+    p1, p2 = state.get("p1"), state.get("p2")
     if not p1 or not p2 or p2 >= p1:
         r["valid"] = False
         return r
-    r.update(valid=True, p1=p1, p2=p2, dp=dp)
-    w = (inp.w_norm_kgs or 0.0) * mult
-    r["w"] = w
-    regime, x_q = _cv_regime(inp)
+    w = state.get("w") or 0.0
+    rho_l, rho_v = state.get("rho_l"), state.get("rho_v")
+    pv, pc = state.get("pv"), state.get("pc")
+    r.update(valid=True, p1=p1, p2=p2, dp=p1 - p2, w=w)
+    regime, x_q = _cv_regime2(state.get("phase"), state.get("quality"),
+                              rho_l, rho_v)
     r["regime"] = regime
-    ff = _cv_ff_factor(inp.pv_pa, inp.pc_pa)
-    sigma = _cv_sigma_index(p1, p2, inp.pv_pa)
+    ff = _cv_ff_factor(pv, pc)
+    sigma = _cv_sigma_index(p1, p2, pv)
     r["ff"], r["sigma"] = ff, sigma
 
     if regime == "gas":
-        x, x_ch, x_eff, y, choked = _cv_gas_xy(p1, p2, inp.k, inp.xt)
-        rho1 = inp.rho_v
-        if not rho1:
-            t1_k = None
-            rho1 = None
-        cv_req = _cv_required_gas(w, p1, rho1 or 0.0, x_eff, y)
-        r.update(x=x, x_choked=x_ch, y=y, choked=choked, cv_req=cv_req,
-                 rho_eff=rho1)
+        x, x_ch, x_eff, y, choked = _cv_gas_xy(p1, p2, state.get("k"), inp.xt)
+        cv_req = _cv_required_gas(w, p1, rho_v or 0.0, x_eff, y)
+        r.update(x=x, x_choked=x_ch, y=y, choked=choked, cv_req=cv_req)
     else:
-        dp_choked = _cv_liquid_dp_choked(inp.fl, p1, inp.pv_pa, ff)
+        dp_choked = _cv_liquid_dp_choked(inp.fl, p1, pv, ff)
+        dp = p1 - p2
         choked = dp_choked > 0 and dp >= dp_choked
         dp_eff = min(dp, dp_choked) if dp_choked > 0 else dp
         r.update(dp_choked=dp_choked, choked=choked, dp_eff=dp_eff)
         if regime == "liquid":
-            cv_req = _cv_required_liquid(w, inp.rho_l or 999.0, dp_eff)
-            r.update(cv_req=cv_req, rho_eff=inp.rho_l)
+            cv_req = _cv_required_liquid(w, rho_l or 999.0, dp_eff)
         else:
-            cv_req, rho_mix = _cv_required_two_phase(
-                w, x_q, inp.rho_l, inp.rho_v, dp_eff)
-            r.update(cv_req=cv_req, rho_eff=rho_mix)
+            cv_req, _rm = _cv_required_two_phase(w, x_q, rho_l, rho_v, dp_eff)
+        r["cv_req"] = cv_req
 
     if cv100:
         r["travel"] = _cv_travel_pct(r.get("cv_req"), cv100, inp.char,
                                      inp.rangeability)
         r["pct_cv"] = 100.0 * (r.get("cv_req") or 0.0) / cv100
 
-    # velocity + noise (downstream)
+    # downstream velocity + noise
     line_m = inp.line_out_m or inp.line_in_m
     if line_m:
         area = math.pi / 4.0 * line_m ** 2
         if regime == "gas":
-            rho2 = inp.rho_v
+            rho2 = rho_v
         elif regime == "liquid":
-            rho2 = inp.rho_l
+            rho2 = rho_l
+        elif rho_v and rho_l and x_q is not None:
+            rho2 = 1.0 / (x_q / rho_v + (1.0 - x_q) / rho_l)
         else:
-            if inp.rho_v and inp.rho_l and x_q is not None:
-                rho2 = 1.0 / (x_q / inp.rho_v + (1.0 - x_q) / inp.rho_l)
-            else:
-                rho2 = r.get("rho_eff")
+            rho2 = rho_l or rho_v
         if rho2 and rho2 > 0:
             r["v2"] = (w / rho2) / area
-        # gas → aerodynamic (8-3); liquid & flashing/two-phase → hydrodynamic
-        # (8-4), which carries the cavitation/flashing increment.
         if regime == "gas":
-            c2 = _cv_sonic_velocity_gas(inp.k, inp.z, None, inp.mw)
-            lpe, det = _cv_noise_aero(w, p1, p2, None, inp.mw, inp.z, inp.k,
-                                      inp.xt, inp.fl, inp.fd, line_m,
-                                      rho2, c2)
+            c2 = _cv_sonic_velocity_gas(state.get("k"), state.get("z"),
+                                        None, state.get("mw"))
+            lpe, det = _cv_noise_aero(w, p1, p2, None, state.get("mw"),
+                                      state.get("z"), state.get("k"), inp.xt,
+                                      inp.fl, inp.fd, line_m, rho2, c2)
         else:
-            lpe, det = _cv_noise_hydro(w, p1, p2, inp.pv_pa, inp.fl,
-                                       inp.rho_l or rho2, line_m, sigma)
+            lpe, det = _cv_noise_hydro(w, p1, p2, pv, inp.fl,
+                                       rho_l or rho2, line_m, sigma)
         r["noise_dba"], r["noise_detail"] = lpe, det
     return r
 
@@ -8740,17 +8797,19 @@ def _cv_select_rated(inp: CvInputs, cases):
                   "- verify size/trim with vendor")
 
 
-def _cv_evaluate_valve(inp: CvInputs) -> dict:
-    """Run Min/Norm/Max, select or check the Rated Cv, apply the dB(A) limit,
-    and assemble verdicts + recommendations.  Returns the datasheet payload."""
-    mults = {"MIN": inp.min_mult, "NOR": 1.0, "MAX": inp.max_mult}
+def _cv_evaluate_valve(inp: CvInputs, states: dict) -> dict:
+    """Given measured Min/Norm/Max case-states (each from a full hydraulic
+    re-march at that flow), select or check the Rated Cv, apply the dB(A)
+    limit, and assemble verdicts + recommendations."""
     mode = "adequacy" if inp.cv100 else "selection"
     cv100 = inp.cv100
     sel_note = None
     if mode == "selection":
-        prelim = {code: _cv_size_case(inp, m, None) for code, m in mults.items()}
+        prelim = {code: _cv_size_state(st, inp, None)
+                  for code, st in states.items()}
         cv100, sel_note = _cv_select_rated(inp, prelim)
-    cases = {code: _cv_size_case(inp, m, cv100) for code, m in mults.items()}
+    cases = {code: _cv_size_state(st, inp, cv100)
+             for code, st in states.items()}
 
     # verdicts
     cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
@@ -8914,7 +8973,7 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     row("Flow Rate", "lb/h",
         _cv_disp(cMIN, "w", W, 1), _cv_disp(cNOR, "w", W, 1),
         _cv_disp(cMAX, "w", W, 1),
-        f"turndown {inp.min_mult:g}× / {inp.max_mult:g}× of normal")
+        f"full re-march at inlet ×{inp.min_mult:g} / ×{inp.max_mult:g}")
     row("Inlet Pressure P1", "psia",
         _cv_disp(cMIN, "p1", P, 2), _cv_disp(cNOR, "p1", P, 2),
         _cv_disp(cMAX, "p1", P, 2))
@@ -8924,16 +8983,47 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     row("Pressure Drop ΔP", "psi",
         _cv_disp(cMIN, "dp", P, 2), _cv_disp(cNOR, "dp", P, 2),
         _cv_disp(cMAX, "dp", P, 2))
-    tf = round(inp.temp_f, 1) if inp.temp_f is not None else "—"
-    row("Temperature", "°F", tf, tf, tf)
-    pv = round(inp.pv_pa / _CV_PSI_TO_PA, 3) if inp.pv_pa else "—"
-    pc = round(inp.pc_pa / _CV_PSI_TO_PA, 2) if inp.pc_pa else "—"
-    row("Vapor Pressure Pv", "psia", pv, pv, pv)
-    row("Critical Pressure Pc", "psia", pc, pc, pc)
-    muv = round(inp.mu_l_cp or inp.mu_v_cp or 0, 4) if (inp.mu_l_cp or inp.mu_v_cp) else "—"
-    row("Viscosity", "cP", muv, muv, muv)
-    sg = round(inp.sg, 4) if inp.sg else "—"
-    row("Liquid Gf / SG", "—", sg, sg, sg)
+    def prow(label, unit, key, conv=lambda x: x, nd=3, note=""):
+        row(label, unit, _cv_disp(cMIN, key, conv, nd),
+            _cv_disp(cNOR, key, conv, nd), _cv_disp(cMAX, key, conv, nd), note)
+    prow("Temperature", "°F", "temp_f", nd=1)
+
+    # ── Fluid properties (per case, from each scenario's flash) ──
+    sec("FLUID PROPERTIES — VAPOR")
+    prow("Vapor mol wt", "g/mol", "vap_mw", nd=2)
+    prow("Vapor density (upstream)", "lb/ft³", "rho_v", LB, nd=4)
+    prow("Vapor viscosity", "cP", "mu_v", nd=4)
+    prow("Vapor Cp/Cv", "—", "vap_cp_cv", nd=3)
+    prow("Vapor Z factor", "—", "z", nd=4)
+
+    sec("FLUID PROPERTIES — LIQUID")
+    prow("Liquid density", "lb/ft³", "rho_l", LB, nd=3)
+    prow("Liquid viscosity", "cP", "mu_l", nd=4)
+    prow("Liquid mol wt", "g/mol", "liq_mw", nd=2)
+    prow("Vapor pressure @ T", "psia", "pv", P, nd=3)
+    prow("Critical temperature", "°F", "tc_f", nd=1)
+    prow("Critical pressure", "psia", "pc", P, nd=2)
+    prow("Liquid Gf / SG", "—", "sg", nd=4)
+
+    sec("FLUID PROPERTIES — MIXTURE")
+    prow("Mixture density", "lb/ft³", "mix_density", LB, nd=4)
+    prow("Combined viscosity", "cP", "comb_visc", nd=4)
+    prow("Flashing fraction (vapour)", "wt%", "flashing_wt", nd=2)
+
+    sec("CONTAMINANTS  (H2 / H2S)")
+    def hrow(label, comp, field, unit, nd, note=""):
+        def g(c):
+            d = c.get(comp)
+            if d and d.get(field) is not None and c.get("valid", True):
+                return round(d[field], nd)
+            return "—"
+        row(label, unit, g(cMIN), g(cNOR), g(cMAX), note)
+    hrow("H2  content", "h2", "ppmmol", "ppm-mol", 1)
+    hrow("H2  content", "h2", "ppmw", "ppm-wt", 1)
+    hrow("H2  partial pressure", "h2", "pp_psia", "psia", 3, "y·P1 (vapour)")
+    hrow("H2S content", "h2s", "ppmmol", "ppm-mol", 1)
+    hrow("H2S content", "h2s", "ppmw", "ppm-wt", 1)
+    hrow("H2S partial pressure", "h2s", "pp_psia", "psia", 3, "y·P1 (vapour)")
 
     sec("FLOWING CONDITIONS / SIZING")
     row("Flow regime", "",
@@ -9039,7 +9129,9 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
         "Cavitation: ISA RP75.23 σ.  Seat leakage: FCI 70-2 / IEC 60534-4.",
         "Noise: IEC 60534-8-3 (aerodynamic) / -8-4 (hydrodynamic) — screening-"
         "grade dB(A); confirm severe/critical service with vendor acoustic data.",
-        "Min/Max are turndown multiples of the marched Normal operating point; "
+        "Min/Norm/Max each come from a full circuit hydraulic re-march at the "
+        "scaled inlet flow (see Pressure_Profile_Min/_Max) — the flow reaching "
+        "the valve follows upstream Tee splits/carry-overs, not a fixed ratio. "
         "FL/xT/Fd are body-style typicals — confirm against the selected valve.",
     ]:
         _cvc(ws, r, 1, line, wrap=True, size=9, color="595959")
@@ -9137,18 +9229,114 @@ def _cv_inputs_from_station(station, stream_name=None) -> "CvInputs | None":
     )
 
 
-def _build_cv_datasheets(wb, stations, stream_name=None, run_label="Main"):
-    """Build one datasheet sheet per control valve in `stations`.  Returns the
-    list of created sheet titles (empty if the block has no control valves)."""
-    titles = []
-    for st in stations:
-        if not getattr(st, "cv_raw", None):
+_CV_PPM_TARGETS = {
+    "H2":  ("H2", "HYDROGEN"),
+    "H2S": ("H2S", "HYDROGEN SULFIDE", "HYDROGEN SULPHIDE"),
+}
+
+
+def _cv_comp_metrics(names, z, mw, y, p1_psia):
+    """H2 / H2S composition metrics: ppmw & ppm-mol (total-stream basis) and
+    partial pressure (vapour mole fraction × P1, or feed fraction × P1 if no
+    vapour present).  Returns {'H2': {...}, 'H2S': {...}}."""
+    idx = {str(n).strip().upper(): i for i, n in enumerate(names or [])}
+    sum_zmw = sum((z[i] or 0.0) * (mw[i] or 0.0) for i in range(len(z or []))) or 1.0
+    out = {}
+    for key, aliases in _CV_PPM_TARGETS.items():
+        i = next((idx[a] for a in aliases if a in idx), None)
+        if i is None:
+            out[key] = None
             continue
+        zi = (z[i] if i < len(z) else 0.0) or 0.0
+        yi = (y[i] if (y and i < len(y)) else 0.0) or 0.0
+        out[key] = {
+            "ppmmol": zi * 1e6,
+            "ppmw": zi * (mw[i] or 0.0) / sum_zmw * 1e6,
+            "pp_psia": (yi if yi > 0 else zi) * (p1_psia or 0.0),
+        }
+    return out
+
+
+def _cv_state_from_station(st):
+    """Measured case-state (SI) + fluid-property block from a valve Station."""
+    raw = getattr(st, "cv_raw", None)
+    if not raw:
+        return None
+    PA = _CV_PSI_TO_PA
+    lbft3 = 16.018463
+    to_pa = lambda x: (x * PA) if x is not None else None
+    w_lbhr = (raw.get("vap_mass") or 0.0) + (raw.get("liq_mass") or 0.0)
+    rho_l = (raw["liq_density"] * lbft3) if raw.get("liq_density") else None
+    rho_v = (raw["vap_density"] * lbft3) if raw.get("vap_density") else None
+    q = raw.get("quality")
+    p1 = st.p_in_psia
+    # vapour density fallback: ideal-gas P·MW/(Z·R·T) when the HMB stream (e.g.
+    # a liquid-reported feed that flashes across the valve) carries no vap ρ.
+    if (not rho_v) and raw.get("vap_mw") and raw.get("temp_f") is not None:
+        try:
+            rho_v = _gas_rho_kgm3(raw["vap_mw"], raw.get("vap_z"),
+                                  raw["temp_f"], p1) or None
+        except Exception:
+            rho_v = None
+    pv = _cv_bubble_point_psia(raw.get("feed"), raw.get("temp_f"), p1)
+    comps = _cv_comp_metrics(raw.get("comp_names"), raw.get("comp_z"),
+                             raw.get("comp_mw"), raw.get("comp_y"), p1)
+    if raw.get("total_density"):
+        mix_rho = raw["total_density"] * lbft3
+    elif rho_v and rho_l and q is not None:
+        mix_rho = 1.0 / (q / rho_v + (1.0 - q) / rho_l)
+    else:
+        mix_rho = rho_l or rho_v
+    return {
+        "p1": to_pa(st.p_in_psia), "p2": to_pa(st.p_out_psia),
+        "w": (w_lbhr / _CV_KGS_TO_LBH) if w_lbhr else 0.0,
+        "phase": raw.get("phase"), "quality": q,
+        "rho_l": rho_l, "rho_v": rho_v,
+        "mw": (raw.get("vap_mw") or raw.get("mol_weight")),
+        "z": raw.get("vap_z"), "k": raw.get("gamma"),
+        "pv": to_pa(pv), "pc": to_pa(raw.get("pc_psia")),
+        "sg": ((rho_l / 999.0) if rho_l else None),
+        # ── display / property block (per case) ──
+        "temp_f": raw.get("temp_f"),
+        "mu_l": raw.get("liq_visc"), "mu_v": raw.get("vap_visc"),
+        "comb_visc": raw.get("comb_visc"),
+        "vap_mw": raw.get("vap_mw"), "liq_mw": raw.get("liq_mw"),
+        "vap_cp_cv": raw.get("gamma"),
+        "tc_f": raw.get("tc_f"),
+        "mix_density": mix_rho,
+        "flashing_wt": ((q or 0.0) * 100.0),
+        "h2": comps.get("H2"), "h2s": comps.get("H2S"),
+    }
+
+
+def _cv_valve_stations(main_sts, branch_runs_x):
+    """Ordered list of Stations that carry a control-valve capture (Main first,
+    then each branch), used to align the Min/Norm/Max scenarios by index."""
+    out = [st for st in main_sts if getattr(st, "cv_raw", None)]
+    for tup in (branch_runs_x or []):
+        for st in tup[1]:
+            if getattr(st, "cv_raw", None):
+                out.append(st)
+    return out
+
+
+def _build_cv_datasheets(wb, sts_nor, sts_min, sts_max,
+                         stream_name=None, run_label="Main"):
+    """Build one datasheet per control valve, drawing Min/Norm/Max from three
+    independently-marched flow scenarios (aligned by valve order)."""
+    titles = []
+    for i, st in enumerate(sts_nor):
         try:
             inp = _cv_inputs_from_station(st, stream_name=stream_name)
             if inp is None:
                 continue
-            payload = _cv_evaluate_valve(inp)
+            s_nor = _cv_state_from_station(st)
+            s_min = (_cv_state_from_station(sts_min[i])
+                     if sts_min and i < len(sts_min) else None)
+            s_max = (_cv_state_from_station(sts_max[i])
+                     if sts_max and i < len(sts_max) else None)
+            states = {"MIN": s_min or s_nor, "NOR": s_nor, "MAX": s_max or s_nor}
+            payload = _cv_evaluate_valve(inp, states)
             titles.append(_build_cv_datasheet_sheet(wb, payload, run_label))
         except Exception as exc:
             print(f"  (CV datasheet for {getattr(st, 'comp_id', '?')} "
