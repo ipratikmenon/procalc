@@ -71,9 +71,10 @@ try:
     from resources import theme
     _TEN = theme.TEN
 except Exception:  # pragma: no cover - theme is best-effort styling only
-    _TEN = {"blue": "#0070EF", "navy": "#004C84", "amber": "#FDC300",
-            "salmon": "#EE7766", "panel": "#FFFFFF", "bg": "#F4F7FA",
-            "text": "#20303A", "lgray": "#DEDEDE", "gray": "#878787"}
+    _TEN = {"blue": "#5E6AD2", "navy": "#0D0E10", "amber": "#FDC300",
+            "salmon": "#EE7766", "panel": "#F7F8F8", "bg": "#FFFFFF",
+            "text": "#0D0E10", "lgray": "#E4E5E8", "gray": "#6B6E76",
+            "border": "#E4E5E8", "primary_hover": "#828FFF"}
 
 # Sensible NPS bore list for the live-preview drop-down.
 _BORES = ["0.5", "0.75", "1", "1.5", "2", "3", "4", "6", "8", "10", "12",
@@ -89,7 +90,7 @@ class PMSManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("PMS — Piping Material Specs")
-        self.resize(1200, 680)
+        self.resize(1260, 720)
 
         self._pms = api.pms_classes_module()
         self._loading = False          # guard: suppress recompute while populating
@@ -105,11 +106,12 @@ class PMSManagerDialog(QDialog):
     # ── construction ────────────────────────────────────────────────────
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
 
         # top: prominent catalogue loader + status
         top = QHBoxLayout()
+        top.setSpacing(10)
         self.btn_load = QPushButton("Load catalogue (JSON)…")
         self.btn_load.setObjectName("LoadCatalogue")
         self.btn_load.clicked.connect(self._on_load_catalogue)
@@ -247,38 +249,41 @@ class PMSManagerDialog(QDialog):
 
     def _style(self):
         t = _TEN
-        blue = t.get('blue', '#0070EF'); navy = t.get('navy', '#004C84')
+        blue = t.get('blue', '#5E6AD2'); ink = t.get('navy', '#0D0E10')
+        hover = t.get('primary_hover', '#828FFF')
+        panel = t.get('panel', '#F7F8F8'); border = t.get('border', '#E4E5E8')
         self.setStyleSheet(f"""
-        QDialog {{ background: #FFFFFF; color: #1B2A33;
-            font-family: 'Inter','Segoe UI',system-ui,Arial; font-size: 12.5px; }}
-        QGroupBox {{ font-weight: 600; border: 1px solid #E6E9EF;
-            border-radius: 10px; margin-top: 10px; padding: 10px 8px 8px 8px;
+        QDialog {{ background: #FFFFFF; color: {ink};
+            font-family: 'Inter','Segoe UI',system-ui,Arial; font-size: 14px; }}
+        QGroupBox {{ font-weight: 600; font-size: 13px; border: 1px solid {border};
+            border-radius: 12px; margin-top: 14px; padding: 16px 10px 10px 10px;
             background: #FFFFFF; }}
         QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px;
-            color: {navy}; }}
+            color: {ink}; }}
         QPushButton {{ background: {blue}; color: white;
-            border: 0; padding: 7px 14px; border-radius: 8px; font-weight: 600; }}
-        QPushButton:hover {{ background: {navy}; }}
-        QPushButton:disabled {{ background: #AEB9C2; }}
-        QPushButton#LoadCatalogue {{ background: {blue}; font-size: 13px;
-            padding: 8px 18px; }}
-        QPushButton#LoadCatalogue:hover {{ background: {navy}; }}
+            border: 0; padding: 8px 14px; border-radius: 8px; font-weight: 500; }}
+        QPushButton:hover {{ background: {hover}; }}
+        QPushButton:disabled {{ background: #C7CAE8; }}
+        QPushButton#LoadCatalogue {{ background: {blue}; font-size: 14px;
+            padding: 9px 18px; font-weight: 600; }}
+        QPushButton#LoadCatalogue:hover {{ background: {hover}; }}
         QLineEdit, QComboBox, QDoubleSpinBox {{
-            background: white; border: 1px solid #D8DEE6;
-            border-radius: 8px; padding: 4px 8px; }}
+            background: white; border: 1px solid #D9DBE0;
+            border-radius: 8px; padding: 6px 10px; min-height: 20px; }}
         QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{
             border: 1px solid {blue}; }}
-        QListWidget, QTableWidget {{ background: white; border: 1px solid #E6E9EF;
-            border-radius: 8px; gridline-color: #EDF0F3;
-            alternate-background-color: #FAFBFC;
+        QListWidget, QTableWidget {{ background: white; border: 1px solid {border};
+            border-radius: 12px; gridline-color: #EEEFF1;
+            alternate-background-color: #FAFAFB;
             selection-background-color: {blue}; selection-color: white; }}
-        QLabel#EditorHeader {{ color: {navy}; font-weight: 700; font-size: 14px; }}
+        QLabel#EditorHeader {{ color: {ink}; font-weight: 700; font-size: 15px; }}
         QLabel#Warn {{ color: {t.get('salmon', '#EE7766')}; font-weight: 600; }}
-        QLabel#Status {{ color: {navy}; }}
-        QLabel#Preview {{ font-family: 'Consolas','DejaVu Sans Mono',monospace; }}
-        QHeaderView::section {{ background: #EAF3FE; color: {navy};
-            padding: 5px 8px; border: 0; border-right: 1px solid #E6E9EF;
-            border-bottom: 1px solid #E6E9EF; font-weight: 600; }}
+        QLabel#Status {{ color: {ink}; font-size: 12px; }}
+        QLabel#Preview {{ font-family: 'JetBrains Mono','Consolas','DejaVu Sans Mono',monospace;
+            font-size: 13px; }}
+        QHeaderView::section {{ background: {panel}; color: {ink};
+            padding: 8px 10px; border: 0; border-right: 1px solid {border};
+            border-bottom: 1px solid #D3D5DA; font-weight: 600; font-size: 13px; }}
         """)
 
     # ── class list ──────────────────────────────────────────────────────

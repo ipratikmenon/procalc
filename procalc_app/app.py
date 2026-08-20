@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QPixmap, QIcon
+from PySide6.QtGui import QAction, QPixmap, QIcon, QFont
 from PySide6.QtWidgets import (QMainWindow, QWidget, QToolBar, QSplitter,
                                QTableView, QTabWidget, QPlainTextEdit, QLabel,
                                QFileDialog, QComboBox, QLineEdit, QFormLayout,
@@ -52,6 +52,15 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
+        brand = QLabel("Procalc")
+        brand.setObjectName("Brand")
+        bf = brand.font()
+        bf.setLetterSpacing(QFont.AbsoluteSpacing, -0.6)
+        brand.setFont(bf)
+        brand.setContentsMargins(4, 0, 12, 0)
+        tb.addWidget(brand)
+        tb.addSeparator()
+
         def act(text, slot):
             a = QAction(text, self)
             a.triggered.connect(slot)
@@ -81,15 +90,19 @@ class MainWindow(QMainWindow):
         # left: project meta + grid
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(6, 6, 6, 6)
+        lv.setContentsMargins(12, 12, 12, 12)
+        lv.setSpacing(10)
         meta_box = QGroupBox("Project")
         form = QFormLayout(meta_box)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
         self.ed_project = QLineEdit("BTGOLD HCU")
         self.ed_area = QLineEdit("Unit 24")
         self.ed_unit = QLineEdit("HCU")
         self.cb_case = QComboBox(); self.cb_case.addItem("Case 1")
         self.cb_mode = QComboBox(); self.cb_mode.addItems(["isothermal", "isenthalpic"])
         row = QHBoxLayout()
+        row.setSpacing(8)
         for w in (QLabel("Case"), self.cb_case, QLabel("Flash"), self.cb_mode):
             row.addWidget(w)
         rw = QWidget(); rw.setLayout(row)
@@ -101,6 +114,7 @@ class MainWindow(QMainWindow):
         self.btn_units = QPushButton("Overrides…"); self.btn_units.setObjectName("Secondary")
         self.btn_units.clicked.connect(self._edit_unit_overrides)
         urow = QHBoxLayout()
+        urow.setSpacing(8)
         for w in (QLabel("Units"), self.cb_units, self.btn_units):
             urow.addWidget(w)
         urow.addStretch(1)
@@ -121,7 +135,9 @@ class MainWindow(QMainWindow):
         install_delegates(self.view, self.model, self._streams_for_delegate)
         # hide the rarely-used columns for a clean first view
         self._apply_column_visibility()
-        lv.addWidget(QLabel("Circuit builder"))
+        builder_lbl = QLabel("Circuit builder")
+        builder_lbl.setObjectName("SectionTitle")
+        lv.addWidget(builder_lbl)
         lv.addWidget(self.view, 1)
         split.addWidget(left)
 
@@ -133,8 +149,8 @@ class MainWindow(QMainWindow):
         self.err_bar = QLabel("")
         self.err_bar.setWordWrap(True)
         self.err_bar.setStyleSheet(
-            "background:#FDECEC; color:#C0392B; padding:7px 12px; font-weight:600;"
-            "border-left:3px solid #E84242; border-bottom:1px solid #F3C6C6;")
+            "background:#FDECEC; color:#C0392B; padding:8px 16px; font-weight:600;"
+            "font-size:13px; border-left:3px solid #E84242; border-bottom:1px solid #F3C6C6;")
         self.err_bar.hide()
         rv.addWidget(self.err_bar)
         right = QTabWidget()
@@ -156,12 +172,14 @@ class MainWindow(QMainWindow):
         if os.path.exists(api.LOGO_PATH):
             pm = QPixmap(api.LOGO_PATH).scaledToHeight(26, Qt.SmoothTransformation)
             logo.setPixmap(pm)
-        logo.setContentsMargins(8, 0, 8, 0)
+        logo.setContentsMargins(8, 0, 12, 0)
         sb.addWidget(logo)
         self.hmb_lbl = QLabel("  No HMB loaded")
+        self.hmb_lbl.setObjectName("Muted")
         sb.addWidget(self.hmb_lbl)
         self.state_lbl = QLabel("idle")
-        self.state_lbl.setStyleSheet("color:#555; margin-right:10px;")
+        self.state_lbl.setObjectName("StateBadge")
+        self.state_lbl.setContentsMargins(0, 0, 10, 0)
         sb.addPermanentWidget(self.state_lbl)
 
     def _apply_column_visibility(self):
@@ -193,12 +211,19 @@ class MainWindow(QMainWindow):
         sysname = self.cb_units.currentText() or "FPS"
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Per-quantity unit overrides — base: {sysname}")
-        dlg.resize(460, 520)
+        dlg.resize(500, 560)
         outer = QVBoxLayout(dlg)
-        outer.addWidget(QLabel("Leave a quantity on its system default, or pick a "
-                               "unit to override it for this project."))
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(10)
+        hint = QLabel("Leave a quantity on its system default, or pick a "
+                      "unit to override it for this project.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
         area = QScrollArea(); area.setWidgetResizable(True)
         inner = QWidget(); grid = QGridLayout(inner)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
         combos = {}
         for i, (qty, name, info) in enumerate(api.unit_quantities()):
             default = info["defaults"].get(sysname)
