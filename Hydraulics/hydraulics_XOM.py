@@ -2345,15 +2345,14 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
     _c(ws, 1, 1, title, bg=NAVY, fg=WHITE, sz=11, bold=True)
     ws.row_dimensions[1].height = 22
 
-    # header row 2
-    disp_hdr = {
-        "Length": u.hdr("Length", "L"), "Elev Δ": u.hdr("Elev Δ", "L"),
-        "Inlet P": u.hdr("Inlet P", "P"), "Outlet P": u.hdr("Outlet P", "P"),
-        "Total ΔP": u.hdr("Total ΔP", "dP"), "Max Velocity": u.hdr("Max Velocity", "v"),
-    }
+    # header row 2 (bare captions) + a dedicated units row 3
+    col_qty = {"Length": "L", "Elev Δ": "L", "Inlet P": "P", "Outlet P": "P",
+               "Total ΔP": "dP", "Max Velocity": "v"}
     for c, h in enumerate(_LINELIST_HEADERS, 1):
-        _c(ws, 2, c, disp_hdr.get(h, h), bg=STEEL, fg=WHITE, sz=9, bold=True,
-           ha="center", wrap=True)
+        _c(ws, 2, c, h, bg=STEEL, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        qty = col_qty.get(h)
+        _c(ws, 3, c, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY, sz=8,
+           italic=True, ha="center")
 
     # group station indices by Line No in first-appearance order
     order, groups = [], {}
@@ -2371,7 +2370,7 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
         uniq = list(dict.fromkeys(str(v) for v in vals))
         return uniq[0] if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
 
-    r = 3
+    r = 4
     for ln in order:
         grp = [stations[i] for i in groups[ln]]
         if not grp:
@@ -2407,7 +2406,7 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
     for c, w in enumerate([14, 14, 12, 12, 16, 10, 12, 11, 12, 11,
                            10, 9, 10, 10, 10, 12, 11], 1):
         ws.column_dimensions[get_column_letter(c)].width = w
-    ws.freeze_panes = "C3"
+    ws.freeze_panes = "C4"
     ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
     return ws
 
@@ -4503,19 +4502,30 @@ def build_profile_solved(
 # ════════════════════════════════════════════════════════════════════════
 #  Pressure_Profile sheet  (no-ISO version — same layout as flash engine)
 # ════════════════════════════════════════════════════════════════════════
-def _pp_headers(u: "UN.UnitSystem") -> list[str]:
+def _pp_headers(u: "UN.UnitSystem" = None) -> list[str]:
+    # bare captions; units go in their own row via _pp_units()
     return [
-        "Seq", "Comp ID", "Fitting", "NPS", "Sched", u.hdr("ID", "Lin"),
-        u.hdr("Length", "L"), u.hdr("Cum Length", "L"), u.hdr("Elev Δ", "L"),
-        "Phase (flash)", u.hdr("Velocity", "v"), "Reynolds", "Friction f",
-        u.hdr("Mix Density", "rho"), u.hdr("dP Fric", "dP"),
-        u.hdr("dP Fitting", "dP"), u.hdr("dP Elev", "dP"),
-        u.hdr("dP Total", "dP"), u.hdr("P In", "P"), u.hdr("P Out", "P"),
-        "β (molar vap)", "Quality (mass)", u.hdr("Vap Mass Flow", "mflow"),
-        u.hdr("Liq Mass Flow", "mflow"), "MW Vapor", "MW Liquid",
-        u.hdr("Vap Density", "rho"), u.hdr("Liq Density", "rho"),
-        "GVF (local, vol)", "Note",
+        "Seq", "Comp ID", "Fitting", "NPS", "Sched", "ID",
+        "Length", "Cum Length", "Elev Δ",
+        "Phase (flash)", "Velocity", "Reynolds", "Friction f",
+        "Mix Density", "dP Fric", "dP Fitting", "dP Elev", "dP Total",
+        "P In", "P Out",
+        "β (molar vap)", "Quality (mass)", "Vap Mass Flow",
+        "Liq Mass Flow", "MW Vapor", "MW Liquid",
+        "Vap Density", "Liq Density", "GVF (local, vol)", "Note",
     ]
+
+
+# quantity code per Pressure_Profile column (None = unitless), for the units row
+_PP_QTY = [
+    None, None, None, None, None, "Lin", "L", "L", "L", None, "v", None, None,
+    "rho", "dP", "dP", "dP", "dP", "P", "P", None, None, "mflow", "mflow",
+    None, None, "rho", "rho", None, None,
+]
+
+
+def _pp_units(u: "UN.UnitSystem") -> list[str]:
+    return [u.label(q) if q else "" for q in _PP_QTY]
 
 
 _PP_NCOL = 30
@@ -4562,11 +4572,14 @@ def _build_pressure_profile_sheet(
     _hdr(ws, _pp_headers(u), row=2)
     for ci in range(21, ncol + 1):
         ws.cell(2, ci).fill = PatternFill("solid", fgColor=GRNHDR)
-    ws.freeze_panes = "C3"
+    # dedicated units row (3) — units split out of the header captions
+    for ci, ulab in enumerate(_pp_units(u), 1):
+        _c(ws, 3, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
+    ws.freeze_panes = "C4"
     ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
 
     rho_l_lbft3  = sp.liq_density
-    data_row      = 3          # current Excel row for writing
+    data_row      = 4          # current Excel row for writing (row 3 = units)
     prev_line     = None
     chart_data_rows: list[tuple[int, float, float]] = []   # (excel_row, cum_ft, p_out)
 
@@ -4648,13 +4661,20 @@ def _build_pressure_profile_sheet(
         chart.x_axis.title = f"Cumulative Length ({u.label('L')})"
         chart.y_axis.title = f"Pressure ({u.label('P')})"
         chart.height, chart.width = 9, 24
-        # Build the chart from column 20 (P Out) across only data rows
+        # Build the chart from column 20 (P Out) across only data rows.
+        # (Row 3 is now the units row, so reference data rows directly and name
+        #  the series explicitly instead of titles_from_data.)
         first_dr = chart_data_rows[0][0]
         last_dr  = chart_data_rows[-1][0]
-        data  = Reference(ws, min_col=20, min_row=first_dr - 1, max_row=last_dr)
-        cats  = Reference(ws, min_col=8,  min_row=first_dr,     max_row=last_dr)
-        chart.add_data(data, titles_from_data=True)
+        data  = Reference(ws, min_col=20, min_row=first_dr, max_row=last_dr)
+        cats  = Reference(ws, min_col=8,  min_row=first_dr, max_row=last_dr)
+        chart.add_data(data, titles_from_data=False)
         chart.set_categories(cats)
+        try:
+            from openpyxl.chart.series import SeriesLabel
+            chart.series[0].tx = SeriesLabel(v=f"P Out ({u.label('P')})")
+        except Exception:
+            pass
         ws.add_chart(chart, f"A{sr + 2}")
 
     return sheet_title
@@ -4761,7 +4781,7 @@ def _build_stream_props_detail_sheet(
     ws = wb.create_sheet(sheet_title)
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
-    ncol = 4
+    ncol = 5
     ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
     _c(ws, 1, 1,
        f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
@@ -4789,11 +4809,11 @@ def _build_stream_props_detail_sheet(
            f"({u.disp('P', s.p_in_psia)} {u.label('P')})",
            bg=STEEL, fg=WHITE, sz=10, bold=True)
         r += 1
-        _hdr(ws, ["Property", "Total", "Vapor", "Liquid"], row=r)
+        _hdr(ws, ["Property", "Unit", "Total", "Vapor", "Liquid"], row=r)
         head = r
         r += 1
 
-        def row(label, tot, vap, liq, bold=False, section=False):
+        def row(label, tot, vap, liq, bold=False, section=False, unit=""):
             nonlocal r
             if section:
                 ws.merge_cells(f"A{r}:{get_column_letter(ncol)}{r}")
@@ -4802,46 +4822,49 @@ def _build_stream_props_detail_sheet(
                 return
             bg = LGRAY if (r - head) % 2 else WHITE
             _c(ws, r, 1, label, bg=bg, sz=9, bold=bold)
-            for ci, v in ((2, tot), (3, vap), (4, liq)):
+            _c(ws, r, 2, unit or "", bg=bg, fg=DGRAY, sz=8, ha="center")
+            for ci, v in ((3, tot), (4, vap), (5, liq)):
                 _c(ws, r, ci, "" if v is None else v, bg=bg, sz=9,
                    ha="right" if isinstance(v, (int, float)) else "left", bold=bold)
             r += 1
 
         row("FLOW RATES", None, None, None, section=True)
-        row(f"Molar Rate ({u.label('molflow')})",
-            u.disp("molflow", tot_moles, 3) if tot_moles else 0,
-            u.disp("molflow", fr.vap_moles, 3), u.disp("molflow", fr.liq_moles, 3))
-        row(f"Mass Rate ({u.label('mflow')})",
+        row("Molar Rate", u.disp("molflow", tot_moles, 3) if tot_moles else 0,
+            u.disp("molflow", fr.vap_moles, 3), u.disp("molflow", fr.liq_moles, 3),
+            unit=u.label("molflow"))
+        row("Mass Rate",
             u.disp("mflow", tot_mass, 1), u.disp("mflow", fr.vap_mass, 1),
-            u.disp("mflow", fr.liq_mass, 1))
-        row("Actual Vol Rate (ft3/hr)",
+            u.disp("mflow", fr.liq_mass, 1), unit=u.label("mflow"))
+        row("Actual Vol Rate",
             round((q_vap or 0) + (q_liq or 0), 1),
             round(q_vap, 1) if q_vap is not None else None,
-            round(q_liq, 1) if q_liq is not None else None)
+            round(q_liq, 1) if q_liq is not None else None, unit="ft3/hr")
 
         row("CONDITIONS", None, None, None, section=True)
-        row(f"Temperature ({u.label('T')})", u.disp("T", sp.temp_f, 2), None, None)
-        row(f"Pressure ({u.label('P')})", u.disp("P", s.p_in_psia), None, None)
+        row("Temperature", u.disp("T", sp.temp_f, 2), None, None, unit=u.label("T"))
+        row("Pressure", u.disp("P", s.p_in_psia), None, None, unit=u.label("P"))
         row("Molecular Weight",
             round(tot_mw, 4) if tot_mw else None,
-            round(fr.vap_mw, 4), round(fr.liq_mw, 4))
-        row("Vapor Mole Fraction", round(fr.beta, 4), None, None)
-        row("Liquid Mole Fraction", round(1.0 - fr.beta, 4), None, None)
-        row("Liquid Mass Fraction (quality)", round(1.0 - fr.quality, 4), None, None)
+            round(fr.vap_mw, 4), round(fr.liq_mw, 4), unit="g/mol")
+        row("Vapor Mole Fraction", round(fr.beta, 4), None, None, unit="-")
+        row("Liquid Mole Fraction", round(1.0 - fr.beta, 4), None, None, unit="-")
+        row("Liquid Mass Fraction (quality)", round(1.0 - fr.quality, 4),
+            None, None, unit="-")
 
         row("VAPOR PHASE PROPERTIES", None, None, None, section=True)
-        row(f"Density ({u.label('rho')})", None,
-            u.disp("rho", vap_rho, 6) if vap_rho else None, None)
-        row("Viscosity (cP)", None, sp.vap_visc, None)
-        row("Z Factor", None, sp.vap_z, None)
+        row("Density", None,
+            u.disp("rho", vap_rho, 6) if vap_rho else None, None,
+            unit=u.label("rho"))
+        row("Viscosity", None, sp.vap_visc, None, unit="cP")
+        row("Z Factor", None, sp.vap_z, None, unit="-")
 
         row("LIQUID PHASE PROPERTIES", None, None, None, section=True)
-        row(f"Density ({u.label('rho')})", None, None,
-            u.disp("rho", liq_rho, 4) if liq_rho else None)
-        row("Viscosity (cP)", None, None, sp.liq_visc)
+        row("Density", None, None,
+            u.disp("rho", liq_rho, 4) if liq_rho else None, unit=u.label("rho"))
+        row("Viscosity", None, None, sp.liq_visc, unit="cP")
         r += 2      # per-fitting composition now lives in "Composition Phase Splits"
 
-    cw(ws, 1, 30); cw(ws, 2, 16); cw(ws, 3, 16); cw(ws, 4, 16)
+    cw(ws, 1, 28); cw(ws, 2, 10); cw(ws, 3, 16); cw(ws, 4, 16); cw(ws, 5, 16)
     return sheet_title
 
 
