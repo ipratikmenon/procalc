@@ -228,8 +228,12 @@ class UnitSystem:
         return cls(system, overrides)
 
 
-def add_units_sheet(wb, system: str = "FPS", position: int = 0):
-    """Insert a styled UNITS sheet into ``wb`` (openpyxl Workbook)."""
+def add_units_sheet(wb, system: str = "FPS", position: int = 0,
+                    overrides: dict[str, str] | None = None):
+    """Insert a styled UNITS sheet into ``wb`` (openpyxl Workbook).
+
+    ``overrides`` (``{qty_code: unit}``) are written into the per-quantity
+    override column so ``UnitSystem.from_workbook`` reads them back."""
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -266,10 +270,11 @@ def add_units_sheet(wb, system: str = "FPS", position: int = 0):
     cell(5, 4, "Options", bg=NAVY, fg=WHITE, bold=True)
     r = 6
     sysd = SYSTEM_DEFAULTS.get((system or "FPS").upper(), SYSTEM_DEFAULTS["FPS"])
+    ov = overrides or {}
     for qty, name in QUANTITY_NAMES.items():
         cell(r, 1, qty, bg=LGRAY)
         cell(r, 2, name)
-        cell(r, 3, None, bg=AMBER)   # blank = system default
+        cell(r, 3, ov.get(qty), bg=AMBER)   # blank = system default
         opts = " | ".join(_CONVERTERS[qty].keys())
         cell(r, 4, f"default: {sysd[qty]}   |   {opts}", fg="808080", sz=9)
         r += 1

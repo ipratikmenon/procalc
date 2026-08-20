@@ -166,13 +166,32 @@ def new_project_rows() -> list[dict]:
 
 
 def write_input_workbook(rows: list[dict], out_path: str,
-                         unit_system: str = "FPS") -> str:
-    return H.write_input_workbook(rows, out_path, unit_system)
+                         unit_system: str = "FPS",
+                         unit_overrides: dict | None = None) -> str:
+    return H.write_input_workbook(rows, out_path, unit_system, unit_overrides)
+
+
+def unit_systems() -> list[str]:
+    return list(H.UN.SYSTEM_DEFAULTS.keys())
+
+
+def unit_quantities() -> list[tuple[str, str, dict]]:
+    """[(qty_code, display name, {unit: is_default_for_selected}) ...] for the
+    per-quantity override editor.  Returns code, name, and the allowed units
+    plus the FPS/SI defaults so the UI can show 'default' hints."""
+    out = []
+    conv = H.UN._CONVERTERS
+    for qty, name in H.UN.QUANTITY_NAMES.items():
+        units = list(conv.get(qty, {}).keys())
+        defs = {sys: H.UN.SYSTEM_DEFAULTS[sys].get(qty) for sys in H.UN.SYSTEM_DEFAULTS}
+        out.append((qty, name, {"units": units, "defaults": defs}))
+    return out
 
 
 def run(rows: list[dict], hmb_path: str, *, case: str = "Case 1",
         flash_mode: str = "isothermal", out_dir: str | None = None,
-        meta: dict | None = None, unit_system: str = "FPS") -> list[str]:
+        meta: dict | None = None, unit_system: str = "FPS",
+        unit_overrides: dict | None = None) -> list[str]:
     """Write a temp input workbook from the grid rows and run the engine.
 
     Returns the list of produced workbook paths (one per circuit).  Raises on
@@ -180,7 +199,7 @@ def run(rows: list[dict], hmb_path: str, *, case: str = "Case 1",
     """
     out_dir = out_dir or tempfile.mkdtemp(prefix="procalc_out_")
     inp = os.path.join(out_dir, "pipeline_input.xlsx")
-    write_input_workbook(rows, inp, unit_system)
+    write_input_workbook(rows, inp, unit_system, unit_overrides)
     results = H.run_noiso(inp, hmb_path, out_path=None, case=case,
                           flash_mode=flash_mode, meta=meta)
     # run_noiso writes into cwd when out_path is None; move them into out_dir

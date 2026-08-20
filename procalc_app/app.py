@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QToolBar, QSplitter,
                                QTableView, QTabWidget, QPlainTextEdit, QLabel,
                                QFileDialog, QComboBox, QLineEdit, QFormLayout,
                                QGroupBox, QVBoxLayout, QHBoxLayout, QMessageBox,
-                               QAbstractItemView, QStatusBar, QWidgetAction, QMenu)
+                               QAbstractItemView, QStatusBar, QWidgetAction, QMenu,
+                               QPushButton)
 
 import engine_api as api
 from model.grid_model import CircuitGridModel
@@ -92,10 +93,23 @@ class MainWindow(QMainWindow):
         for w in (QLabel("Case"), self.cb_case, QLabel("Flash"), self.cb_mode):
             row.addWidget(w)
         rw = QWidget(); rw.setLayout(row)
+        # units: system + per-quantity overrides (per project)
+        self.unit_overrides: dict = {}
+        self.cb_units = QComboBox(); self.cb_units.addItems(api.unit_systems())
+        self.cb_units.currentTextChanged.connect(lambda *_: self.unit_overrides.clear()
+                                                 or self.controller.schedule())
+        self.btn_units = QPushButton("Overrides…"); self.btn_units.setObjectName("Secondary")
+        self.btn_units.clicked.connect(self._edit_unit_overrides)
+        urow = QHBoxLayout()
+        for w in (QLabel("Units"), self.cb_units, self.btn_units):
+            urow.addWidget(w)
+        urow.addStretch(1)
+        uw = QWidget(); uw.setLayout(urow)
         form.addRow("Project", self.ed_project)
         form.addRow("Area", self.ed_area)
         form.addRow("Unit", self.ed_unit)
         form.addRow(rw)
+        form.addRow(uw)
         lv.addWidget(meta_box)
 
         self.view = QTableView()
@@ -167,10 +181,50 @@ class MainWindow(QMainWindow):
             "hmb_path": self.hmb_path,
             "case": self.cb_case.currentText() or "Case 1",
             "flash_mode": self.cb_mode.currentText() or "isothermal",
-            "units": "FPS",
+            "units": self.cb_units.currentText() or "FPS",
+            "unit_overrides": dict(self.unit_overrides),
             "meta": {"project": self.ed_project.text(), "area": self.ed_area.text(),
                      "unit": self.ed_unit.text()},
         }
+
+    def _edit_unit_overrides(self):
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QGridLayout,
+                                       QDialogButtonBox, QScrollArea)
+        sysname = self.cb_units.currentText() or "FPS"
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Per-quantity unit overrides — base: {sysname}")
+        dlg.resize(460, 520)
+        outer = QVBoxLayout(dlg)
+        outer.addWidget(QLabel("Leave a quantity on its system default, or pick a "
+                               "unit to override it for this project."))
+        area = QScrollArea(); area.setWidgetResizable(True)
+        inner = QWidget(); grid = QGridLayout(inner)
+        combos = {}
+        for i, (qty, name, info) in enumerate(api.unit_quantities()):
+            default = info["defaults"].get(sysname)
+            grid.addWidget(QLabel(f"{name}"), i, 0)
+            cb = QComboBox()
+            cb.addItem(f"(default: {default})", "")
+            for un in info["units"]:
+                cb.addItem(un, un)
+            cur = self.unit_overrides.get(qty)
+            if cur:
+                j = cb.findData(cur)
+                if j >= 0:
+                    cb.setCurrentIndex(j)
+            combos[qty] = cb
+            grid.addWidget(cb, i, 1)
+        area.setWidget(inner)
+        outer.addWidget(area, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        outer.addWidget(bb)
+        if dlg.exec():
+            self.unit_overrides = {q: cb.currentData() for q, cb in combos.items()
+                                   if cb.currentData()}
+            n = len(self.unit_overrides)
+            self.btn_units.setText(f"Overrides… ({n})" if n else "Overrides…")
+            self.controller.schedule()
 
     def _streams_for_delegate(self):
         if not self.hmb_path:

@@ -3259,7 +3259,8 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
 
 
 def write_input_workbook(rows: list[dict], out_path: str,
-                         unit_system: str = "FPS") -> str:
+                         unit_system: str = "FPS",
+                         unit_overrides: dict | None = None) -> str:
     """Write a minimal Pipeline_Input workbook the engine can read back.
 
     The GUI grid holds one row-dict per component keyed by the canonical
@@ -3272,7 +3273,7 @@ def write_input_workbook(rows: list[dict], out_path: str,
     Kept deliberately lean (no drop-downs / styling — the engine reads values,
     not formatting) so the autocalc temp-file write is fast."""
     from openpyxl import Workbook
-    usys = UN.UnitSystem(unit_system)
+    usys = UN.UnitSystem(unit_system, unit_overrides or None)
     wb = Workbook()
     ws = wb.active
     ws.title = "Pipeline_Input"
@@ -3291,7 +3292,8 @@ def write_input_workbook(rows: list[dict], out_path: str,
             out.append(v)
         ws.append(out)
 
-    UN.add_units_sheet(wb, usys.system, position=len(wb.worksheets))
+    UN.add_units_sheet(wb, usys.system, position=len(wb.worksheets),
+                       overrides=unit_overrides or None)
     wb.save(out_path)
     return out_path
 
