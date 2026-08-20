@@ -30,7 +30,6 @@ Usage:
 
 import os, sys, re, math
 from collections import OrderedDict
-import pandas as pd
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -342,27 +341,36 @@ def read_constants(path):
       name, CAS, MW, SLD, NBP_F, Tc_F, Pc_psia, Vc, Zc, omega,
       is_pseudo, estimated (bool), method
     """
-    df = pd.read_excel(path, header=None, dtype=object)
+    from openpyxl import load_workbook
+    _wb = load_workbook(path, read_only=True, data_only=True)
+    _ws = _wb.active
+    rows = list(_ws.iter_rows(values_only=True))
+    _wb.close()
     results = []
 
-    for ri in range(2, len(df)):
-        name = str(df.iloc[ri, 0]).strip()
+    def _cell(r, c):
+        return r[c] if (r is not None and c < len(r)) else None
+
+    for ri in range(2, len(rows)):
+        row = rows[ri]
+        c0 = _cell(row, 0)
+        name = str(c0).strip() if c0 is not None else ''
         if name in ('nan','') or not name: continue
 
-        mw   = sf(df.iloc[ri, 2])
-        sld  = sf(df.iloc[ri, 3])
-        nbp  = sf(df.iloc[ri, 4])
-        tc   = sf(df.iloc[ri, 5])
-        pc   = sf(df.iloc[ri, 6])
-        vc   = sf(df.iloc[ri, 7])
-        zc   = sf(df.iloc[ri, 8])
-        omega= sf(df.iloc[ri, 9])
-        cas  = str(df.iloc[ri, 1]).strip() if df.iloc[ri, 1] is not None else ''
-        pr_pen = sf(df.iloc[ri, 10])
-        srk_pen= sf(df.iloc[ri, 11])
-        parachor = sf(df.iloc[ri, 12])
+        mw   = sf(_cell(row, 2))
+        sld  = sf(_cell(row, 3))
+        nbp  = sf(_cell(row, 4))
+        tc   = sf(_cell(row, 5))
+        pc   = sf(_cell(row, 6))
+        vc   = sf(_cell(row, 7))
+        zc   = sf(_cell(row, 8))
+        omega= sf(_cell(row, 9))
+        cas  = str(_cell(row, 1)).strip() if _cell(row, 1) is not None else ''
+        pr_pen = sf(_cell(row, 10))
+        srk_pen= sf(_cell(row, 11))
+        parachor = sf(_cell(row, 12))
 
-        is_pseudo = (tc is None or str(df.iloc[ri, 5]).strip().lower() == 'missing')
+        is_pseudo = (tc is None or str(_cell(row, 5)).strip().lower() == 'missing')
 
         entry = {
             'name': name, 'CAS': cas, 'MW': mw,

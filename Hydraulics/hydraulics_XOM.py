@@ -316,6 +316,22 @@ F_TO_K_OFFSET = 459.67              # degF -> degR additive; K = degR / 1.8
 # ── Style ──────────────────────────────────────────────────────────────────
 NAVY="1F4973"; STEEL="2E75B6"; WHITE="FFFFFF"; LGRAY="F2F2F2"; DGRAY="404040"
 ORANGE="C55A11"; AMBER="FFF2CC"; GREEN="E2EFDA"; GRNHDR="375623"; RED="FCE4D6"
+
+# ── T.EN brand theme palette (from the corporate template) ──────────────────
+# Single source of the branded colours used on the output cover / headers;
+# the app mirrors these in its Qt theme so screen and workbook match.
+TEN_BLUE   = "0070EF"   # primary bright blue
+TEN_NAVY   = "004C84"   # dark navy (headers / title bands)
+TEN_TEAL   = "3D98B7"
+TEN_GREEN  = "80C7A0"
+TEN_LIME   = "A2C61C"
+TEN_AMBER  = "FDC300"
+TEN_SALMON = "EE7766"
+TEN_RED    = "E84242"   # FAIL / alarm
+TEN_GRAY   = "878787"
+TEN_LGRAY  = "DEDEDE"   # zebra / light fill
+_TEN_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "assets", "ten_logo.png")
 LTBLUE="DEEAF1"; PURPLE="7030A0"; MGRAY="A0A0A0"
 
 def _fill(h): return PatternFill("solid", fgColor=h)
@@ -364,6 +380,17 @@ def txt(v):
 #  1.  INTERNAL DIAMETER from piping spec + bore (PMS catalogue + ASME)
 # ════════════════════════════════════════════════════════════════════════
 _CLASS_BY_NAME = {c.name.upper(): c for c in PMS.CLASSES}
+
+
+def reload_pms(json_path=None):
+    """Reload the PMS catalogue (e.g. after the app uploads a new
+    gems_extracted.json) and rebuild the name index this module resolves
+    against.  resolve_id() uses the refreshed classes on its next call."""
+    PMS.reload(json_path)
+    global _CLASS_BY_NAME
+    _CLASS_BY_NAME = {c.name.upper(): c for c in PMS.CLASSES}
+    return len(PMS.CLASSES)
+
 
 # Map a numeric bore to the canonical NPS string used by asme_data.
 _NPS_BY_FLOAT = {
@@ -2201,6 +2228,190 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
     return ws
 
 
+def build_cover_sheet(wb, meta, circuit_id, stream_name, sheet_titles=None):
+    """Branded title/cover sheet (first in the workbook): T.EN logo, the
+    project identity block (Project / Area / P&ID / Unit / Case / Stream /
+    Date) and a contents legend, in the corporate theme palette."""
+    ws = wb.create_sheet("Cover")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = TEN_NAVY
+    for col, w in {"A": 3, "B": 26, "C": 34, "D": 6, "E": 26, "F": 34}.items():
+        ws.column_dimensions[col].width = w
+
+    # logo (top-left) — embedded if the asset is present
+    try:
+        if os.path.exists(_TEN_LOGO_PATH):
+            from openpyxl.drawing.image import Image as _XLImage
+            img = _XLImage(_TEN_LOGO_PATH)      # needs Pillow; skipped if absent
+            img.height, img.width = 46, 92      # the T.EN wordmark is ~2:1
+            ws.add_image(img, "B2")
+    except Exception:
+        pass
+    ws.row_dimensions[2].height = 46
+
+    _c(ws, 2, 3, "TECHNIP ENERGIES", fg=TEN_BLUE, sz=16, bold=True, border=False)
+    ws.merge_cells("C2:F2")
+
+    # title band
+    ws.merge_cells("B4:F4")
+    _c(ws, 4, 2, "HYDRAULIC & CONTROL-VALVE CALCULATION",
+       bg=TEN_NAVY, fg=WHITE, sz=14, bold=True, ha="center")
+    ws.row_dimensions[4].height = 24
+
+    m = meta or {}
+    from datetime import datetime as _dt
+    date_s = m.get("date") or _dt.now().strftime("%Y-%m-%d %H:%M")
+    fields = [
+        ("Project", m.get("project") or "—", "Unit", m.get("unit") or "—"),
+        ("Area", m.get("area") or "—", "Case", m.get("case") or "—"),
+        ("Circuit", circuit_id or "—", "Stream", stream_name or "—"),
+        ("P&ID No", m.get("pid") or m.get("pandid") or "—", "Date", date_s),
+        ("Prepared by", m.get("prepared_by") or "", "Units", m.get("units") or "FPS"),
+    ]
+    r = 6
+    for l1, v1, l2, v2 in fields:
+        _c(ws, r, 2, l1, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
+        _c(ws, r, 3, v1, sz=10)
+        _c(ws, r, 5, l2, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
+        _c(ws, r, 6, v2, sz=10)
+        r += 1
+
+    # contents legend
+    r += 1
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+    _c(ws, r, 2, "CONTENTS", bg=TEN_BLUE, fg=WHITE, sz=11, bold=True)
+    r += 1
+    _CONTENTS = {
+        "Cover": "This page", "Line_List": "Line list (per line summary)",
+        "Pressure_Profile": "Pressure/velocity/dP march per component",
+        "Flash_Profile": "Rigorous flash split per station",
+        "Line_List ": "", "Two_Phase_Regime": "Flow-regime screening",
+        "FIV_EI_T2.2": "Flow-induced vibration (EI T2.2)", "AIV": "Acoustic-induced vibration",
+    }
+    for title in (sheet_titles or []):
+        desc = _CONTENTS.get(title)
+        if title.startswith("CV_"):
+            desc = "Control-valve datasheet (IEC 60534)"
+        if desc is None:
+            continue
+        _c(ws, r, 2, title, sz=9, bold=True)
+        _c(ws, r, 3, desc, sz=9, border=False)
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=6)
+        r += 1
+
+    ws.sheet_view.zoomScale = 100
+    return ws
+
+
+_LINELIST_HEADERS = [
+    "Line No", "P&ID No", "From", "To", "Fluid / Stream", "Phase",
+    "NPS / Size", "Schedule", "Piping Spec", "Flange Class",
+    "Length", "Elev Δ", "Inlet P", "Outlet P", "Total ΔP",
+    "Max Velocity", "Components",
+]
+
+
+def build_line_list_sheet(wb, stations, station_lines, line_colors,
+                          circuit_id, stream_name, circuit_rows,
+                          meta=None, phase=None):
+    """One row per Line No in the circuit, aggregated from that line's
+    consecutive stations (station_lines is 1:1 with stations by index).
+
+    Reducers within a line are shown as an NPS/schedule range.  P&ID number
+    comes from the input rows' per-line 'PID Number'.  Values pass through the
+    active unit system for display."""
+    u = _u()
+    ws = wb.create_sheet("Line_List")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = STEEL
+    ncol = len(_LINELIST_HEADERS)
+
+    # per-line P&ID from the input rows
+    pid_by_line: dict[str, str] = {}
+    for r in (circuit_rows or []):
+        ln, pid = r.get("Line No"), r.get("PID Number")
+        if ln and pid and ln not in pid_by_line:
+            pid_by_line[ln] = str(pid)
+
+    # title band
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    proj = (meta or {}).get("project")
+    area = (meta or {}).get("area")
+    title = f"LINE LIST   |   Circuit {circuit_id}   |   Stream {stream_name}"
+    if proj:
+        title += f"   |   Project: {proj}"
+    if area:
+        title += f"   |   Area: {area}"
+    _c(ws, 1, 1, title, bg=NAVY, fg=WHITE, sz=11, bold=True)
+    ws.row_dimensions[1].height = 22
+
+    # header row 2
+    disp_hdr = {
+        "Length": u.hdr("Length", "L"), "Elev Δ": u.hdr("Elev Δ", "L"),
+        "Inlet P": u.hdr("Inlet P", "P"), "Outlet P": u.hdr("Outlet P", "P"),
+        "Total ΔP": u.hdr("Total ΔP", "dP"), "Max Velocity": u.hdr("Max Velocity", "v"),
+    }
+    for c, h in enumerate(_LINELIST_HEADERS, 1):
+        _c(ws, 2, c, disp_hdr.get(h, h), bg=STEEL, fg=WHITE, sz=9, bold=True,
+           ha="center", wrap=True)
+
+    # group station indices by Line No in first-appearance order
+    order, groups = [], {}
+    for i, ln in enumerate(station_lines or []):
+        key = ln if ln is not None else ""
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(i)
+
+    def _rng(vals):
+        vals = [v for v in vals if v not in (None, "")]
+        if not vals:
+            return "—"
+        uniq = list(dict.fromkeys(str(v) for v in vals))
+        return uniq[0] if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
+
+    r = 3
+    for ln in order:
+        grp = [stations[i] for i in groups[ln]]
+        if not grp:
+            continue
+        # pipe components (exclude zero-length boundary/valve rows for size stats)
+        pipes = [s for s in grp if (s.length_ft or 0) > 0] or grp
+        nps    = _rng([s.nps for s in pipes])
+        sched  = _rng([s.schedule for s in pipes])
+        spec   = _rng([s.spec for s in pipes])
+        flange = next((flange_class_for(s.spec) for s in pipes
+                       if s.spec and flange_class_for(s.spec)), None)
+        tot_len = sum((s.length_ft or 0) for s in grp)
+        tot_dz  = sum((s.dz_ft or 0) for s in grp)
+        p_in    = grp[0].p_in_psia
+        p_out   = grp[-1].p_out_psia
+        dp_tot  = (p_in - p_out) if (p_in is not None and p_out is not None) else None
+        vmax    = max((s.v_fts or 0) for s in grp)
+        fill = (line_colors or {}).get(ln)
+        vals = [
+            ln or "—", pid_by_line.get(ln, "—"),
+            grp[0].comp_id or "—", grp[-1].comp_id or "—",
+            stream_name, (phase or "").title() or "—",
+            nps, sched, spec, (flange or "—"),
+            u.disp("L", tot_len), u.disp("L", tot_dz),
+            u.disp("P", p_in), u.disp("P", p_out), u.disp("dP", dp_tot),
+            u.disp("v", vmax), len(grp),
+        ]
+        for c, v in enumerate(vals, 1):
+            _c(ws, r, c, v, bg=fill, sz=9,
+               ha="center" if c > 4 else "left")
+        r += 1
+
+    for c, w in enumerate([14, 14, 12, 12, 16, 10, 12, 11, 12, 11,
+                           10, 9, 10, 10, 10, 12, 11], 1):
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.freeze_panes = "C3"
+    ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
+    return ws
+
+
 def run(pcf_path, hmb_path, line_no=None, stream_name=None, out_path=None,
         interactive=True, case="Case 1", map_path=None):
     pipeline, components = PCF.parse_pcf(pcf_path)
@@ -2605,6 +2816,7 @@ INPUT_HEADERS: list[str] = [
     "Circuit",                # hydraulic circuit ID (e.g. C1).  All rows with the same
     #                           Circuit ID are chained in series into ONE workbook.
     "Line No",                # line identifier (e.g. ER-162)
+    "PID Number",             # P&ID drawing number for this line (per-line metadata)
     "HMB File",               # per-row HMB workbook override; blank → CLI default
     "Case",                   # per-row HMB case override; blank → CLI default
     "Stream Lookup",          # HMB stream key; blank → use manual property cells below
@@ -2671,6 +2883,7 @@ _MANUAL_PROP_COLS = [
 # Quantity None ⇒ value passes through unchanged (IDs, text, NPS inches, K, Z…).
 _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Circuit": ("Circuit", None), "Line No": ("Line No", None),
+    "PID Number": ("PID Number", None),
     "HMB File": ("HMB File", None), "Case": ("Case", None),
     "Stream Lookup": ("Stream Lookup", None), "Run Type": ("Run Type", None),
     "Seq": ("Seq", None),
@@ -2812,7 +3025,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     ws.auto_filter.ref = f"A2:{get_column_letter(_NCOL)}2"
 
     width_map = {
-        "Circuit": 9, "Line No": 12, "HMB File": 16, "Case": 10,
+        "Circuit": 9, "Line No": 12, "PID Number": 14, "HMB File": 16, "Case": 10,
         "Stream Lookup": 14, "Run Type": 10, "Seq": 6, "Start P (psia)": 12,
         "Upstream Line No": 14, "Upstream Seq": 11,
         "Flow Fraction from Main": 14, "Temp (degF)": 11, "Vapor Mass Flow": 14,
@@ -3046,6 +3259,44 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     return out_path
 
 
+def write_input_workbook(rows: list[dict], out_path: str,
+                         unit_system: str = "FPS") -> str:
+    """Write a minimal Pipeline_Input workbook the engine can read back.
+
+    The GUI grid holds one row-dict per component keyed by the canonical
+    INPUT_HEADERS (values in internal FPS).  This writes the banner (row 1),
+    the display headers (row 2, via _display_header so read_pipeline_input's
+    unit-tolerant matching resolves them) and one data row each (row 3+),
+    converting quantity columns to the chosen display units, then appends the
+    UNITS sheet.  read_pipeline_input round-trips it back to internal FPS.
+
+    Kept deliberately lean (no drop-downs / styling — the engine reads values,
+    not formatting) so the autocalc temp-file write is fast."""
+    from openpyxl import Workbook
+    usys = UN.UnitSystem(unit_system)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pipeline_Input"
+    ncol = len(INPUT_HEADERS)
+    ws.append([""] * ncol)                                   # row 1 banner
+    ws.cell(1, 1, "NO-ISO PIPELINE INPUT (generated by the app)")
+    ws.append([_display_header(h, usys) for h in INPUT_HEADERS])   # row 2
+
+    for r in rows:
+        out = []
+        for h in INPUT_HEADERS:
+            v = r.get(h)
+            qty = _FIELD_META.get(h, (h, None))[1]
+            if qty and isinstance(v, (int, float)):
+                v = usys.from_internal(qty, v)
+            out.append(v)
+        ws.append(out)
+
+    UN.add_units_sheet(wb, usys.system, position=len(wb.worksheets))
+    wb.save(out_path)
+    return out_path
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Input reader
 # ════════════════════════════════════════════════════════════════════════
@@ -3096,6 +3347,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
     current_hmb:     str | None = None   # HMB File carried within circuit
     current_case:    str | None = None   # Case carried within circuit
     current_main_line: str | None = None # most recent Main Line No (default Upstream Line No)
+    line_pid: dict[str, str] = {}        # PID Number carried forward within a Line No
 
     for rv in ws.iter_rows(min_row=3, values_only=True):
         if not rv or all(v is None for v in rv):
@@ -3155,9 +3407,13 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
         if run_type == "Main":
             current_main_line = line_no
 
+        pid_raw = txt(g(rv, "PID Number"))
+        if pid_raw and line_no:
+            line_pid[line_no] = pid_raw
         rows.append({
             "Circuit":          circuit,
             "Line No":          line_no,
+            "PID Number":       pid_raw or line_pid.get(line_no or ""),
             "HMB File":         current_hmb,
             "Case":             current_case,
             "Stream Lookup":    current_stream,
@@ -5031,6 +5287,7 @@ def run_noiso(
         case: str = "Case 1",
         map_path: str | None = None,
         flash_mode: str = "isothermal",
+        meta: dict | None = None,
 ) -> list[tuple[str, list[HE.Station], list, HE.StreamProps]]:
     """
     Process hydraulic circuits from ``input_path``.
@@ -5327,6 +5584,15 @@ def run_noiso(
         # ── Input_Pipeline and README ─────────────────────────────────────
         circuit_rows = [r for r in all_rows if r["Circuit"] == cid]
         hmb_meta = _parse_hmb_filename(def_hmb)
+        circuit_meta = dict(hmb_meta or {})
+        circuit_meta.update({k: v for k, v in (meta or {}).items() if v})
+        circuit_meta.setdefault("case", def_case)
+
+        # ── Line List (one row per Line No in the circuit) ────────────────
+        if main_stations:
+            HE.build_line_list_sheet(wb, main_stations, station_lines, lc,
+                                     cid, sk, circuit_rows,
+                                     meta=circuit_meta, phase=phase)
         _build_input_sheet(wb, circuit_rows, cid,
                            stream_name=sk,
                            start_p=p_start,
@@ -5336,19 +5602,41 @@ def run_noiso(
         _build_readme_noiso(wb, circuit_label, sk, sp, phase,
                             input_path, hmb_path, flash_mode)
 
+        # ── Branded cover sheet (built last so it can list the contents) ──
+        cover_meta = dict(circuit_meta)
+        cover_meta.setdefault("units", _u().system)
+        _pids = list(dict.fromkeys(
+            str(r.get("PID Number")) for r in circuit_rows
+            if r.get("PID Number")))
+        if _pids:
+            cover_meta["pid"] = ", ".join(_pids)
+        HE.build_cover_sheet(wb, cover_meta, cid, sk,
+                             sheet_titles=[s.title for s in wb.worksheets])
+
         # ── Sheet order ──────────────────────────────────────────────────
-        order = (pp_sheets + fp_sheets + scen_sheets +
+        order = (["Cover", "Line_List"] + pp_sheets + fp_sheets + scen_sheets +
                  ["Composition Splits",
                   "Component_Detail", "Stream_Props"]
                  + sp_sheets + cv_sheets +
                  ["FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
                  + fp_map_sheets
                  + ["Input_Pipeline", "README"])
-        for name in reversed(order):
-            if name in [s.title for s in wb.worksheets]:
-                wb.move_sheet(name, offset=-len(wb.worksheets))
         if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
             del wb["Sheet"]
+        # deterministic reorder: sheets named in `order` first (in that order),
+        # then any leftover sheets in their existing order.  (Replaces the old
+        # move_sheet loop, whose negative offsets wrapped for late-created
+        # sheets like Line_List.)
+        present = {s.title: s for s in wb.worksheets}
+        seen = set()
+        ordered = []
+        for name in order:
+            s = present.get(name)
+            if s is not None and name not in seen:
+                ordered.append(s)
+                seen.add(name)
+        ordered += [s for s in wb.worksheets if s.title not in seen]
+        wb._sheets = ordered
 
         if out_path is None:
             safe_c = re.sub(r"[^A-Za-z0-9_-]", "_", str(cid))

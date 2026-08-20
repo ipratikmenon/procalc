@@ -17,10 +17,46 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, replace
+import shutil
+from dataclasses import asdict, dataclass, field, replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_JSON = os.path.join(_HERE, "gems_extracted.json")
+_JSON = os.path.join(_HERE, "gems_extracted.json")     # bundled catalogue (seed)
+
+
+def user_json_path() -> str:
+    """Writable per-user PMS catalogue location.
+
+    The app edits / uploads the piping catalogue here so a project change never
+    touches the bundled seed.  Windows: %LOCALAPPDATA%/Procalc/pms.json;
+    otherwise ~/.local/share/Procalc/pms.json.  An env override
+    (PROCALC_PMS_JSON) wins so tests / the app can point it anywhere.
+    """
+    env = os.environ.get("PROCALC_PMS_JSON")
+    if env:
+        return env
+    base = (os.environ.get("LOCALAPPDATA")
+            or os.path.join(os.path.expanduser("~"), ".local", "share"))
+    return os.path.join(base, "Procalc", "pms.json")
+
+
+def _active_json_path() -> str:
+    """The catalogue actually loaded: the user file if present, else the seed.
+
+    On first use the bundled seed is copied to the user path so the user always
+    has an editable copy (best-effort; falls back to the seed if the copy
+    fails, e.g. a read-only home)."""
+    up = user_json_path()
+    if os.path.exists(up):
+        return up
+    try:
+        os.makedirs(os.path.dirname(up), exist_ok=True)
+        if os.path.exists(_JSON):
+            shutil.copyfile(_JSON, up)
+            return up
+    except OSError:
+        pass
+    return _JSON
 
 
 @dataclass(frozen=True)
@@ -200,5 +236,65 @@ def load_classes(json_path: str = _JSON) -> list[PipingClass]:
     return out
 
 
+def _to_jsonable(pc: PipingClass) -> dict:
+    """PipingClass -> plain dict for gems_extracted.json (round-trips through
+    _class_from_dict).  pipe_rules / components become lists of dicts."""
+    d = asdict(pc)
+    d["pipe_rules"] = [dict(r) for r in d.get("pipe_rules", ())]
+    d["components"] = [dict(c) for c in d.get("components", ())]
+    return d
+
+
+def save_user_classes(classes: list[PipingClass],
+                      json_path: str | None = None) -> str:
+    """Write the (non-curated) catalogue to the user pms.json.
+
+    CURATED classes stay code-owned (authoritative overrides) and are not
+    written — they are re-applied by load_classes on the next reload.  Returns
+    the path written."""
+    path = json_path or user_json_path()
+    curated_names = {pc.name.upper() for pc in CURATED}
+    payload = [_to_jsonable(pc) for pc in classes
+               if pc.name.upper() not in curated_names]
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=1)
+    return path
+
+
+def install_catalogue(src_json: str, json_path: str | None = None) -> int:
+    """Validate an uploaded gems_extracted.json and make it the active
+    catalogue.  Parses every entry through _class_from_dict (raising on a bad
+    file, so the app can reject it), then copies it to the user path and
+    reloads.  Returns the number of classes loaded."""
+    with open(src_json, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("PMS catalogue must be a JSON list of classes")
+    bad = []
+    for d in data:
+        try:
+            _class_from_dict(d)
+        except Exception as e:  # noqa: BLE001
+            bad.append(f"{d.get('name', '?')}: {e}")
+    if bad:
+        raise ValueError("invalid classes:\n  " + "\n  ".join(bad[:20]))
+    path = json_path or user_json_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    shutil.copyfile(src_json, path)
+    reload(path)
+    return len(CLASSES)
+
+
+def reload(json_path: str | None = None) -> None:
+    """Rebuild the module-level CLASSES in place from json_path (or the active
+    user/seed path).  Engines holding their own name index must re-index (see
+    hydraulics_XOM.reload_pms)."""
+    global CLASSES
+    CLASSES[:] = sorted(load_classes(json_path or _active_json_path()),
+                        key=lambda pc: pc.name)
+
+
 # The project class catalogue, sorted by name for stable output.
-CLASSES: list[PipingClass] = sorted(load_classes(), key=lambda pc: pc.name)
+CLASSES: list[PipingClass] = sorted(load_classes(_active_json_path()),
+                                    key=lambda pc: pc.name)
