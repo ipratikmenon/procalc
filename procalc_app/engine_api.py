@@ -119,6 +119,31 @@ def resolve_id(spec, bore):
     return H.resolve_id(spec, bore)
 
 
+def resolve_id_preview(working_class, bore):
+    """resolve_id using an UNSAVED, edited PipingClass (for the PMS live
+    preview) without mutating the active catalogue.  Temporarily swaps the
+    working class into the engine's name index, resolves, then restores."""
+    key = (working_class.name or "").upper()
+    prev = H._CLASS_BY_NAME.get(key)
+    try:
+        H._CLASS_BY_NAME[key] = working_class
+        return H.resolve_id(working_class.name, bore)
+    finally:
+        if prev is not None:
+            H._CLASS_BY_NAME[key] = prev
+        else:
+            H._CLASS_BY_NAME.pop(key, None)
+
+
+def pms_classes_module():
+    """Expose the pms_classes module (dataclasses + CLASSES) for the manager."""
+    return PMS
+
+
+def wall_for(nps, schedule):
+    return H.wall_for(nps, schedule)
+
+
 def flange_class_for(spec):
     return H.flange_class_for(spec)
 
