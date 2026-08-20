@@ -4745,8 +4745,9 @@ def _build_stream_props_detail_sheet(
         stream_name: str,
         run_label: str = "Main",
 ) -> str:
-    """One Property/Total/Vapor/Liquid block per fitting, plus a per-fitting
-    component vapor/liquid mole-fraction table.
+    """One Property/Total/Vapor/Liquid block per fitting.  (The per-fitting
+    component vapor/liquid mole-fraction table now lives in its own
+    "Composition Phase Splits" sheet.)
 
     Only properties that the engine actually re-evaluates at each fitting's
     (T, P) are shown (flow rates, density, viscosity, Z, mole/mass
@@ -4838,28 +4839,95 @@ def _build_stream_props_detail_sheet(
         row(f"Density ({u.label('rho')})", None, None,
             u.disp("rho", liq_rho, 4) if liq_rho else None)
         row("Viscosity (cP)", None, None, sp.liq_visc)
-        r += 1
-
-        # ── Component vapor/liquid mole-fraction table for this fitting ──
-        if fracs:
-            names = sorted(fracs.keys(), key=lambda n: -(fracs[n][0] + fracs[n][1]))
-            _c(ws, r, 1, "Component Mole Fraction", bg=DGRAY, fg=WHITE, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, name, bg=GRNHDR, fg=WHITE, sz=8, bold=True)
-            r += 1
-            _c(ws, r, 1, "Vapor (y)", bg=LGRAY, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, round(fracs[name][0], 6), sz=8, ha="right")
-            r += 1
-            _c(ws, r, 1, "Liquid (x)", bg=LGRAY, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, round(fracs[name][1], 6), sz=8, ha="right")
-            r += 2
-        else:
-            r += 1
+        r += 2      # per-fitting composition now lives in "Composition Phase Splits"
 
     cw(ws, 1, 30); cw(ws, 2, 16); cw(ws, 3, 16); cw(ws, 4, 16)
     return sheet_title
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Composition Phase Splits sheet (vapor y / liquid x per component)
+# ════════════════════════════════════════════════════════════════════════
+def build_composition_phase_splits_sheet(
+        wb: Workbook,
+        stations: list,
+        flashes: list,
+        comp_fracs: list[dict],
+        sp,
+        circuit_id: str,
+        stream_name: str,
+        station_lines: list[str] | None = None,
+        line_colors: dict[str, str] | None = None,
+        run_label: str = "Main",
+) -> str:
+    """Component phase split across the sequence: components DOWN the rows, and
+    for every fitting a Vapor (y) / Liquid (x) mole-fraction column pair grouped
+    under that fitting's header.  Data comes straight from ``comp_fracs`` (each
+    element ``{component: (y, x)}`` from ``_feed_comp_mole_fracs``)."""
+    name = ("Composition Phase Splits" if run_label == "Main"
+            else f"Comp Phase Splits {run_label}")[:31]
+    ws = wb.create_sheet(name)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = PURPLE
+
+    # stations that actually carry a composition
+    cols = [(j, s, comp_fracs[j]) for j, s in enumerate(stations)
+            if j < len(comp_fracs) and comp_fracs[j]]
+    ncol = 1 + 2 * len(cols)
+    last_col = get_column_letter(max(ncol, 2))
+    ws.merge_cells(f"A1:{last_col}1")
+    _c(ws, 1, 1,
+       f"COMPOSITION PHASE SPLITS (vapor y / liquid x)   |   Circuit {circuit_id}"
+       f"   |   Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}",
+       bg=NAVY, fg=WHITE, sz=11, bold=True)
+    ws.row_dimensions[1].height = 22
+
+    if not cols:
+        _c(ws, 3, 1,
+           "No composition available — Stream Lookup blank (manual stream) or "
+           "no component data in the HMB.", sz=9, fg=ORANGE)
+        cw(ws, 1, 60)
+        return name
+
+    # header: A2:A3 "Component"; per station a merged pair over (y, x)
+    _c(ws, 2, 1, "Component", bg=NAVY, fg=WHITE, sz=9, bold=True, ha="left")
+    _c(ws, 3, 1, "", bg=NAVY)
+    ws.merge_cells("A2:A3")
+    for k, (j, s, _fr) in enumerate(cols):
+        c0 = 2 + 2 * k
+        ln = station_lines[j] if (station_lines and j < len(station_lines)) else None
+        bg = (line_colors or {}).get(ln, STEEL) if line_colors else STEEL
+        ws.merge_cells(start_row=2, start_column=c0, end_row=2, end_column=c0 + 1)
+        _c(ws, 2, c0, f"{s.seq} · {s.comp_id or ''}".strip(),
+           bg=bg, fg=NAVY, sz=8, bold=True, ha="center", wrap=True)
+        _c(ws, 3, c0, "Vapor (y)", bg=LGRAY, sz=8, bold=True, ha="center")
+        _c(ws, 3, c0 + 1, "Liquid (x)", bg=LGRAY, sz=8, bold=True, ha="center")
+    ws.row_dimensions[2].height = 26
+
+    # ordered union of component names (first appearance = feed order)
+    names: list[str] = []
+    seen: set = set()
+    for _j, _s, fr in cols:
+        for nm in fr:
+            if nm not in seen:
+                seen.add(nm)
+                names.append(nm)
+
+    r = 4
+    for nm in names:
+        _c(ws, r, 1, nm, bg=LGRAY, sz=8, ha="left")
+        for k, (_j, _s, fr) in enumerate(cols):
+            c0 = 2 + 2 * k
+            y, x = fr.get(nm, (None, None))
+            _c(ws, r, c0, round(y, 6) if y else "", sz=8, ha="right")
+            _c(ws, r, c0 + 1, round(x, 6) if x else "", sz=8, ha="right")
+        r += 1
+
+    cw(ws, 1, 20)
+    for c in range(2, ncol + 1):
+        cw(ws, c, 11)
+    ws.freeze_panes = "B4"
+    return name
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -5487,6 +5555,11 @@ def run_noiso(
             wb, main_stations, main_comps, main_mw, cid, sk,
             station_lines=station_lines, line_colors=lc)
 
+        # ── Composition Phase Splits (vapor y / liquid x per component) ────
+        ph_sheets = [build_composition_phase_splits_sheet(
+            wb, main_stations, main_flashes, main_cfracs, sp, cid, sk,
+            station_lines=station_lines, line_colors=lc, run_label="Main")]
+
         # ── Branch sheets ────────────────────────────────────────────────
         sp_sheets = [_build_stream_props_detail_sheet(
             wb, main_stations, main_flashes, main_cfracs, sp,
@@ -5503,6 +5576,9 @@ def run_noiso(
             sp_sheets.append(_build_stream_props_detail_sheet(
                 wb, sts, fls, cfracs, sp,
                 circuit_id=cid, stream_name=sk, run_label=label))
+            ph_sheets.append(build_composition_phase_splits_sheet(
+                wb, sts, fls, cfracs, sp, cid, sk,
+                station_lines=b_lns, line_colors=lc, run_label=label))
 
         # ── Control-valve datasheets + full Min/Max hydraulic runs ─────────
         # Datasheet Min/Norm/Max come from THREE full circuit re-marches at
@@ -5615,8 +5691,8 @@ def run_noiso(
 
         # ── Sheet order ──────────────────────────────────────────────────
         order = (["Cover", "Line_List"] + pp_sheets + fp_sheets + scen_sheets +
-                 ["Composition Splits",
-                  "Component_Detail", "Stream_Props"]
+                 ["Composition Splits"] + ph_sheets +
+                 ["Component_Detail", "Stream_Props"]
                  + sp_sheets + cv_sheets +
                  ["FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
                  + fp_map_sheets
