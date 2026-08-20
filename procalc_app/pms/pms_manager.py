@@ -247,32 +247,38 @@ class PMSManagerDialog(QDialog):
 
     def _style(self):
         t = _TEN
+        blue = t.get('blue', '#0070EF'); navy = t.get('navy', '#004C84')
         self.setStyleSheet(f"""
-        QDialog {{ background: {t.get('bg', '#F4F7FA')};
-            color: {t.get('text', '#20303A')};
-            font-family: 'Segoe UI','Noto Sans',Arial; font-size: 12px; }}
-        QGroupBox {{ font-weight: 600; border: 1px solid {t.get('lgray', '#DEDEDE')};
-            border-radius: 6px; margin-top: 8px; padding-top: 8px;
-            background: {t.get('panel', '#FFFFFF')}; }}
-        QGroupBox::title {{ subcontrol-origin: margin; left: 10px;
-            color: {t.get('navy', '#004C84')}; }}
-        QPushButton {{ background: {t.get('blue', '#0070EF')}; color: white;
-            border: 0; padding: 6px 14px; border-radius: 5px; font-weight: 600; }}
-        QPushButton:hover {{ background: {t.get('navy', '#004C84')}; }}
-        QPushButton:disabled {{ background: {t.get('gray', '#878787')}; }}
-        QPushButton#LoadCatalogue {{ background: {t.get('navy', '#004C84')};
-            font-size: 13px; padding: 8px 18px; }}
-        QPushButton#LoadCatalogue:hover {{ background: {t.get('blue', '#0070EF')}; }}
-        QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QTableWidget {{
-            background: white; border: 1px solid {t.get('gray', '#878787')};
-            border-radius: 4px; padding: 3px 6px; }}
-        QLabel#EditorHeader {{ color: {t.get('navy', '#004C84')};
-            font-weight: 700; font-size: 14px; }}
+        QDialog {{ background: #FFFFFF; color: #1B2A33;
+            font-family: 'Inter','Segoe UI',system-ui,Arial; font-size: 12.5px; }}
+        QGroupBox {{ font-weight: 600; border: 1px solid #E6E9EF;
+            border-radius: 10px; margin-top: 10px; padding: 10px 8px 8px 8px;
+            background: #FFFFFF; }}
+        QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 4px;
+            color: {navy}; }}
+        QPushButton {{ background: {blue}; color: white;
+            border: 0; padding: 7px 14px; border-radius: 8px; font-weight: 600; }}
+        QPushButton:hover {{ background: {navy}; }}
+        QPushButton:disabled {{ background: #AEB9C2; }}
+        QPushButton#LoadCatalogue {{ background: {blue}; font-size: 13px;
+            padding: 8px 18px; }}
+        QPushButton#LoadCatalogue:hover {{ background: {navy}; }}
+        QLineEdit, QComboBox, QDoubleSpinBox {{
+            background: white; border: 1px solid #D8DEE6;
+            border-radius: 8px; padding: 4px 8px; }}
+        QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{
+            border: 1px solid {blue}; }}
+        QListWidget, QTableWidget {{ background: white; border: 1px solid #E6E9EF;
+            border-radius: 8px; gridline-color: #EDF0F3;
+            alternate-background-color: #FAFBFC;
+            selection-background-color: {blue}; selection-color: white; }}
+        QLabel#EditorHeader {{ color: {navy}; font-weight: 700; font-size: 14px; }}
         QLabel#Warn {{ color: {t.get('salmon', '#EE7766')}; font-weight: 600; }}
-        QLabel#Status {{ color: {t.get('navy', '#004C84')}; }}
+        QLabel#Status {{ color: {navy}; }}
         QLabel#Preview {{ font-family: 'Consolas','DejaVu Sans Mono',monospace; }}
-        QHeaderView::section {{ background: {t.get('navy', '#004C84')};
-            color: white; padding: 4px 6px; border: 0; font-weight: 600; }}
+        QHeaderView::section {{ background: #EAF3FE; color: {navy};
+            padding: 5px 8px; border: 0; border-right: 1px solid #E6E9EF;
+            border-bottom: 1px solid #E6E9EF; font-weight: 600; }}
         """)
 
     # ── class list ──────────────────────────────────────────────────────

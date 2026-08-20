@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         act("PMS…", self._open_pms)
         act("Export…", self._export)
+        # make the primary Run button read as a solid blue pill
+        rb = tb.widgetForAction(self.run_act)
+        if rb is not None:
+            rb.setObjectName("RunBtn")
 
     def _build_central(self):
         split = QSplitter(Qt.Horizontal)
@@ -115,7 +119,8 @@ class MainWindow(QMainWindow):
         self.err_bar = QLabel("")
         self.err_bar.setWordWrap(True)
         self.err_bar.setStyleSheet(
-            "background:#E84242; color:white; padding:6px 10px; font-weight:600;")
+            "background:#FDECEC; color:#C0392B; padding:7px 12px; font-weight:600;"
+            "border-left:3px solid #E84242; border-bottom:1px solid #F3C6C6;")
         self.err_bar.hide()
         rv.addWidget(self.err_bar)
         right = QTabWidget()
