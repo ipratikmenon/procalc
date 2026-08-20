@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QToolBar, QSplitter,
                                QTableView, QTabWidget, QPlainTextEdit, QLabel,
                                QFileDialog, QComboBox, QLineEdit, QFormLayout,
                                QGroupBox, QVBoxLayout, QHBoxLayout, QMessageBox,
-                               QAbstractItemView, QStatusBar, QWidgetAction)
+                               QAbstractItemView, QStatusBar, QWidgetAction, QMenu)
 
 import engine_api as api
 from model.grid_model import CircuitGridModel
@@ -107,14 +107,25 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.view, 1)
         split.addWidget(left)
 
-        # right: results + log tabs
+        # right: results + log tabs, with a dismissible error banner on top
+        right_wrap = QWidget()
+        rv = QVBoxLayout(right_wrap)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(0)
+        self.err_bar = QLabel("")
+        self.err_bar.setWordWrap(True)
+        self.err_bar.setStyleSheet(
+            "background:#E84242; color:white; padding:6px 10px; font-weight:600;")
+        self.err_bar.hide()
+        rv.addWidget(self.err_bar)
         right = QTabWidget()
+        rv.addWidget(right, 1)
         self.results = ResultsView()
         right.addTab(self.results, "Results")
         self.log_view = QPlainTextEdit(); self.log_view.setReadOnly(True)
         right.addTab(self.log_view, "Log")
         self.right_tabs = right
-        split.addWidget(right)
+        split.addWidget(right_wrap)
         split.setSizes([720, 640])
         self.setCentralWidget(split)
 
@@ -193,6 +204,15 @@ class MainWindow(QMainWindow):
         self.controller.auto = on
         self.auto_act.setText("Auto ●" if on else "Auto")
         if on:
+            rows = self.model.rows
+            heavy = len(rows) > 60 or any(
+                str(r.get("Fitting Name", "")).lower() == "control valve" for r in rows)
+            if heavy:
+                QMessageBox.information(
+                    self, "Auto-calc",
+                    "This circuit has control valves or many rows — each edit "
+                    "triggers a full re-march (control valves run 3×). Auto-calc "
+                    "is on; switch it off if edits feel slow.")
             self.controller.schedule()
 
     def _on_grid_edited(self):
@@ -206,8 +226,50 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "PMS", f"PMS manager: {e}")
 
     def _export(self):
-        QMessageBox.information(self, "Export",
-                                "Export to Excel/PDF arrives in the next build step.")
+        path = self.results.current_workbook_path()
+        if not path:
+            QMessageBox.information(self, "Export", "Run a calculation first.")
+            return
+        sheet = self.results.current_sheet_title()
+        menu = QMenu(self)
+        menu.addAction("Excel — whole workbook (.xlsx)",
+                       lambda: self._do_export("xlsx_wb", path, sheet))
+        menu.addAction(f"Excel — current sheet ({sheet}) (.xlsx)",
+                       lambda: self._do_export("xlsx_sheet", path, sheet))
+        menu.addSeparator()
+        menu.addAction("PDF — whole workbook (.pdf)",
+                       lambda: self._do_export("pdf_wb", path, sheet))
+        menu.addAction(f"PDF — current sheet ({sheet}) (.pdf)",
+                       lambda: self._do_export("pdf_sheet", path, sheet))
+        menu.exec(self.cursor().pos())
+
+    def _do_export(self, kind, src, sheet):
+        from results import export as EX
+        logo = api.LOGO_PATH
+        try:
+            if kind == "xlsx_wb":
+                dest, _ = QFileDialog.getSaveFileName(self, "Export workbook", "results.xlsx", "Excel (*.xlsx)")
+                if dest:
+                    EX.export_excel_workbook(src, dest)
+            elif kind == "xlsx_sheet":
+                dest, _ = QFileDialog.getSaveFileName(self, "Export sheet", f"{sheet}.xlsx", "Excel (*.xlsx)")
+                if dest:
+                    EX.export_excel_sheet(src, sheet, dest)
+            elif kind == "pdf_wb":
+                dest, _ = QFileDialog.getSaveFileName(self, "Export PDF", "results.pdf", "PDF (*.pdf)")
+                if dest:
+                    EX.export_pdf_workbook(src, dest, logo_path=logo)
+            elif kind == "pdf_sheet":
+                dest, _ = QFileDialog.getSaveFileName(self, "Export PDF", f"{sheet}.pdf", "PDF (*.pdf)")
+                if dest:
+                    EX.export_pdf_sheet(src, sheet, dest, logo_path=logo)
+            else:
+                return
+            if dest:
+                self._log(f"Exported: {dest}")
+                self.statusBar().showMessage(f"Exported {os.path.basename(dest)}", 5000)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(e))
 
     # ── run signals ──
     def _set_running(self, running):

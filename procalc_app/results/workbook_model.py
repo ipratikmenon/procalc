@@ -17,21 +17,40 @@ def _argb_to_qcolor(rgb):
         return None
 
 
+def _decimals(nf):
+    """Count the '0'/'#' placeholders after the decimal point in a format."""
+    if "." not in nf:
+        return 0
+    frac = nf.split(".", 1)[1]
+    n = 0
+    for ch in frac:
+        if ch in "0#":
+            n += 1
+        elif ch in "%_)eE ":
+            continue
+        else:
+            break
+    return min(max(n, 0), 6)
+
+
 def _fmt(value, number_format):
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float)):
-        nf = number_format or "General"
+        nf = (number_format or "General").strip()
         try:
-            if nf.endswith("%"):
-                dec = nf.count("0", nf.find(".")) if "." in nf else 0
-                return f"{value * 100:.{dec}f}%"
-            if "." in nf:
-                dec = len(nf.split(".")[-1].replace("_", "").replace(")", "").replace("%", ""))
-                dec = min(max(dec, 0), 6)
-                return f"{value:,.{dec}f}" if "," in nf else f"{value:.{dec}f}"
-            if nf in ("#,##0", "0"):
-                return f"{value:,.0f}" if "," in nf else f"{value:.0f}"
+            if nf in ("General", "@", ""):
+                if isinstance(value, int) or float(value).is_integer():
+                    return str(int(value))
+                return f"{value:.6g}"
+            grp = "," in nf                       # thousands separator, e.g. #,##0
+            if nf.endswith("%") or "0.0%" in nf or "0%" in nf:
+                dec = _decimals(nf)
+                return f"{value * 100:,.{dec}f}%" if grp else f"{value * 100:.{dec}f}%"
+            dec = _decimals(nf)                   # covers 0.0 / 0.00 / 0.000 / #,##0.00
+            return f"{value:,.{dec}f}" if grp else f"{value:.{dec}f}"
         except Exception:
             pass
         if isinstance(value, float):

@@ -27,6 +27,46 @@ from PySide6.QtWidgets import (
 
 import engine_api as api
 
+
+# short material code from the full MOC text (KCS / LTCS / SS304 / A20 …)
+_MOC_RULES = [
+    ("low temp", "LTCS"), ("lt carbon", "LTCS"), ("impact tested", "LTCS"),
+    ("killed carbon", "KCS"), ("carbon steel", "CS"), ("carbon stl", "CS"),
+    ("304l", "SS304L"), ("304", "SS304"), ("316l", "SS316L"), ("316", "SS316"),
+    ("321", "SS321"), ("347", "SS347"), ("317", "SS317"),
+    ("duplex", "DSS"), ("2205", "DSS"), ("2507", "SDSS"),
+    ("alloy 20", "A20"), ("n08020", "A20"), ("825", "A825"), ("625", "IN625"),
+    ("inconel", "INC"), ("incoloy", "INC"), ("monel", "MONEL"),
+    ("hastelloy", "HAST"), ("nickel", "NI"),
+    ("5cr", "5Cr"), ("5 cr", "5Cr"), ("9cr", "9Cr"), ("9 cr", "9Cr"),
+    ("1.25cr", "1¼Cr"), ("2.25cr", "2¼Cr"), ("chrome", "Cr-Mo"),
+    ("ductile", "DI"), ("nodular", "DI"), ("cast iron", "CI"),
+    ("galvan", "GALV"), ("copper", "Cu"), ("cupro", "CuNi"),
+    ("titanium", "Ti"), ("gre", "GRE"), ("frp", "FRP"), ("pvc", "PVC"),
+    ("pvdf", "PVDF"), ("ptfe", "PTFE"),
+]
+
+
+def _short_moc(moc: str, moc_tag: str = "") -> str:
+    s = (moc or "").lower()
+    for key, code in _MOC_RULES:
+        if key in s:
+            return code
+    if (" cr" in s or s.strip().endswith("cr")) and "chrome" not in s:
+        return "Cr-Mo"
+    if "high density" in s or "hdpe" in s:
+        return "HDPE"
+    if moc_tag and str(moc_tag).strip():
+        return str(moc_tag).strip()[:8]
+    # fall back to the first word that looks like a material name, skipping
+    # extraction noise (numbers, 'allowance', 'note', punctuation)
+    first = (moc or "").split(",")[0].strip()
+    low = first.lower()
+    if not first or first[0].isdigit() or any(
+            k in low for k in ("allowance", "note", "n/a", "see ")):
+        return "—"
+    return first[:10]
+
 try:
     from resources import theme
     _TEN = theme.TEN
@@ -49,7 +89,7 @@ class PMSManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("PMS — Piping Material Specs")
-        self.resize(1080, 680)
+        self.resize(1200, 680)
 
         self._pms = api.pms_classes_module()
         self._loading = False          # guard: suppress recompute while populating
@@ -58,8 +98,8 @@ class PMSManagerDialog(QDialog):
         self._build_ui()
         self._style()
         self._refresh_class_list()
-        if self.list.count():
-            self.list.setCurrentRow(0)
+        if self.list.rowCount():
+            self.list.setCurrentCell(0, 0)
         self._update_preview()
 
     # ── construction ────────────────────────────────────────────────────
@@ -82,7 +122,7 @@ class PMSManagerDialog(QDialog):
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._build_left())
         split.addWidget(self._build_right())
-        split.setSizes([320, 760])
+        split.setSizes([440, 760])
         root.addWidget(split, 1)
 
         # bottom bar
@@ -104,10 +144,22 @@ class PMSManagerDialog(QDialog):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search classes…")
+        self.search.setPlaceholderText("Search code / MOC…")
         self.search.textChanged.connect(self._apply_filter)
-        self.list = QListWidget()
-        self.list.currentItemChanged.connect(self._on_class_selected)
+        self.list = QTableWidget(0, 4)
+        self.list.setHorizontalHeaderLabels(["Code", "MOC", "C.A. (in)", "Rating"])
+        self.list.verticalHeader().setVisible(False)
+        self.list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.list.setAlternatingRowColors(True)
+        hh = self.list.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.list.currentCellChanged.connect(
+            lambda r, *_: self._on_row_selected(r))
         lay.addWidget(self.search)
         lay.addWidget(self.list, 1)
         return w
@@ -229,28 +281,46 @@ class PMSManagerDialog(QDialog):
 
     def _refresh_class_list(self, select_name=None):
         self._loading = True
-        self.list.clear()
-        for c in self._classes():
-            label = f"{c.name} — {c.moc or ''}".rstrip(" —")
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, c.name)
-            self.list.addItem(item)
+        classes = self._classes()
+        self.list.setRowCount(len(classes))
+        for i, c in enumerate(classes):
+            rating = api.flange_class_for(c.name)
+            ca = c.corrosion_allow_in
+            cells = [
+                c.name,
+                _short_moc(c.moc, c.moc_tag),
+                (f"{float(ca):.3f}" if ca else "—"),
+                (f"{rating}#" if rating else "—"),
+            ]
+            for col, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if col == 0:
+                    it.setData(Qt.UserRole, c.name)
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                if col >= 2:
+                    it.setTextAlignment(int(Qt.AlignRight | Qt.AlignVCenter))
+                it.setToolTip(c.moc or "")
+                self.list.setItem(i, col, it)
         self._loading = False
         self._apply_filter()
         if select_name is not None:
             self._select_by_name(select_name)
+        elif self.list.rowCount():
+            self.list.setCurrentCell(0, 0)
 
     def _select_by_name(self, name):
-        for i in range(self.list.count()):
-            if self.list.item(i).data(Qt.UserRole) == name:
-                self.list.setCurrentRow(i)
+        for i in range(self.list.rowCount()):
+            it = self.list.item(i, 0)
+            if it is not None and it.data(Qt.UserRole) == name:
+                self.list.setCurrentCell(i, 0)
                 return
 
     def _apply_filter(self):
         term = (self.search.text() or "").strip().lower()
-        for i in range(self.list.count()):
-            item = self.list.item(i)
-            item.setHidden(bool(term) and term not in item.text().lower())
+        for i in range(self.list.rowCount()):
+            hay = " ".join((self.list.item(i, c).text() if self.list.item(i, c) else "")
+                           for c in range(self.list.columnCount())).lower()
+            self.list.setRowHidden(i, bool(term) and term not in hay)
 
     def _find_class(self, name):
         for c in self._classes():
@@ -269,11 +339,14 @@ class PMSManagerDialog(QDialog):
                 or up in getattr(self._pms, "PIPE_RULE_PATCHES", {}))
 
     # ── selection / editor population ───────────────────────────────────
-    def _on_class_selected(self, cur, _prev=None):
-        if cur is None:
+    def _on_row_selected(self, row):
+        if row is None or row < 0:
             self._current_name = None
             return
-        name = cur.data(Qt.UserRole)
+        it = self.list.item(row, 0)
+        if it is None:
+            return
+        name = it.data(Qt.UserRole)
         cls = self._find_class(name)
         if cls is None:
             return
@@ -439,8 +512,8 @@ class PMSManagerDialog(QDialog):
             f"Loaded {n} classes from {os.path.basename(path)}")
         keep = self._current_name
         self._refresh_class_list(select_name=keep)
-        if self.list.currentItem() is None and self.list.count():
-            self.list.setCurrentRow(0)
+        if self.list.currentRow() < 0 and self.list.rowCount():
+            self.list.setCurrentCell(0, 0)
         self._update_preview()
 
     # ── new code ────────────────────────────────────────────────────────

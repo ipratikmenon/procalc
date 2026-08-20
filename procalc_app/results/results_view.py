@@ -12,6 +12,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                                QAbstractItemView)
 
 from results.workbook_model import SheetTableModel
+from results.charts import pressure_profile_chart, flow_pattern_chart
+
+# Excel row-height / column-width units are points/characters; Qt wants px.
+_PT_TO_PX = 1.333
 
 
 class _SheetTab(QTableView):
@@ -31,6 +35,40 @@ class _SheetTab(QTableView):
             letter = get_column_letter(c + 1)
             w = ws.column_dimensions[letter].width if letter in ws.column_dimensions else None
             self.setColumnWidth(c, int((w or 10) * 7) + 6)
+        # honour explicit Excel row heights (points -> px)
+        for r in range(m.nrows):
+            rd = ws.row_dimensions.get(r + 1)
+            h = getattr(rd, "height", None) if rd is not None else None
+            if h:
+                self.setRowHeight(r, int(round(h * _PT_TO_PX)))
+        # TODO (fidelity): freeze the top 2 header rows on vertical scroll by
+        # stacking a second QTableView that shares this model and shows only
+        # rows 0-1. Deferred: interacts awkwardly with setSpan on merged
+        # headers, and the table already renders correctly without it.
+
+
+def _build_tab(ws, wb):
+    """A sheet tab. For chart sheets, pair the table with a QtCharts re-plot in
+    an inner Table/Chart QTabWidget. Any chart failure falls back to table-only.
+    """
+    table = _SheetTab(ws)
+    title = ws.title or ""
+    chart_view = None
+    try:
+        if title.startswith("Pressure_Profile"):
+            chart_view = pressure_profile_chart(ws)
+        elif title.startswith("H ") or title.startswith("V "):
+            data_ws = wb["Flow_Pattern_Data"] if "Flow_Pattern_Data" in wb.sheetnames else None
+            chart_view = flow_pattern_chart(ws, data_ws)
+    except Exception:
+        chart_view = None
+    if chart_view is None:
+        return table
+    inner = QTabWidget()
+    inner.setDocumentMode(True)
+    inner.addTab(table, "Table")
+    inner.addTab(chart_view, "Chart")
+    return inner
 
 
 class ResultsView(QWidget):
@@ -76,6 +114,16 @@ class ResultsView(QWidget):
         else:
             self._placeholder()
 
+    def current_workbook_path(self):
+        idx = self.circuit_cb.currentIndex()
+        if 0 <= idx < len(self._paths):
+            return self.circuit_cb.itemData(idx)
+        return None
+
+    def current_sheet_title(self):
+        i = self.tabs.currentIndex()
+        return self.tabs.tabText(i) if i >= 0 else None
+
     def _show_current(self):
         idx = self.circuit_cb.currentIndex()
         if idx < 0 or idx >= len(self._paths):
@@ -86,7 +134,7 @@ class ResultsView(QWidget):
         self.tabs.clear()
         wb = load_workbook(path, data_only=False)
         for ws in wb.worksheets:
-            self.tabs.addTab(_SheetTab(ws), ws.title)
+            self.tabs.addTab(_build_tab(ws, wb), ws.title)
         self.info.setText(f"{self.tabs.count()} sheets  ·  {os.path.basename(path)}")
         # restore the previously-open tab by name if present
         if prev_name:
