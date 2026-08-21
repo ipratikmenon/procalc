@@ -376,6 +376,76 @@ def txt(v):
     return s or None
 
 
+def _write_doc_header_block(ws, meta, ncol, start_row=1) -> int:
+    """Drawing-style document header: T.EN logo + client-logo slot, a
+    Client/Project/Site/Unit/Circuit Name identity block, and a Prep/Chk/
+    Appr/Revision/Page admin block.  5 rows tall.  Returns the next free
+    row so callers can shift their existing title band/headers down.
+
+    The admin block's column position adapts to the sheet's own width
+    (``ncol``) instead of a fixed column pair, so this reads sensibly on
+    both wide report sheets and narrow ones (e.g. a CV datasheet)."""
+    m = meta or {}
+    r0 = start_row
+    for i in range(5):
+        ws.row_dimensions[r0 + i].height = 16
+
+    # ── logos (col 1 = T.EN, col 2 = client) ──
+    ws.merge_cells(start_row=r0, start_column=1, end_row=r0 + 4, end_column=1)
+    _c(ws, r0, 1, "", bg=TEN_LGRAY, ha="center")
+    try:
+        if os.path.exists(_TEN_LOGO_PATH):
+            from openpyxl.drawing.image import Image as _XLImage
+            img = _XLImage(_TEN_LOGO_PATH)
+            img.height, img.width = 60, 120
+            ws.add_image(img, f"A{r0}")
+    except Exception:
+        pass
+
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0 + 4, end_column=2)
+    clp = m.get("client_logo_path")
+    _c(ws, r0, 2, "" if (clp and os.path.exists(clp)) else "Client logo",
+       bg=TEN_LGRAY, fg=DGRAY, sz=8, ha="center")
+    try:
+        if clp and os.path.exists(clp):
+            from openpyxl.drawing.image import Image as _XLImage
+            img2 = _XLImage(clp)
+            img2.height, img2.width = 60, 120
+            ws.add_image(img2, f"B{r0}")
+    except Exception:
+        pass
+
+    # ── identity block (cols 3/4) ──
+    ident = [
+        ("Client", m.get("client") or "—"),
+        ("Project", m.get("project") or "—"),
+        ("Site", m.get("site") or "—"),
+        ("Unit", m.get("unit") or "—"),
+        ("Circuit Name", m.get("circuit_name") or "—"),
+    ]
+    for i, (lbl, val) in enumerate(ident):
+        rr = r0 + i
+        _c(ws, rr, 3, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True)
+        _c(ws, rr, 4, val, sz=8)
+
+    # ── admin block — column position adapts to sheet width ──
+    admin = [
+        ("Prep By", m.get("prep_by") or ""),
+        ("Chk By", m.get("chk_by") or ""),
+        ("Appr By", m.get("appr_by") or ""),
+        ("Revision", m.get("revision") or ""),
+        ("Page", m.get("page") or ""),
+    ]
+    hdr_ncol = max(ncol, 6)   # the block itself always needs >= 6 cols of room
+    lc, vc = (hdr_ncol - 1, hdr_ncol) if hdr_ncol >= 8 else (5, 6)
+    for i, (lbl, val) in enumerate(admin):
+        rr = r0 + i
+        _c(ws, rr, lc, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True, ha="right")
+        _c(ws, rr, vc, val, sz=8)
+
+    return r0 + 5
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  1.  INTERNAL DIAMETER from piping spec + bore (PMS catalogue + ASME)
 # ════════════════════════════════════════════════════════════════════════
@@ -2235,45 +2305,34 @@ def build_cover_sheet(wb, meta, circuit_id, stream_name, sheet_titles=None):
     ws = wb.create_sheet("Cover")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = TEN_NAVY
+    ncol = 6
     for col, w in {"A": 3, "B": 26, "C": 34, "D": 6, "E": 26, "F": 34}.items():
         ws.column_dimensions[col].width = w
 
-    # logo (top-left) — embedded if the asset is present
-    try:
-        if os.path.exists(_TEN_LOGO_PATH):
-            from openpyxl.drawing.image import Image as _XLImage
-            img = _XLImage(_TEN_LOGO_PATH)      # needs Pillow; skipped if absent
-            img.height, img.width = 46, 92      # the T.EN wordmark is ~2:1
-            ws.add_image(img, "B2")
-    except Exception:
-        pass
-    ws.row_dimensions[2].height = 46
-
-    _c(ws, 2, 3, "TECHNIP ENERGIES", fg=TEN_BLUE, sz=16, bold=True, border=False)
-    ws.merge_cells("C2:F2")
+    m = meta or {}
+    r = _write_doc_header_block(ws, m, ncol)
 
     # title band
-    ws.merge_cells("B4:F4")
-    _c(ws, 4, 2, "HYDRAULIC & CONTROL-VALVE CALCULATION",
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=ncol)
+    _c(ws, r, 2, "HYDRAULIC & CONTROL-VALVE CALCULATION",
        bg=TEN_NAVY, fg=WHITE, sz=14, bold=True, ha="center")
-    ws.row_dimensions[4].height = 24
+    ws.row_dimensions[r].height = 24
+    r += 2
 
-    m = meta or {}
     from datetime import datetime as _dt
     date_s = m.get("date") or _dt.now().strftime("%Y-%m-%d %H:%M")
     fields = [
-        ("Project", m.get("project") or "—", "Unit", m.get("unit") or "—"),
         ("Area", m.get("area") or "—", "Case", m.get("case") or "—"),
         ("Circuit", circuit_id or "—", "Stream", stream_name or "—"),
         ("P&ID No", m.get("pid") or m.get("pandid") or "—", "Date", date_s),
-        ("Prepared by", m.get("prepared_by") or "", "Units", m.get("units") or "FPS"),
+        ("Units", m.get("units") or "FPS", "", ""),
     ]
-    r = 6
     for l1, v1, l2, v2 in fields:
         _c(ws, r, 2, l1, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
         _c(ws, r, 3, v1, sz=10)
-        _c(ws, r, 5, l2, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
-        _c(ws, r, 6, v2, sz=10)
+        if l2:
+            _c(ws, r, 5, l2, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
+            _c(ws, r, 6, v2, sz=10)
         r += 1
 
     # contents legend
@@ -2333,8 +2392,10 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
         if ln and pid and ln not in pid_by_line:
             pid_by_line[ln] = str(pid)
 
+    r0 = _write_doc_header_block(ws, meta, ncol)
+
     # title band
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    ws.merge_cells(start_row=r0, start_column=1, end_row=r0, end_column=ncol)
     proj = (meta or {}).get("project")
     area = (meta or {}).get("area")
     title = f"LINE LIST   |   Circuit {circuit_id}   |   Stream {stream_name}"
@@ -2342,16 +2403,16 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
         title += f"   |   Project: {proj}"
     if area:
         title += f"   |   Area: {area}"
-    _c(ws, 1, 1, title, bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    _c(ws, r0, 1, title, bg=NAVY, fg=WHITE, sz=11, bold=True)
+    ws.row_dimensions[r0].height = 22
 
-    # header row 2 (bare captions) + a dedicated units row 3
+    # header row (bare captions) + a dedicated units row
     col_qty = {"Length": "L", "Elev Δ": "L", "Inlet P": "P", "Outlet P": "P",
                "Total ΔP": "dP", "Max Velocity": "v"}
     for c, h in enumerate(_LINELIST_HEADERS, 1):
-        _c(ws, 2, c, h, bg=STEEL, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        _c(ws, r0 + 1, c, h, bg=STEEL, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
         qty = col_qty.get(h)
-        _c(ws, 3, c, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY, sz=8,
+        _c(ws, r0 + 2, c, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY, sz=8,
            italic=True, ha="center")
 
     # group station indices by Line No in first-appearance order
@@ -2370,7 +2431,7 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
         uniq = list(dict.fromkeys(str(v) for v in vals))
         return uniq[0] if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
 
-    r = 4
+    r = r0 + 3
     for ln in order:
         grp = [stations[i] for i in groups[ln]]
         if not grp:
@@ -2406,8 +2467,8 @@ def build_line_list_sheet(wb, stations, station_lines, line_colors,
     for c, w in enumerate([14, 14, 12, 12, 16, 10, 12, 11, 12, 11,
                            10, 9, 10, 10, 10, 12, 11], 1):
         ws.column_dimensions[get_column_letter(c)].width = w
-    ws.freeze_panes = "C4"
-    ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
+    ws.freeze_panes = f"C{r0 + 3}"
+    ws.auto_filter.ref = f"A{r0 + 1}:{get_column_letter(ncol)}{r0 + 1}"
     return ws
 
 
@@ -2998,7 +3059,8 @@ def _parse_hmb_filename(path: str | None) -> dict:
 #  Input-template creator
 # ════════════════════════════════════════════════════════════════════════
 def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
-                          unit_system: str = "FPS") -> str:
+                          unit_system: str = "FPS",
+                          meta: dict | None = None) -> str:
     """Write a blank, styled input workbook with Circuit-aware column layout.
 
     ``unit_system`` ("FPS" | "SI") drives the column-header unit labels and is
@@ -3011,17 +3073,19 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     ws.title = "Pipeline_Input"
     ws.sheet_view.showGridLines = False
 
-    ws.merge_cells(f"A1:{get_column_letter(_NCOL)}1")
-    _c(ws, 1, 1,
+    r0 = _write_doc_header_block(ws, meta, _NCOL)
+
+    ws.merge_cells(f"A{r0}:{get_column_letter(_NCOL)}{r0}")
+    _c(ws, r0, 1,
        "NO-ISO PIPELINE INPUT  —  Group rows into hydraulic circuits using column A (Circuit).  "
        "All rows with the same Circuit ID are processed in series → one workbook per circuit.  "
        f"Units: {usys.system} (see UNITS sheet).",
        bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
-    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[r0].height = 28
 
-    _hdr(ws, [_display_header(h, usys) for h in INPUT_HEADERS], row=2)
-    ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(_NCOL)}2"
+    _hdr(ws, [_display_header(h, usys) for h in INPUT_HEADERS], row=r0 + 1)
+    ws.freeze_panes = f"A{r0 + 2}"
+    ws.auto_filter.ref = f"A{r0 + 1}:{get_column_letter(_NCOL)}{r0 + 1}"
 
     width_map = {
         "Circuit": 9, "Line No": 12, "PID Number": 14, "HMB File": 16, "Case": 10,
@@ -3049,7 +3113,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     rt_col = _hcol_letter("Run Type")
     dv_rt = DataValidation(type="list", formula1='"Main,Branch"', allow_blank=True)
     ws.add_data_validation(dv_rt)
-    dv_rt.add(f"{rt_col}3:{rt_col}2000")
+    dv_rt.add(f"{rt_col}{r0 + 2}:{rt_col}2000")
 
     # ── Drop-down: Control Valve Type (P/T/F/L) ───────────────────────
     cvt_col = _hcol_letter("Control Valve Type")
@@ -3059,7 +3123,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         error="F=flow, P=pressure, T=temperature, L=level control",
         errorTitle="Control Valve Type")
     ws.add_data_validation(dv_cvt)
-    dv_cvt.add(f"{cvt_col}3:{cvt_col}2000")
+    dv_cvt.add(f"{cvt_col}{r0 + 2}:{cvt_col}2000")
 
     # ── Drop-downs: control-valve datasheet columns ───────────────────
     for hdr, opts, err in [
@@ -3074,7 +3138,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         dv = DataValidation(type="list", formula1=f'"{opts}"', allow_blank=True,
                             showErrorMessage=True, error=err, errorTitle=hdr)
         ws.add_data_validation(dv)
-        dv.add(f"{col}3:{col}2000")
+        dv.add(f"{col}{r0 + 2}:{col}2000")
 
     # ── Drop-down: Fitting Name — hidden list sheet ───────────────────
     ws_fit = wb.create_sheet("_FittingList")
@@ -3092,7 +3156,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         errorTitle="Invalid Fitting",
     )
     ws.add_data_validation(dv_fit)
-    dv_fit.add(f"{fit_col}3:{fit_col}2000")
+    dv_fit.add(f"{fit_col}{r0 + 2}:{fit_col}2000")
 
     # ── Example rows (keyed by header so column order is robust) ───────
     _ex_dicts = [
@@ -3121,7 +3185,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         {"Circuit":"C4","Line No":"L-401","Run Type":"Branch","Seq":1,"Start P (psia)":200.0,"Comp ID":"FCV-40B","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Parallel-leg valve (other 50% flow)"},
     ]
     manual_idx = {_hcol(n) for n in _MANUAL_PROP_COLS}
-    for ri, d in enumerate(_ex_dicts, 3):
+    for ri, d in enumerate(_ex_dicts, r0 + 2):
         for ci, name in enumerate(INPUT_HEADERS, 1):
             v = d.get(name, "")
             qty = _FIELD_META.get(name, (name, None))[1]
@@ -4554,6 +4618,7 @@ def _build_pressure_profile_sheet(
         flash_mode: str = "isothermal",
         station_lines: list[str] | None = None,   # parallel list: line_no per station
         line_colors: dict[str, str] | None = None, # line_no -> palette color
+        meta: dict | None = None,
 ) -> str:
     """Create a Pressure_Profile sheet.
 
@@ -4572,26 +4637,27 @@ def _build_pressure_profile_sheet(
 
     u = _u()
     ncol = _PP_NCOL
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
+    r0 = _write_doc_header_block(ws, meta, ncol)
+    ws.merge_cells(f"A{r0}:{get_column_letter(ncol)}{r0}")
+    _c(ws, r0, 1,
        f"FLASH-COUPLED PRESSURE PROFILE  [{run_label}]   |   "
        f"Circuit {circuit_id}  ·  Lines: {line_nos_str}   |   "
        f"Stream: {stream_name}   |   {flash_mode}   |   units: {u.system}   |   "
        f"{datetime.now():%d-%b-%Y %H:%M}",
        bg=NAVY, fg=WHITE, sz=10, bold=True)
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[r0].height = 22
 
-    _hdr(ws, _pp_headers(u), row=2)
+    _hdr(ws, _pp_headers(u), row=r0 + 1)
     for ci in range(21, ncol + 1):
-        ws.cell(2, ci).fill = PatternFill("solid", fgColor=GRNHDR)
-    # dedicated units row (3) — units split out of the header captions
+        ws.cell(r0 + 1, ci).fill = PatternFill("solid", fgColor=GRNHDR)
+    # dedicated units row — units split out of the header captions
     for ci, ulab in enumerate(_pp_units(u), 1):
-        _c(ws, 3, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
-    ws.freeze_panes = "C4"
-    ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
+        _c(ws, r0 + 2, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
+    ws.freeze_panes = f"C{r0 + 3}"
+    ws.auto_filter.ref = f"A{r0 + 1}:{get_column_letter(ncol)}{r0 + 1}"
 
     rho_l_lbft3  = sp.liq_density
-    data_row      = 4          # current Excel row for writing (row 3 = units)
+    data_row      = r0 + 3     # current Excel row for writing (units row precedes)
     prev_line     = None
     chart_data_rows: list[tuple[int, float, float]] = []   # (excel_row, cum_ft, p_out)
 
@@ -4702,18 +4768,21 @@ def _build_flash_detail_sheet(
         feed,
         sp: HE.StreamProps,
         run_label: str = "Main",
+        meta: dict | None = None,
 ) -> str:
     sheet_title = f"Flash_Profile_{run_label}" if run_label != "Main" else "Flash_Profile"
     ws = wb.create_sheet(sheet_title)
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
-    ws.merge_cells("A1:L1")
-    _c(ws, 1, 1, f"RIGOROUS FLASH PROFILE [{run_label}]  —  isothermal VLE vs pressure",
+    ncol = 11
+    r0 = _write_doc_header_block(ws, meta, ncol)
+    ws.merge_cells(f"A{r0}:{get_column_letter(ncol)}{r0}")
+    _c(ws, r0, 1, f"RIGOROUS FLASH PROFILE [{run_label}]  —  isothermal VLE vs pressure",
        bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    ws.row_dimensions[r0].height = 20
 
     if feed is None:
-        _c(ws, 3, 1, "No composition available — flash disabled.", sz=9, fg=ORANGE)
+        _c(ws, r0 + 2, 1, "No composition available — flash disabled.", sz=9, fg=ORANGE)
         return sheet_title
 
     u = _u()
@@ -4729,7 +4798,7 @@ def _build_flash_detail_sheet(
          u.disp("T", sp.temp_f, 2), f"{u.label('T')} (isothermal)"),
         ("Reference molar vap frac β₀", round(feed.beta_ref, 4),    "anchored to HMB"),
     ]
-    r = 3
+    r = r0 + 2
     for k, v, unit_note in info:
         _c(ws, r, 1, k, bg=LGRAY, sz=9, bold=True)
         _c(ws, r, 2, v, sz=9, ha="right")
@@ -4905,6 +4974,7 @@ def build_composition_phase_splits_sheet(
         station_lines: list[str] | None = None,
         line_colors: dict[str, str] | None = None,
         run_label: str = "Main",
+        meta: dict | None = None,
 ) -> str:
     """Component phase split across the sequence: components DOWN the rows, and
     for every fitting a Vapor (y) / Liquid (x) mole-fraction column pair grouped
@@ -4921,34 +4991,36 @@ def build_composition_phase_splits_sheet(
             if j < len(comp_fracs) and comp_fracs[j]]
     ncol = 1 + 2 * len(cols)
     last_col = get_column_letter(max(ncol, 2))
-    ws.merge_cells(f"A1:{last_col}1")
-    _c(ws, 1, 1,
+    r0 = _write_doc_header_block(ws, meta, ncol)
+    ws.merge_cells(f"A{r0}:{last_col}{r0}")
+    _c(ws, r0, 1,
        f"COMPOSITION PHASE SPLITS (vapor y / liquid x)   |   Circuit {circuit_id}"
        f"   |   Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}",
        bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[r0].height = 22
 
     if not cols:
-        _c(ws, 3, 1,
+        _c(ws, r0 + 2, 1,
            "No composition available — Stream Lookup blank (manual stream) or "
            "no component data in the HMB.", sz=9, fg=ORANGE)
         cw(ws, 1, 60)
         return name
 
-    # header: A2:A3 "Component"; per station a merged pair over (y, x)
-    _c(ws, 2, 1, "Component", bg=NAVY, fg=WHITE, sz=9, bold=True, ha="left")
-    _c(ws, 3, 1, "", bg=NAVY)
-    ws.merge_cells("A2:A3")
+    # header: two rows "Component"; per station a merged pair over (y, x)
+    hr1, hr2 = r0 + 1, r0 + 2
+    _c(ws, hr1, 1, "Component", bg=NAVY, fg=WHITE, sz=9, bold=True, ha="left")
+    _c(ws, hr2, 1, "", bg=NAVY)
+    ws.merge_cells(start_row=hr1, start_column=1, end_row=hr2, end_column=1)
     for k, (j, s, _fr) in enumerate(cols):
         c0 = 2 + 2 * k
         ln = station_lines[j] if (station_lines and j < len(station_lines)) else None
         bg = (line_colors or {}).get(ln, STEEL) if line_colors else STEEL
-        ws.merge_cells(start_row=2, start_column=c0, end_row=2, end_column=c0 + 1)
-        _c(ws, 2, c0, f"{s.seq} · {s.comp_id or ''}".strip(),
+        ws.merge_cells(start_row=hr1, start_column=c0, end_row=hr1, end_column=c0 + 1)
+        _c(ws, hr1, c0, f"{s.seq} · {s.comp_id or ''}".strip(),
            bg=bg, fg=NAVY, sz=8, bold=True, ha="center", wrap=True)
-        _c(ws, 3, c0, "Vapor (y)", bg=LGRAY, sz=8, bold=True, ha="center")
-        _c(ws, 3, c0 + 1, "Liquid (x)", bg=LGRAY, sz=8, bold=True, ha="center")
-    ws.row_dimensions[2].height = 26
+        _c(ws, hr2, c0, "Vapor (y)", bg=LGRAY, sz=8, bold=True, ha="center")
+        _c(ws, hr2, c0 + 1, "Liquid (x)", bg=LGRAY, sz=8, bold=True, ha="center")
+    ws.row_dimensions[hr1].height = 26
 
     # ordered union of component names (first appearance = feed order)
     names: list[str] = []
@@ -4959,7 +5031,7 @@ def build_composition_phase_splits_sheet(
                 seen.add(nm)
                 names.append(nm)
 
-    r = 4
+    r = r0 + 3
     for nm in names:
         _c(ws, r, 1, nm, bg=LGRAY, sz=8, ha="left")
         for k, (_j, _s, fr) in enumerate(cols):
@@ -4972,7 +5044,7 @@ def build_composition_phase_splits_sheet(
     cw(ws, 1, 20)
     for c in range(2, ncol + 1):
         cw(ws, c, 11)
-    ws.freeze_panes = "B4"
+    ws.freeze_panes = f"B{r0 + 3}"
     return name
 
 
@@ -4988,6 +5060,7 @@ def _build_composition_splits_sheet(
         stream_name: str,
         station_lines: list[str] | None = None,
         line_colors: dict[str, str] | None = None,
+        meta: dict | None = None,
 ) -> str:
     """Per-component split across the marching sequence (columns left→right).
 
@@ -5002,12 +5075,13 @@ def _build_composition_splits_sheet(
 
     ncol = 1 + len(stations)
     last_col = get_column_letter(max(ncol, 2))
-    ws.merge_cells(f"A1:{last_col}1")
-    _c(ws, 1, 1,
+    r0 = _write_doc_header_block(ws, meta, ncol)
+    ws.merge_cells(f"A{r0}:{last_col}{r0}")
+    _c(ws, r0, 1,
        f"COMPOSITION SPLITS (mass & molar)   |   Circuit {circuit_id}   |   "
        f"Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}",
        bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[r0].height = 22
 
     u = _u()
     # Convert each station's molar vector → mass (lb/hr) using mw_map.
@@ -5030,7 +5104,7 @@ def _build_composition_splits_sheet(
                 names.append(nm)
 
     if not names:
-        _c(ws, 3, 1,
+        _c(ws, r0 + 2, 1,
            "No composition available — Stream Lookup blank (manual stream) "
            "or no component data in the HMB.", sz=9, fg=ORANGE)
         cw(ws, 1, 60)
@@ -5050,7 +5124,7 @@ def _build_composition_splits_sheet(
     mole_tot = [sum(cv.values()) for cv in comps]       # molar totals per station
 
     # ── Block 1: mass flow ───────────────────────────────────────────────
-    r = 3
+    r = r0 + 2
     ws.merge_cells(f"A{r}:{last_col}{r}")
     _c(ws, r, 1, f"MASS FLOW  ({u.label('mflow')})",
        bg=GRNHDR, fg=WHITE, sz=9, bold=True)
@@ -5133,7 +5207,7 @@ def _build_composition_splits_sheet(
     cw(ws, 1, 26)
     for j in range(len(stations)):
         cw(ws, 2 + j, 12)
-    ws.freeze_panes = "B4"
+    ws.freeze_panes = f"B{r0 + 3}"
     return "Composition Splits"
 
 
@@ -5181,6 +5255,7 @@ def _build_input_sheet(
         flash_mode: str = "isothermal",
         line_colors: dict[str, str] | None = None,
         hmb_meta: dict | None = None,
+        meta: dict | None = None,
 ) -> str:
     """PCF-style pipeline component sheet for a whole circuit (all lines)."""
     ws = wb.create_sheet("Input_Pipeline")
@@ -5190,36 +5265,38 @@ def _build_input_sheet(
 
     line_nos = list(dict.fromkeys(r["Line No"] for r in circuit_rows))
 
-    # ── Row 1: title bar ─────────────────────────────────────────────────
-    ws.merge_cells(f"A1:{last_col}1")
+    r0 = _write_doc_header_block(ws, meta, _PCF_NCOL)
+
+    # ── Title bar ────────────────────────────────────────────────────────
+    ws.merge_cells(f"A{r0}:{last_col}{r0}")
     title = (f"CIRCUIT:  {circuit_id}   |   ISO: (manual — no ISO)   |   "
              f"Lines: {', '.join(line_nos)}   |   Stream: {stream_name or '—'}")
-    _c(ws, 1, 1, title, bg=NAVY, fg=WHITE, sz=10, bold=True)
-    ws.row_dimensions[1].height = 20
+    _c(ws, r0, 1, title, bg=NAVY, fg=WHITE, sz=10, bold=True)
+    ws.row_dimensions[r0].height = 20
 
-    # ── Row 2: subtitle ──────────────────────────────────────────────────
-    ws.merge_cells(f"A2:{last_col}2")
+    # ── Subtitle ─────────────────────────────────────────────────────────
+    ws.merge_cells(f"A{r0 + 1}:{last_col}{r0 + 1}")
     n_main   = sum(1 for r in circuit_rows if r.get("Run Type", "Main") == "Main")
     n_branch = sum(1 for r in circuit_rows if r.get("Run Type") == "Branch")
     subtitle = (f"Start P: {_u().disp('P', start_p)} {_u().label('P')}   |   "
                 f"Flash mode: {flash_mode}   |   "
                 f"Components: {n_main} Main  /  {n_branch} Branch  |  "
                 f"{len(line_nos)} line(s)")
-    _c(ws, 2, 1, subtitle, bg=STEEL, fg=WHITE, sz=9)
-    ws.row_dimensions[2].height = 16
+    _c(ws, r0 + 1, 1, subtitle, bg=STEEL, fg=WHITE, sz=9)
+    ws.row_dimensions[r0 + 1].height = 16
 
-    # ── Row 3: HMB provenance (parsed from the HMB filename) — Input only ──
-    hdr_row = 3
+    # ── HMB provenance (parsed from the HMB filename) — Input only ─────────
+    hdr_row = r0 + 2
     if hmb_meta and hmb_meta.get("file"):
-        ws.merge_cells(f"A3:{last_col}3")
-        meta = (f"HMB: {hmb_meta.get('file','')}"
-                f"   |   Unit: {hmb_meta.get('unit','') or '—'}"
-                f"   |   Case: {hmb_meta.get('case_no','') or '—'}"
-                f"   |   Desc: {hmb_meta.get('description','') or '—'}"
-                f"   |   Issued: {hmb_meta.get('date','') or '—'}")
-        _c(ws, 3, 1, meta, bg=AMBER, fg=DGRAY, sz=9, bold=True)
-        ws.row_dimensions[3].height = 16
-        hdr_row = 4
+        ws.merge_cells(f"A{hdr_row}:{last_col}{hdr_row}")
+        hmb_line = (f"HMB: {hmb_meta.get('file','')}"
+                    f"   |   Unit: {hmb_meta.get('unit','') or '—'}"
+                    f"   |   Case: {hmb_meta.get('case_no','') or '—'}"
+                    f"   |   Desc: {hmb_meta.get('description','') or '—'}"
+                    f"   |   Issued: {hmb_meta.get('date','') or '—'}")
+        _c(ws, hdr_row, 1, hmb_line, bg=AMBER, fg=DGRAY, sz=9, bold=True)
+        ws.row_dimensions[hdr_row].height = 16
+        hdr_row += 1
 
     # Redefine line_rows to use all circuit rows
     line_rows = circuit_rows
@@ -5585,6 +5662,14 @@ def run_noiso(
         station_lines = [r["Line No"] for r in main_rows
                          if r["Run Type"] == "Main"]
 
+        # ── Document-header meta — built early so every sheet builder below
+        # (not just the cover sheet) can carry the shared header block ──────
+        circuit_rows = [r for r in all_rows if r["Circuit"] == cid]
+        hmb_meta = _parse_hmb_filename(def_hmb)
+        circuit_meta = dict(hmb_meta or {})
+        circuit_meta.update({k: v for k, v in (meta or {}).items() if v})
+        circuit_meta.setdefault("case", def_case)
+
         wb = Workbook()
         pp_sheets, fp_sheets = [], []
 
@@ -5592,19 +5677,21 @@ def run_noiso(
             wb, main_stations, main_flashes, sp,
             circuit_id=cid, stream_name=sk,
             run_label="Main", flash_mode=flash_mode,
-            station_lines=station_lines, line_colors=lc))
+            station_lines=station_lines, line_colors=lc, meta=circuit_meta))
         fp_sheets.append(_build_flash_detail_sheet(
-            wb, main_stations, main_flashes, feed, sp, run_label="Main"))
+            wb, main_stations, main_flashes, feed, sp, run_label="Main",
+            meta=circuit_meta))
 
         # ── Composition Splits (component MASS split across the sequence) ──
         _build_composition_splits_sheet(
             wb, main_stations, main_comps, main_mw, cid, sk,
-            station_lines=station_lines, line_colors=lc)
+            station_lines=station_lines, line_colors=lc, meta=circuit_meta)
 
         # ── Composition Phase Splits (vapor y / liquid x per component) ────
         ph_sheets = [build_composition_phase_splits_sheet(
             wb, main_stations, main_flashes, main_cfracs, sp, cid, sk,
-            station_lines=station_lines, line_colors=lc, run_label="Main")]
+            station_lines=station_lines, line_colors=lc, run_label="Main",
+            meta=circuit_meta)]
 
         # ── Branch sheets ────────────────────────────────────────────────
         sp_sheets = [_build_stream_props_detail_sheet(
@@ -5616,15 +5703,16 @@ def run_noiso(
                 wb, sts, fls, sp,
                 circuit_id=cid, stream_name=sk,
                 run_label=label, flash_mode=flash_mode,
-                station_lines=b_lns, line_colors=lc))
+                station_lines=b_lns, line_colors=lc, meta=circuit_meta))
             fp_sheets.append(_build_flash_detail_sheet(
-                wb, sts, fls, feed, sp, run_label=label))
+                wb, sts, fls, feed, sp, run_label=label, meta=circuit_meta))
             sp_sheets.append(_build_stream_props_detail_sheet(
                 wb, sts, fls, cfracs, sp,
                 circuit_id=cid, stream_name=sk, run_label=label))
             ph_sheets.append(build_composition_phase_splits_sheet(
                 wb, sts, fls, cfracs, sp, cid, sk,
-                station_lines=b_lns, line_colors=lc, run_label=label))
+                station_lines=b_lns, line_colors=lc, run_label=label,
+                meta=circuit_meta))
 
         # ── Control-valve datasheets + full Min/Max hydraulic runs ─────────
         # Datasheet Min/Norm/Max come from THREE full circuit re-marches at
@@ -5659,21 +5747,22 @@ def run_noiso(
                 scen_sheets.append(_build_pressure_profile_sheet(
                     wb, m_sts, m_fls, sp, circuit_id=cid, stream_name=sk,
                     run_label=tag, flash_mode=flash_mode,
-                    station_lines=station_lines, line_colors=lc))
+                    station_lines=station_lines, line_colors=lc, meta=circuit_meta))
                 scen_sheets.append(_build_flash_detail_sheet(
-                    wb, m_sts, m_fls, feed, sp, run_label=tag))
+                    wb, m_sts, m_fls, feed, sp, run_label=tag, meta=circuit_meta))
                 for (blabel, bsts, bfls, bcmps, b_lns, bcfracs) in b_runs:
                     scen_sheets.append(_build_pressure_profile_sheet(
                         wb, bsts, bfls, sp, circuit_id=cid, stream_name=sk,
                         run_label=f"{blabel}_{tag}", flash_mode=flash_mode,
-                        station_lines=b_lns, line_colors=lc))
+                        station_lines=b_lns, line_colors=lc, meta=circuit_meta))
                     scen_sheets.append(_build_flash_detail_sheet(
-                        wb, bsts, bfls, feed, sp, run_label=f"{blabel}_{tag}"))
+                        wb, bsts, bfls, feed, sp, run_label=f"{blabel}_{tag}",
+                        meta=circuit_meta))
                 print(f"  {tag}-flow run (inlet ×{k:g}) marched for CV datasheet.")
 
             cv_sheets = _build_cv_datasheets(
                 wb, valve_sts["NOR"], valve_sts.get("MIN"), valve_sts.get("MAX"),
-                stream_name=sk, run_label="Main")
+                stream_name=sk, run_label="Main", meta=circuit_meta)
         if cv_sheets:
             print(f"  Control-valve datasheets: {', '.join(cv_sheets)}")
 
@@ -5703,13 +5792,6 @@ def run_noiso(
         except Exception as exc:
             print(f"  (flow-pattern maps skipped: {exc})")
 
-        # ── Input_Pipeline and README ─────────────────────────────────────
-        circuit_rows = [r for r in all_rows if r["Circuit"] == cid]
-        hmb_meta = _parse_hmb_filename(def_hmb)
-        circuit_meta = dict(hmb_meta or {})
-        circuit_meta.update({k: v for k, v in (meta or {}).items() if v})
-        circuit_meta.setdefault("case", def_case)
-
         # ── Line List (one row per Line No in the circuit) ────────────────
         if main_stations:
             HE.build_line_list_sheet(wb, main_stations, station_lines, lc,
@@ -5720,7 +5802,8 @@ def run_noiso(
                            start_p=p_start,
                            flash_mode=flash_mode,
                            line_colors=lc,
-                           hmb_meta=hmb_meta)
+                           hmb_meta=hmb_meta,
+                           meta=circuit_meta)
         _build_readme_noiso(wb, circuit_label, sk, sp, phase,
                             input_path, hmb_path, flash_mode)
 
@@ -9372,7 +9455,8 @@ def _cv_disp(res, key, conv, nd=3, default="—"):
         return default
 
 
-def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
+def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main",
+                              meta: dict | None = None):
     """One control-valve datasheet sheet mirroring the vendor layout:
     header block -> Min/Norm/Max service conditions -> flowing/sizing/noise
     results -> verdicts + recommendations."""
@@ -9391,11 +9475,13 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     W = lambda kg: kg * _CV_KGS_TO_LBH
     LB = lambda kgm3: kgm3 / 16.018463
 
+    r0 = _write_doc_header_block(ws, meta, 6)
+
     # ── Title ──
-    ws.merge_cells("A1:F1")
-    _cvc(ws, 1, 1, f"CONTROL VALVE DATASHEET  —  {tag}", bold=True,
+    ws.merge_cells(f"A{r0}:F{r0}")
+    _cvc(ws, r0, 1, f"CONTROL VALVE DATASHEET  —  {tag}", bold=True,
          fill=_CVDS_HDR, color="FFFFFF", size=13, align="center")
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[r0].height = 22
 
     # ── Header block ──
     act_lbl = {"F": "Flow", "P": "Pressure", "T": "Temperature",
@@ -9417,7 +9503,7 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
          round(inp.line_out_m / 0.0254, 3) if inp.line_out_m else "—"),
         ("Mode", mode_lbl, "Noise limit dB(A)", inp.noise_limit_dba),
     ]
-    r = 2
+    r = r0 + 1
     for l1, v1, l2, v2 in hdr:
         _cvc(ws, r, 1, l1, bold=True, fill=_CVDS_LBL)
         _cvc(ws, r, 2, v1)
@@ -9826,7 +9912,7 @@ def _cv_valve_stations(main_sts, branch_runs_x):
 
 
 def _build_cv_datasheets(wb, sts_nor, sts_min, sts_max,
-                         stream_name=None, run_label="Main"):
+                         stream_name=None, run_label="Main", meta=None):
     """Build one datasheet per control valve, drawing Min/Norm/Max from three
     independently-marched flow scenarios (aligned by valve order)."""
     titles = []
@@ -9842,7 +9928,7 @@ def _build_cv_datasheets(wb, sts_nor, sts_min, sts_max,
                      if sts_max and i < len(sts_max) else None)
             states = {"MIN": s_min or s_nor, "NOR": s_nor, "MAX": s_max or s_nor}
             payload = _cv_evaluate_valve(inp, states)
-            titles.append(_build_cv_datasheet_sheet(wb, payload, run_label))
+            titles.append(_build_cv_datasheet_sheet(wb, payload, run_label, meta=meta))
         except Exception as exc:
             print(f"  (CV datasheet for {getattr(st, 'comp_id', '?')} "
                   f"skipped: {exc})")
