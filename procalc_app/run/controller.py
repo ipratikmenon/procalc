@@ -40,19 +40,20 @@ class RunWorker(QThread):
     log = Signal(str)
 
     def __init__(self, rows, hmb_path, case, flash_mode, meta, unit_system,
-                 unit_overrides=None):
+                 unit_overrides=None, stream_snapshot=None):
         super().__init__()
         self._args = (rows, hmb_path, case, flash_mode, meta, unit_system,
-                      unit_overrides)
+                      unit_overrides, stream_snapshot)
 
     def run(self):
-        rows, hmb, case, mode, meta, units, overrides = self._args
+        rows, hmb, case, mode, meta, units, overrides, snapshot = self._args
         tee = _StdoutTee(self.log.emit)
         old = sys.stdout
         sys.stdout = tee
         try:
             paths = api.run(rows, hmb, case=case, flash_mode=mode,
-                            meta=meta, unit_system=units, unit_overrides=overrides)
+                            meta=meta, unit_system=units, unit_overrides=overrides,
+                            stream_snapshot=snapshot)
             self.finished_ok.emit(paths)
         except SystemExit as e:
             self.failed.emit(f"engine stopped: {e}")
@@ -107,7 +108,8 @@ class RunController(QObject):
         self._worker = RunWorker(rows, ctx["hmb_path"], ctx.get("case", "Case 1"),
                                  ctx.get("flash_mode", "isothermal"),
                                  ctx.get("meta"), ctx.get("units", "FPS"),
-                                 ctx.get("unit_overrides"))
+                                 ctx.get("unit_overrides"),
+                                 ctx.get("stream_snapshot"))
         self._worker.log.connect(self.log)
         self._worker.finished_ok.connect(self._done)
         self._worker.failed.connect(self._fail)
