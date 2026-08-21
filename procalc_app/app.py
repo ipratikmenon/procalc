@@ -100,6 +100,10 @@ class MainWindow(QMainWindow):
         self.ed_area = QLineEdit("Unit 24")
         self.ed_unit = QLineEdit("HCU")
         self.cb_case = QComboBox(); self.cb_case.addItem("Case 1")
+        # repopulated after the window is shown (on HMB load) — without this,
+        # AdjustToContentsOnFirstShow freezes the box at its "Case 1" width
+        # and clips longer case names.
+        self.cb_case.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.cb_mode = QComboBox(); self.cb_mode.addItems(["isothermal", "isenthalpic"])
         row = QHBoxLayout()
         row.setSpacing(8)

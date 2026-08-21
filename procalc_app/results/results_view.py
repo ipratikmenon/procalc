@@ -80,6 +80,12 @@ class ResultsView(QWidget):
         top = QHBoxLayout()
         top.addWidget(QLabel("Circuit:"))
         self.circuit_cb = QComboBox()
+        # items are added via addItem() *after* the combo box's first show, so
+        # the default AdjustToContentsOnFirstShow policy would freeze the box
+        # at its near-empty initial width and clip the real item text (e.g.
+        # "C1_DXX5-BTM" rendering as "C1_DXX!") — recompute on every change.
+        self.circuit_cb.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.circuit_cb.setMinimumWidth(160)
         self.circuit_cb.currentIndexChanged.connect(self._show_current)
         top.addWidget(self.circuit_cb)
         top.addStretch(1)

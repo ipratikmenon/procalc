@@ -24,6 +24,7 @@ from copy import copy
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
 
 from PySide6.QtCore import QMarginsF, QRectF, Qt
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QPageLayout,
@@ -97,12 +98,32 @@ def list_sheets(src_xlsx: str) -> list[str]:
         wb.close()
 
 
+def _apply_print_setup(ws):
+    """Landscape + 'fit to 1 page wide' print setup, so the sheet prints/
+    previews nicely without the user having to set it up by hand."""
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.4, right=0.4, top=0.5, bottom=0.5,
+                                  header=0.2, footer=0.2)
+    ws.print_options.horizontalCentered = True
+
+
 # ── public: Excel exports ─────────────────────────────────────────────────────
 def export_excel_workbook(src_xlsx: str, dest_xlsx: str) -> str:
-    """Copy the styled workbook verbatim."""
+    """Copy the styled workbook, with print setup set to fit each sheet to
+    one page wide. Falls back to a verbatim byte copy if re-saving through
+    openpyxl fails for any reason (fidelity over features)."""
     if not os.path.exists(src_xlsx):
         raise Exception(f"Source workbook not found: {src_xlsx}")
-    shutil.copyfile(src_xlsx, dest_xlsx)
+    try:
+        wb = load_workbook(src_xlsx)
+        for ws in wb.worksheets:
+            _apply_print_setup(ws)
+        wb.save(dest_xlsx)
+    except Exception:
+        shutil.copyfile(src_xlsx, dest_xlsx)
     return dest_xlsx
 
 
@@ -164,6 +185,7 @@ def export_excel_sheet(src_xlsx: str, sheet_title: str, dest_xlsx: str) -> str:
     # freeze panes
     dst.freeze_panes = src.freeze_panes
 
+    _apply_print_setup(dst)
     out.save(dest_xlsx)
     return dest_xlsx
 
@@ -179,6 +201,8 @@ _LOGO_H_PT = 26.0
 _MIN_COL_PT = 22.0
 _MAX_COL_PT = 240.0
 _FROZEN_HEADER_ROWS = 2        # rows repeated at the top of every tile
+_MIN_FIT_SCALE = 0.55          # floor for "fit to page width" shrinking
+_MIN_FONT_PT = 6.0             # never shrink text below this, even scaled
 
 
 class _TablePainter:
@@ -203,6 +227,7 @@ class _TablePainter:
         self.page_w = float(pr.width())
         self.page_h = float(pr.height())
         self._first_page = True
+        self._font_scale = 1.0
 
     # -- geometry -------------------------------------------------------------
     def _col_widths(self, ws):
@@ -276,10 +301,14 @@ class _TablePainter:
     # -- pagination -----------------------------------------------------------
     def _bands(self, sizes, avail):
         """Greedily group consecutive sizes into bands each <= avail (points).
-        A single oversize element still gets its own band."""
+        A single oversize element still gets its own band. A small tolerance
+        absorbs float rounding from the fit-to-page scale factor (avail/total
+        can land a hair over `avail` after summation) so a page-width scale
+        doesn't spuriously spill the last column into its own extra band."""
         bands, start, acc = [], 0, 0.0
+        eps = 0.5
         for i, s in enumerate(sizes):
-            if acc > 0 and acc + s > avail:
+            if acc > 0 and acc + s > avail + eps:
                 bands.append((start, i))       # [start, i)
                 start, acc = i, 0.0
             acc += s
@@ -318,6 +347,15 @@ class _TablePainter:
         content_top = self.page_y + band_h + 4 * self.scale
         avail_w = self.page_w
         avail_h = (self.page_y + self.page_h) - content_top
+
+        # "fit columns to page": shrink column widths (and text) so the whole
+        # row fits on one page width, down to a floor scale; only past that
+        # floor do we still fall back to column-band tiling across pages.
+        total_w = sum(widths)
+        self._font_scale = 1.0
+        if total_w > avail_w > 0:
+            self._font_scale = max(avail_w / total_w, _MIN_FIT_SCALE)
+            widths = [w * self._font_scale for w in widths]
 
         header_rows = min(_FROZEN_HEADER_ROWS, max_row)
         header_h = sum(heights[:header_rows])
@@ -408,17 +446,15 @@ class _TablePainter:
         if text:
             f = QFont("Segoe UI, Arial")
             font = cell.font
+            base_pt = 9.0
             if font is not None:
                 if font.bold:
                     f.setBold(True)
                 if font.italic:
                     f.setItalic(True)
                 if font.size:
-                    f.setPointSizeF(float(font.size))
-                else:
-                    f.setPointSizeF(9.0)
-            else:
-                f.setPointSizeF(9.0)
+                    base_pt = float(font.size)
+            f.setPointSizeF(max(_MIN_FONT_PT, base_pt * self._font_scale))
             p.setFont(f)
             fg = None
             if font is not None and font.color is not None:
