@@ -188,11 +188,30 @@ def unit_quantities() -> list[tuple[str, str, dict]]:
     return out
 
 
+def resolve_stream_for_snapshot(hmb_path: str, case: str, stream: str):
+    """Resolve one (hmb, case, stream) to (StreamProps, feed|None), for
+    building a portable .calc snapshot. Raises if the stream isn't found —
+    the caller (Project.save) should surface that clearly rather than save
+    a project that silently can't replay."""
+    sp = H.load_stream_props(hmb_path, stream, case)
+    if sp is None:
+        raise ValueError(f"Stream '{stream}' not found in {hmb_path} (case '{case}')")
+    is_case = H.is_proii_export(hmb_path)
+    feed = H.read_feed(hmb_path, stream, case, sp, is_casesheet=is_case)
+    return sp, feed
+
+
 def run(rows: list[dict], hmb_path: str, *, case: str = "Case 1",
         flash_mode: str = "isothermal", out_dir: str | None = None,
         meta: dict | None = None, unit_system: str = "FPS",
-        unit_overrides: dict | None = None) -> list[str]:
+        unit_overrides: dict | None = None,
+        stream_snapshot: dict | None = None) -> list[str]:
     """Write a temp input workbook from the grid rows and run the engine.
+
+    ``stream_snapshot`` (optional): a pre-resolved ``{(hmb, case, stream):
+    (StreamProps, feed)}`` dict (see ``resolve_stream_for_snapshot``) —
+    lets a restored .calc project replay even if ``hmb_path`` no longer
+    resolves to a real file on disk.
 
     Returns the list of produced workbook paths (one per circuit).  Raises on
     engine error (the caller runs this off the UI thread and shows the error).
@@ -201,7 +220,8 @@ def run(rows: list[dict], hmb_path: str, *, case: str = "Case 1",
     inp = os.path.join(out_dir, "pipeline_input.xlsx")
     write_input_workbook(rows, inp, unit_system, unit_overrides)
     results = H.run_noiso(inp, hmb_path, out_path=None, case=case,
-                          flash_mode=flash_mode, meta=meta)
+                          flash_mode=flash_mode, meta=meta,
+                          stream_snapshot=stream_snapshot)
     # run_noiso writes into cwd when out_path is None; move them into out_dir
     paths = []
     import shutil

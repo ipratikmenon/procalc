@@ -5396,7 +5396,8 @@ def _build_input_sheet(
 # ════════════════════════════════════════════════════════════════════════
 #  Orchestration — one workbook per CIRCUIT
 # ════════════════════════════════════════════════════════════════════════
-def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
+def _make_stream_resolver(default_hmb: str, default_case: str, map_path,
+                          seed_cache: dict | None = None):
     """Return a memoised ``resolver(row) -> (StreamProps|None, feed|None)``.
 
     Resolution order per row:
@@ -5404,8 +5405,14 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
          row Case | CLI default).  Composition feed loaded for real flash.
       2. ``Stream Lookup`` blank → build manual StreamProps from yellow cells
          (no feed → frozen synthetic flash downstream).
-    """
-    cache: dict[tuple, tuple] = {}
+
+    ``seed_cache`` (optional): a pre-resolved ``{(hmb, case, stream): (sp,
+    feed)}`` snapshot — e.g. restored from a portable ``.calc`` project file.
+    Pre-populating the cache with it means the existing ``if key in cache``
+    check below transparently serves those streams without ever touching
+    ``HE.load_stream_props``/``FV.read_feed`` (or the original HMB file on
+    disk), so a saved project can replay even if that file has moved."""
+    cache: dict[tuple, tuple] = dict(seed_cache) if seed_cache else {}
 
     def resolver(row):
         stream = row.get("Stream Lookup")
@@ -5479,6 +5486,7 @@ def run_noiso(
         map_path: str | None = None,
         flash_mode: str = "isothermal",
         meta: dict | None = None,
+        stream_snapshot: dict | None = None,
 ) -> list[tuple[str, list[HE.Station], list, HE.StreamProps]]:
     """
     Process hydraulic circuits from ``input_path``.
@@ -5486,6 +5494,12 @@ def run_noiso(
     Each circuit (col A) is a series chain of lines.  All Main-run rows across
     all lines are marched sequentially as ONE continuous pressure profile.
     Branch rows per line are marched independently, each from its own Start P.
+
+    ``stream_snapshot`` (optional): a pre-resolved ``{(hmb, case, stream):
+    (StreamProps, feed)}`` dict — e.g. restored from a portable ``.calc``
+    project file. Every stream it covers resolves entirely from the
+    snapshot, never touching ``hmb_path`` on disk, so a saved project can
+    replay even if the original HMB workbook has moved or been deleted.
 
     Returns list of (out_xlsx, main_stations, main_flashes, sp) — one per circuit.
     """
@@ -5521,26 +5535,32 @@ def run_noiso(
         # ── Per-row stream resolver (HMB File / Case / manual) ────────────
         def_hmb  = c["hmb_file"] or hmb_path
         def_case = c["case"] or case
-        resolver = _make_stream_resolver(def_hmb, def_case, map_path)
+        resolver = _make_stream_resolver(def_hmb, def_case, map_path,
+                                         seed_cache=stream_snapshot)
 
         # ── Circuit default StreamProps (drives the screening sheets) ─────
         feed = None
         if sk:
-            sp = HE.load_stream_props(def_hmb, sk, def_case)
-            if sp is None:
-                try:
-                    map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
-                    if map_row:
-                        sk = map_row.lookup_key
-                        sp = HE.load_stream_props(def_hmb, sk, def_case)
-                except Exception:
-                    pass
-            if sp is None:
-                print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
-                      f"(case '{def_case}') — circuit '{cid}' skipped.")
-                continue
-            is_case = HE.is_proii_export(def_hmb)
-            feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
+            snap_hit = (stream_snapshot.get((def_hmb, def_case, sk))
+                       if stream_snapshot else None)
+            if snap_hit is not None:
+                sp, feed = snap_hit
+            else:
+                sp = HE.load_stream_props(def_hmb, sk, def_case)
+                if sp is None:
+                    try:
+                        map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
+                        if map_row:
+                            sk = map_row.lookup_key
+                            sp = HE.load_stream_props(def_hmb, sk, def_case)
+                    except Exception:
+                        pass
+                if sp is None:
+                    print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
+                          f"(case '{def_case}') — circuit '{cid}' skipped.")
+                    continue
+                is_case = HE.is_proii_export(def_hmb)
+                feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
             if feed is None:
                 print("  WARNING: no composition for default stream — flash uses "
                       "frozen split where applicable.")
