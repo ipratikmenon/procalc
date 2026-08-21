@@ -201,6 +201,61 @@ def resolve_stream_for_snapshot(hmb_path: str, case: str, stream: str):
     return sp, feed
 
 
+def snapshot_keys_for_rows(rows: list[dict], hmb_path: str, case: str) -> list[tuple]:
+    """Every distinct (hmb, case, stream) the given grid rows actually
+    reference — the circuit-level default plus any per-row overrides —
+    so a caller can build a complete .calc snapshot without missing a
+    stream a march would otherwise need."""
+    seen, out = set(), []
+    for r in rows:
+        stream = r.get("Stream Lookup")
+        if not stream:
+            continue
+        key = (r.get("HMB File") or hmb_path, r.get("Case") or case, stream)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def stream_snapshot_to_json(snapshot: dict) -> dict:
+    """{(hmb, case, stream): (StreamProps, feed|None)} -> a JSON-safe dict
+    (string keys, plain-dict values) for writing into a .calc file."""
+    import dataclasses
+    out = {}
+    for (hmb, case, stream), (sp, feed) in snapshot.items():
+        out[f"{hmb}||{case}||{stream}"] = {
+            "sp": dataclasses.asdict(sp) if sp is not None else None,
+            "feed": dataclasses.asdict(feed) if feed is not None else None,
+        }
+    return out
+
+
+def stream_snapshot_from_json(d: dict) -> dict:
+    """Reverse of stream_snapshot_to_json — rebuilds real StreamProps/
+    FlashFeed instances (run_noiso accesses them by attribute, so plain
+    dicts won't do) from a .calc file's JSON-safe snapshot payload.
+
+    FlashFeed.k_special is a dict[int, tuple[str, float]] — JSON coerces
+    int keys to strings and tuples to lists, so it needs an explicit
+    fixup on the way back in (verified: every other field round-trips
+    cleanly through dataclasses.asdict()/JSON as-is)."""
+    out = {}
+    for key, pair in d.items():
+        hmb, case, stream = key.split("||", 2)
+        sp_d, feed_d = pair.get("sp"), pair.get("feed")
+        sp = H.StreamProps(**sp_d) if sp_d is not None else None
+        feed = None
+        if feed_d is not None:
+            ks = feed_d.get("k_special")
+            if ks:
+                feed_d = dict(feed_d,
+                              k_special={int(k): tuple(v) for k, v in ks.items()})
+            feed = H.FlashFeed(**feed_d)
+        out[(hmb, case, stream)] = (sp, feed)
+    return out
+
+
 def run(rows: list[dict], hmb_path: str, *, case: str = "Case 1",
         flash_mode: str = "isothermal", out_dir: str | None = None,
         meta: dict | None = None, unit_system: str = "FPS",
