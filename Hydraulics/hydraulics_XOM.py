@@ -3411,6 +3411,16 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
         pid_raw = txt(g(rv, "PID Number"))
         if pid_raw and line_no:
             line_pid[line_no] = pid_raw
+
+        length_ft = gnum(rv, "Length (ft)") or 0.0
+        dz_ft = gnum(rv, "Elev Change (ft)") or 0.0
+        if abs(dz_ft) > length_ft:
+            raise SystemExit(
+                f"Elev Change ({dz_ft:g} ft) exceeds Length ({length_ft:g} ft) "
+                f"on Circuit {circuit} / Line {line_no} / Seq {seq}"
+                f"{' / ' + txt(g(rv, 'Comp ID')) if txt(g(rv, 'Comp ID')) else ''} "
+                "— a pipe segment cannot rise or fall more than its own length.")
+
         rows.append({
             "Circuit":          circuit,
             "Line No":          line_no,
@@ -3449,8 +3459,8 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Fitting Name":     txt(g(rv, "Fitting Name")),
             "Bore (in)":        num(g(rv, "Bore (in)")),
             "Piping Spec":      txt(g(rv, "Piping Spec")),
-            "Length (ft)":      gnum(rv, "Length (ft)") or 0.0,
-            "Elev Change (ft)": gnum(rv, "Elev Change (ft)") or 0.0,
+            "Length (ft)":      length_ft,
+            "Elev Change (ft)": dz_ft,
             "Direction":        txt(g(rv, "Direction")),
             "Fixed K":          num(g(rv, "Fixed K")),
             "Fixed dP (psi)":   gnum(rv, "Fixed dP (psi)"),
