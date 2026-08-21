@@ -9251,7 +9251,10 @@ def _cv_select_rated(inp: CvInputs, cases):
     cv_max_body = body["cd"] * (inp.nps or 2.0) ** 2
     cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
     if cv_req_max <= 0:
-        return None, "no positive required Cv - cannot size"
+        return None, ("no positive required Cv - cannot size (valve has no "
+                       "ΔP basis: set Control Valve Type=F with a "
+                       "downstream Destination row's Set P, or fill in "
+                       "\"Fixed dP (psi)\", or \"Fixed K\")")
     target = inp.design_open_pct or 80.0
     ladder = [c for c in _CV_RATED_LADDER if c <= cv_max_body * 1.001]
     if not ladder:
@@ -9569,8 +9572,10 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
         _cvc(ws, r, 4, detail, wrap=True)
         ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=6)
         r += 1
-    verdict("Capacity (Cv100 ≥ Cv req)", v["capacity"],
-            f"Rated {inp.cv100 or payload['cv100']:.2f} vs max req {v['cv_req_max']:.3f}")
+    rated_cv = inp.cv100 or payload["cv100"]
+    cap_detail = (payload.get("sel_note") or "no Rated Cv") if not rated_cv else (
+        f"Rated {rated_cv:.2f} vs max req {v['cv_req_max']:.3f}")
+    verdict("Capacity (Cv100 ≥ Cv req)", v["capacity"], cap_detail)
     verdict("Travel window (5–95%)", v["travel"])
     nmax = v["noise_max"]
     verdict(f"Noise ≤ {inp.noise_limit_dba:.0f} dB(A)", v["noise"],
