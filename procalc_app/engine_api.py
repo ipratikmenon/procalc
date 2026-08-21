@@ -99,6 +99,44 @@ def list_streams(path: str, case: str = "Case 1") -> list[str]:
         return []
 
 
+# ── units ────────────────────────────────────────────────────────────────
+def detect_hmb_units(hmb_path: str, case: str | None = None) -> tuple[str, dict]:
+    """Best-guess (unit_system, unit_overrides) from an HMB workbook's own
+    printed unit strings — for propagating them as fresh-project defaults.
+    Returns ("FPS", {}) on any failure/ambiguity (safe no-op default).
+    unit_overrides is {} when the HMB's units already match the chosen
+    system's defaults exactly (no redundant overrides)."""
+    try:
+        if is_proii_export(hmb_path):
+            raw = HMBP.extract_units(hmb_path, case or "Case 1")
+        else:
+            from pathlib import Path
+            raw = H.extract_stream_units(Path(hmb_path))
+    except Exception:
+        return "FPS", {}
+    if not raw:
+        return "FPS", {}
+
+    normalized = {}
+    for qty, u in raw.items():
+        key = " ".join(str(u).strip().upper().split())
+        norm = H.UN.HMB_UNIT_ALIASES.get(qty, {}).get(key)
+        if norm:
+            normalized[qty] = norm
+    if not normalized:
+        return "FPS", {}
+
+    best_system, best_score = "FPS", -1
+    for sysname, defaults in H.UN.SYSTEM_DEFAULTS.items():
+        score = sum(1 for qty, u in normalized.items() if defaults.get(qty) == u)
+        if score > best_score:
+            best_system, best_score = sysname, score
+
+    defaults = H.UN.SYSTEM_DEFAULTS[best_system]
+    overrides = {qty: u for qty, u in normalized.items() if defaults.get(qty) != u}
+    return best_system, overrides
+
+
 # ── PMS ────────────────────────────────────────────────────────────────────
 def pms_class_names() -> list[str]:
     return [c.name for c in PMS.CLASSES]

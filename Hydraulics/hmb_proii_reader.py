@@ -321,3 +321,38 @@ def get_stream(name, path, case="Case 1") -> HMBStream | None:
 
     return HMBStream(name=str(name).strip(), case=data["sheet"],
                      phase=phase, props=props)
+
+
+# ── raw unit strings (for the app's units-auto-propagation feature) ────────
+_KEY_TO_QTY = {
+    "temp_f": "T", "pres_psia": "P",
+    "total_mass": "mflow", "total_molar": "molflow",
+    "total_density": "rho", "vap_density": "rho", "liq_density": "rho",
+    "vap_visc": "visc", "liq_visc": "visc",
+    "liq_surf_tens": "st",
+    "vap_mw": "MW", "liq_mw": "MW", "mol_weight": "MW",
+    "total_std_liq": "qvol", "total_std_vap": "qvol",
+    "vap_sp_enthalpy": "h", "liq_sp_enthalpy": "h",
+}
+
+
+def extract_units(path, case="Case 1") -> dict[str, str]:
+    """Raw {quantity_code: unit_string} read from a Case-N HMB export's
+    per-stream scalar unit column (col B). Picks the FIRST stream in the
+    case — unit convention is per-case/workbook, not per-stream. Reuses
+    _SCALAR_MAP's existing label matchers; does NOT normalize spelling
+    (caller does). Unmapped/unknown labels are skipped."""
+    data = parse_case(path, case)
+    if not data["streams"]:
+        return {}
+    sc = data["scalars"].get(data["streams"][0], {})
+    out: dict[str, str] = {}
+    for matcher, key in _SCALAR_MAP:
+        qty = _KEY_TO_QTY.get(key)
+        if qty is None or qty in out:
+            continue
+        hit = next((u for lbl, (v, u) in sc.items()
+                    if lbl.startswith(matcher) and u), None)
+        if hit:
+            out[qty] = str(hit).strip()
+    return out

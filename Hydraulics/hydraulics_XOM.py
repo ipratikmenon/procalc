@@ -378,52 +378,56 @@ def txt(v):
 
 
 def _write_doc_header_block(ws, meta, ncol, title, start_row=1) -> int:
-    """Drawing-style document header: T.EN logo + client-logo slot on the
-    left, the sheet's title centered in the middle, and the Client/Project/
-    Site/Unit/Circuit Name + Prep/Chk/Appr/Revision/Page fields grouped
-    together on the right.  5 rows tall.  Returns the next free row so
-    callers can start their own content there directly — the title lives
-    inside this block now, it no longer needs its own row below.
+    """Drawing-style document header: T.EN logo + client-logo slot STACKED
+    in a single column on the left, the sheet's title in a single column
+    next to them, and the Prep/Chk/Appr/Revision/Page + Client/Project/
+    Site/Unit/Circuit Name fields grouped together on the right.  5 rows
+    tall.  Returns the next free row so callers can start their own content
+    there directly — the title lives inside this block now, it no longer
+    needs its own row below.
 
-    Fixed column footprint (not adaptive to the sheet's own width): logo
-    1-2, title 3-7, admin 8-9, identity 10-11 — the same layout on every
-    sheet regardless of how wide its own data table is."""
+    Fixed 6-column footprint (not adaptive to the sheet's own width, and
+    not adaptive to ``ncol`` — accepted for call-site compatibility only):
+    logo 1 (stacked T.EN/client), title 2, admin 3-4, identity 5-6 — the
+    same compact layout on every sheet regardless of how wide its own data
+    table is, chosen to fit within a narrow 6-column sheet (e.g. the CV
+    datasheet) with no overhang."""
     m = meta or {}
     r0 = start_row
     for i in range(5):
         ws.row_dimensions[r0 + i].height = 16
 
-    # ── logos (col 1 = T.EN, col 2 = client) ──
-    ws.merge_cells(start_row=r0, start_column=1, end_row=r0 + 4, end_column=1)
+    # ── col 1: logos stacked — T.EN on top (2 rows), client below (3 rows) ──
+    ws.merge_cells(start_row=r0, start_column=1, end_row=r0 + 1, end_column=1)
     _c(ws, r0, 1, "", bg=TEN_LGRAY, ha="center")
     try:
         if os.path.exists(_TEN_LOGO_PATH):
             from openpyxl.drawing.image import Image as _XLImage
             img = _XLImage(_TEN_LOGO_PATH)
-            img.height, img.width = 60, 120
+            img.height, img.width = 28, 56
             ws.add_image(img, f"A{r0}")
     except Exception:
         pass
 
-    ws.merge_cells(start_row=r0, start_column=2, end_row=r0 + 4, end_column=2)
+    ws.merge_cells(start_row=r0 + 2, start_column=1, end_row=r0 + 4, end_column=1)
     clp = m.get("client_logo_path")
-    _c(ws, r0, 2, "" if (clp and os.path.exists(clp)) else "Client logo",
+    _c(ws, r0 + 2, 1, "" if (clp and os.path.exists(clp)) else "Client logo",
        bg=TEN_LGRAY, fg=DGRAY, sz=8, ha="center")
     try:
         if clp and os.path.exists(clp):
             from openpyxl.drawing.image import Image as _XLImage
             img2 = _XLImage(clp)
-            img2.height, img2.width = 60, 120
-            ws.add_image(img2, f"B{r0}")
+            img2.height, img2.width = 44, 88
+            ws.add_image(img2, f"A{r0 + 2}")
     except Exception:
         pass
 
-    # ── title — centered between the logos and the project-detail fields ──
-    ws.merge_cells(start_row=r0, start_column=3, end_row=r0 + 4, end_column=7)
-    _c(ws, r0, 3, title or "", sz=12, bold=True, fg=NAVY, ha="center",
+    # ── col 2: title (single column, not spanned) ──
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0 + 4, end_column=2)
+    _c(ws, r0, 2, title or "", sz=8, bold=True, fg=NAVY, ha="center",
        va="center", wrap=True)
 
-    # ── admin block (cols 8/9) ──
+    # ── admin block (cols 3/4) ──
     admin = [
         ("Prep By", m.get("prep_by") or ""),
         ("Chk By", m.get("chk_by") or ""),
@@ -433,10 +437,10 @@ def _write_doc_header_block(ws, meta, ncol, title, start_row=1) -> int:
     ]
     for i, (lbl, val) in enumerate(admin):
         rr = r0 + i
-        _c(ws, rr, 8, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True, ha="right")
-        _c(ws, rr, 9, val, sz=8)
+        _c(ws, rr, 3, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True, ha="right")
+        _c(ws, rr, 4, val, sz=8)
 
-    # ── identity block (cols 10/11) ──
+    # ── identity block (cols 5/6) ──
     ident = [
         ("Client", m.get("client") or "—"),
         ("Project", m.get("project") or "—"),
@@ -446,8 +450,8 @@ def _write_doc_header_block(ws, meta, ncol, title, start_row=1) -> int:
     ]
     for i, (lbl, val) in enumerate(ident):
         rr = r0 + i
-        _c(ws, rr, 10, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True)
-        _c(ws, rr, 11, val, sz=8)
+        _c(ws, rr, 5, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True)
+        _c(ws, rr, 6, val, sz=8)
 
     return r0 + 5
 
@@ -498,14 +502,20 @@ def _apply_print_setup(ws):
                 ws.print_title_rows = f"1:{last_header_row}"
 
 
-# Title prefixes of the 9 sheet families that carry the shared document
+# Title prefixes of the sheet families that carry the shared document
 # header block (_write_doc_header_block) — matched against startswith() so
 # per-run-label variants (Pressure_Profile_Min, CV_FCV-01, Comp Phase
-# Splits Branch_1, ...) all match their family.
+# Splits Branch_1, ...) all match their family. "Stream_Props" alone also
+# covers "Stream_Props_Detail*" via startswith(). README carries the header
+# block too (see _build_readme_noiso) but is deliberately NOT listed here —
+# _apply_uniform_columns' forced 15-width/wrap on every column would wreck
+# its single-wide-column (width 120) free-text layout.
 _HEADER_BLOCK_SHEET_PREFIXES = (
     "Cover", "Line_List", "Pressure_Profile", "Flash_Profile",
     "Composition Splits", "Comp Phase Splits", "Composition Phase Splits",
     "CV_", "Input_Pipeline",
+    "Component_Detail", "Stream_Props", "FIV_EI_T2.2", "AIV",
+    "Two_Phase_Regime", "Flow_Pattern_Data", "H ", "V ",
 )
 
 
@@ -942,6 +952,61 @@ def _extract_from_sheet(ws) -> StreamProps:
         elif sp.liq_mass is not None and sp.vap_mass is None:
             sp.vap_mass = max(0.0, sp.total_mass - sp.liq_mass)
     return sp
+
+
+def extract_stream_units(path: Path) -> dict[str, str]:
+    """Raw {quantity_code: unit_string} from the first usable per-stream-dump
+    sheet's own Unit column (row[2]) — mirrors _extract_from_sheet's per-row
+    section/label parsing above but captures the unit string instead of the
+    value, and stops at the first sheet that yields any hits (unit
+    convention is per-workbook, not per-stream)."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out: dict[str, str] = {}
+    for ws in wb.worksheets:
+        if ws.title in SKIP_SHEETS:
+            continue
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        if not rows:
+            continue
+        section = ""
+        for rv in rows[1:]:
+            if not rv or len(rv) < 2 or rv[1] is None:
+                continue
+            label = str(rv[1]).strip()
+            unit = str(rv[2]).strip() if len(rv) > 2 and rv[2] is not None else ""
+            if re.match(r"^\d+[.\s]", label):
+                section = label.upper()
+                continue
+            if not unit:
+                continue
+            ll = label.lower()
+            if "FLOW RATE" in section:
+                if ll == "mass rate" or "total mass flow" in ll:
+                    out.setdefault("mflow", unit)
+                elif "molar rate" in ll:
+                    out.setdefault("molflow", unit)
+                elif "std liq" in ll or "std vap" in ll or "actual vol" in ll:
+                    out.setdefault("qvol", unit)
+            elif "CONDITION" in section:
+                if "temperature" in ll:
+                    out.setdefault("T", unit)
+                elif "pressure" in ll:
+                    out.setdefault("P", unit)
+                elif "molecular weight" in ll:
+                    out.setdefault("MW", unit)
+                elif "specific enthalpy" in ll:
+                    out.setdefault("h", unit)
+            elif "VAPOR PHASE" in section or "LIQUID PHASE" in section:
+                if "actual density" in ll or ll == "density":
+                    out.setdefault("rho", unit)
+                elif "viscosity" in ll and "kin" not in ll:
+                    out.setdefault("visc", unit)
+                elif "surface tension" in ll:
+                    out.setdefault("st", unit)
+        if out:
+            break
+    wb.close()
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1390,7 +1455,7 @@ def build_profile_sheet(wb, stations, line_no, stream_name, phase, sp=None):
         ws.add_chart(chart, f"A{sr + 2}")
 
 
-def build_detail_sheet(wb, stations, phase):
+def build_detail_sheet(wb, stations, phase, meta=None):
     ws = wb.create_sheet("Component_Detail")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -1402,19 +1467,17 @@ def build_detail_sheet(wb, stations, phase):
         "TWO-PHASE": "Homogeneous no-slip: ρns=1/(x/ρg+(1-x)/ρl), McAdams μ, "
                      "mass-flux G. f·(L/D)·G²/(2ρns) + K·G²/(2ρns) + ρns·gΔz.",
     }[phase]
-    ws.merge_cells("A1:K1")
-    _c(ws, 1, 1, f"COMPONENT DETAIL   |   Phase model: {phase}   |   {note}",
-       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
-    ws.row_dimensions[1].height = 30
+    title = f"COMPONENT DETAIL   |   Phase model: {phase}   |   {note}"
+    r0 = _write_doc_header_block(ws, meta, 11, title=title)
 
     headers = ["Seq", "Comp ID", "Fitting", _U.hdr("ID", "Lin"),
                _U.hdr("Length", "L"), _U.hdr("Velocity", "v"),
                "Reynolds", "Friction f", _U.hdr("Density", "rho"),
                _U.hdr("dP Total", "dP"), _U.hdr("P Out", "P")]
-    _hdr(ws, headers, row=2)
-    ws.freeze_panes = "A3"
+    _hdr(ws, headers, row=r0)
+    ws.freeze_panes = f"A{r0 + 1}"
     for i, s in enumerate(stations):
-        r = i + 3
+        r = i + r0 + 1
         bg = LGRAY if i % 2 else WHITE
         vals = [s.seq, s.comp_id, s.fitting,
                 _U.disp("Lin", s.id_in), _U.disp("L", s.length_ft),
@@ -1428,13 +1491,12 @@ def build_detail_sheet(wb, stations, phase):
         cw(ws, ci, w)
 
 
-def build_stream_sheet(wb, sp, phase):
+def build_stream_sheet(wb, sp, phase, meta=None):
     ws = wb.create_sheet("Stream_Props")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
-    ws.merge_cells("A1:C1")
-    _c(ws, 1, 1, f"HMB STREAM — {sp.stream}", bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    title = f"HMB STREAM — {sp.stream}"
+    r0 = _write_doc_header_block(ws, meta, 3, title=title)
 
     rows = [
         ("Phase (HMB)", sp.phase, ""),
@@ -1454,9 +1516,10 @@ def build_stream_sheet(wb, sp, phase):
         ("Source sheet", sp.source_sheet, ""),
         ("Unconverged warning", "YES" if sp.warned else "No", ""),
     ]
-    _hdr(ws, ["Property", "Value", "Unit / Note"], row=2)
+    _hdr(ws, ["Property", "Value", "Unit / Note"], row=r0)
+    ws.freeze_panes = f"A{r0 + 1}"
     for i, (k, v, u) in enumerate(rows):
-        r = i + 3
+        r = i + r0 + 1
         bg = LGRAY if i % 2 else WHITE
         _c(ws, r, 1, k, bg=bg, sz=9, bold=True)
         _c(ws, r, 2, "" if v is None else v, bg=LTBLUE, sz=9,
@@ -1627,7 +1690,7 @@ def _fiv_support_color(arrangement: str) -> str:
 
 def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
                     gas_density_fn, limits=(0.15, 0.25, 0.35, 0.45), material="Steel",
-                    station_lines=None, line_colors=None):
+                    station_lines=None, line_colors=None, meta=None):
     ws = wb.create_sheet("FIV_EI_T2.2")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = ORANGE
@@ -1648,19 +1711,16 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
     headers = base_headers + lim_headers
     ncol = len(headers)
 
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
     lim_txt = ", ".join(str(l) for l in limits)
-    _c(ws, 1, 1,
-       f"FIV — EI T2.2   |   Line {line_no} <-> Stream {stream_name}   |   "
-       f"LOF limits = {lim_txt}   |   {material}   |   "
-       f"{datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"FIV — EI T2.2   |   Line {line_no} <-> Stream {stream_name}   |   "
+             f"LOF limits = {lim_txt}   |   {material}   |   "
+             f"{datetime.now():%d-%b-%Y %H:%M}")
+    r0 = _write_doc_header_block(ws, meta, max(ncol, 6), title=title)
 
-    _hdr(ws, headers, row=2)
+    _hdr(ws, headers, row=r0)
     for ci in range(n_base + 1, ncol + 1):   # tint the LOF blocks
-        ws.cell(2, ci).fill = _fill(GRNHDR)
-    ws.freeze_panes = "C3"
+        ws.cell(r0, ci).fill = _fill(GRNHDR)
+    ws.freeze_panes = f"C{r0 + 1}"
 
     def _span_pair(a):
         if a["arrangement"] == "Not achievable":
@@ -1670,7 +1730,7 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
         return round(a["span_m"], 3), round(a["span_m"] / FT_TO_M, 2)
 
     multi = bool(station_lines and line_colors and len(set(station_lines)) > 1)
-    r = 3
+    r = r0 + 1
     worst = None
     prev_line = None
     for idx, s in enumerate(stations):
@@ -1807,7 +1867,7 @@ def ei_risk(factor: float) -> str:
 
 
 def build_aiv_sheet(wb, stations, sp, line_no, stream_name, efficiency=1e-4,
-                    station_lines=None, line_colors=None):
+                    station_lines=None, line_colors=None, meta=None):
     ws = wb.create_sheet("AIV")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -1825,30 +1885,27 @@ def build_aiv_sheet(wb, stations, sp, line_no, stream_name, efficiency=1e-4,
         dp_src_pa = rho_src = W_ac = lw_src = 0.0
 
     ncol = 13
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
-       f"AIV — source attenuation   |   Line {line_no} <-> Stream {stream_name}   |   "
-       f"η={efficiency:g}   |   {datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"AIV — source attenuation   |   Line {line_no} <-> Stream {stream_name}   |   "
+             f"η={efficiency:g}   |   {datetime.now():%d-%b-%Y %H:%M}")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
 
-    _c(ws, 2, 1, "SOURCE", bg=GRNHDR, fg=WHITE, bold=True)
+    _c(ws, r0, 1, "SOURCE", bg=GRNHDR, fg=WHITE, bold=True)
     src_txt = (f"{src.comp_id} / {src.fitting}  |  "
                f"Δp={_U.disp('dP', src.dp_total_psi, 4)} {_U.label('dP')}  "
                f"|  W_acoustic={W_ac:.3g} W  |  PWL={lw_src:.1f} dB"
                if src else "no stations")
-    ws.merge_cells("B2:M2")
-    _c(ws, 2, 2, src_txt, bg=GREEN, bold=True)
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=13)
+    _c(ws, r0, 2, src_txt, bg=GREEN, bold=True)
 
     headers = ["Seq", "Comp ID", "Fitting", "OD (mm)", "Wall (mm)",
                "Dist from src (m)", "Cum. atten (dB)", "Local PWL (dB)",
                "C-M param", "C-M screen", "EI likelihood", "EI risk",
                "Dyn. stress idx (MPa)"]
-    _hdr(ws, headers, row=3)
-    ws.freeze_panes = "C4"
+    _hdr(ws, headers, row=r0 + 1)
+    ws.freeze_panes = f"C{r0 + 2}"
 
     multi = bool(station_lines and line_colors and len(set(station_lines)) > 1)
-    r = 4
+    r = r0 + 2
     cum_att = 0.0
     started = False
     prev_cum_ft = None
@@ -2238,7 +2295,7 @@ def _regime_cell(ws, r, ci, regime):
 
 
 def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
-                        flashes=None):
+                        flashes=None, meta=None):
     """Two-phase flow-regime map across all stations + slug summary.
 
     ``flashes``, when given, is the per-station list of FlashResult objects
@@ -2254,16 +2311,15 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
 
     title = (f"Two-Phase Flow Regime Map   |   Line {line_no} <-> Stream "
              f"{stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}")
-    _c(ws, 1, 1, title, fg=NAVY, sz=11, bold=True)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(_TPR_HEADERS))
+    r0 = _write_doc_header_block(ws, meta, len(_TPR_HEADERS), title=title)
 
-    _hdr(ws, _TPR_HEADERS, row=2)
-    _c(ws, 2, 4, _U.hdr("ID", "Lin"), bg=NAVY, fg=WHITE, sz=9, bold=True,
+    _hdr(ws, _TPR_HEADERS, row=r0)
+    _c(ws, r0, 4, _U.hdr("ID", "Lin"), bg=NAVY, fg=WHITE, sz=9, bold=True,
        ha="center", wrap=True)
     for ci, w in enumerate(_TPR_WIDTHS, 1):
         cw(ws, ci, w)
 
-    r = 3
+    r = r0 + 1
     regime_counts: dict[str, int] = {}
     max_force = (0.0, None)
     single_phase_label = None
@@ -2373,7 +2429,7 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(_TPR_HEADERS))
         r += 1
 
-    ws.freeze_panes = "D3"
+    ws.freeze_panes = f"D{r0 + 1}"
     return ws
 
 
@@ -4909,6 +4965,7 @@ def _build_stream_props_detail_sheet(
         circuit_id: str,
         stream_name: str,
         run_label: str = "Main",
+        meta=None,
 ) -> str:
     """One Property/Total/Vapor/Liquid block per fitting.  (The per-fitting
     component vapor/liquid mole-fraction table now lives in its own
@@ -4927,15 +4984,12 @@ def _build_stream_props_detail_sheet(
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
     ncol = 5
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
-       f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
-       f"Stream: {stream_name}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    title = (f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
+             f"Stream: {stream_name}")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
 
     u = _u()
-    r = 3
+    r = r0 + 1
     for s, fr, fracs in zip(stations, flashes, comp_fracs):
         if fr is None:
             continue
@@ -5758,7 +5812,7 @@ def run_noiso(
         # ── Branch sheets ────────────────────────────────────────────────
         sp_sheets = [_build_stream_props_detail_sheet(
             wb, main_stations, main_flashes, main_cfracs, sp,
-            circuit_id=cid, stream_name=sk, run_label="Main")]
+            circuit_id=cid, stream_name=sk, run_label="Main", meta=circuit_meta)]
 
         for (label, sts, fls, cmps, b_lns, cfracs) in branch_runs:
             pp_sheets.append(_build_pressure_profile_sheet(
@@ -5770,7 +5824,7 @@ def run_noiso(
                 wb, sts, fls, feed, sp, run_label=label, meta=circuit_meta))
             sp_sheets.append(_build_stream_props_detail_sheet(
                 wb, sts, fls, cfracs, sp,
-                circuit_id=cid, stream_name=sk, run_label=label))
+                circuit_id=cid, stream_name=sk, run_label=label, meta=circuit_meta))
             ph_sheets.append(build_composition_phase_splits_sheet(
                 wb, sts, fls, cfracs, sp, cid, sk,
                 station_lines=b_lns, line_colors=lc, run_label=label,
@@ -5831,26 +5885,29 @@ def run_noiso(
         # ── Screening / analysis sheets (all main stations, whole circuit)
         circuit_label = f"Circuit {cid}  ({', '.join(lns)})"
         if main_stations:
-            HE.build_detail_sheet(wb, main_stations, phase)
-            HE.build_stream_sheet(wb, sp, phase)
+            HE.build_detail_sheet(wb, main_stations, phase, meta=circuit_meta)
+            HE.build_stream_sheet(wb, sp, phase, meta=circuit_meta)
             HE.build_fiv_sheet(wb, main_stations, sp,
                                 circuit_label, sk, gas_density_fn=gdf,
-                                station_lines=station_lines, line_colors=lc)
+                                station_lines=station_lines, line_colors=lc,
+                                meta=circuit_meta)
             HE.build_aiv_sheet(wb, main_stations, sp,
                                 circuit_label, sk,
-                                station_lines=station_lines, line_colors=lc)
+                                station_lines=station_lines, line_colors=lc,
+                                meta=circuit_meta)
             HE.build_regime_sheet(wb, main_stations, sp,
                                    circuit_label, sk, gas_density_fn=gdf,
-                                   flashes=main_flashes)
+                                   flashes=main_flashes, meta=circuit_meta)
         else:
             wb.create_sheet("Component_Detail")
-            HE.build_stream_sheet(wb, sp, phase)
+            HE.build_stream_sheet(wb, sp, phase, meta=circuit_meta)
 
         fp_map_sheets = []
         try:
             FPM = HE                      # flow-pattern maps merged into this file
             fp_map_sheets = FPM.build_flow_pattern_maps(
-                wb, main_stations, sp, circuit_label, sk, gas_density_fn=gdf)
+                wb, main_stations, sp, circuit_label, sk, gas_density_fn=gdf,
+                meta=circuit_meta)
         except Exception as exc:
             print(f"  (flow-pattern maps skipped: {exc})")
 
@@ -5867,7 +5924,7 @@ def run_noiso(
                            hmb_meta=hmb_meta,
                            meta=circuit_meta)
         _build_readme_noiso(wb, circuit_label, sk, sp, phase,
-                            input_path, hmb_path, flash_mode)
+                            input_path, hmb_path, flash_mode, meta=circuit_meta)
 
         # ── Branded cover sheet (built last so it can list the contents) ──
         cover_meta = dict(circuit_meta)
@@ -5943,13 +6000,13 @@ def run_noiso(
 #  README sheet
 # ════════════════════════════════════════════════════════════════════════
 def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
-                         input_path, hmb_path, flash_mode):
+                         input_path, hmb_path, flash_mode, meta=None):
     ws = wb.create_sheet("README")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = MGRAY
+    title = f"HyCalign Hydraulics — NO-ISO Flash Mode — Line {line_no}"
+    r0 = _write_doc_header_block(ws, meta, 6, title=title)
     cw(ws, 1, 120)
-    ws["A1"] = f"HyCalign Hydraulics — NO-ISO Flash Mode — Line {line_no}"
-    ws["A1"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
 
     lines = [
         "",
@@ -5985,7 +6042,7 @@ def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
         "",
         "VERIFY: schedule/wall from asme_data.py — confirm before design use.",
     ]
-    for i, t in enumerate(lines, 2):
+    for i, t in enumerate(lines, r0):
         ws.cell(i, 1).value = t
         ws.cell(i, 1).font = Font(
             name="Calibri", size=9,
@@ -8750,30 +8807,27 @@ def _fmt(v):
     return v
 
 
-def build_param_table(wb, rows, line_no, stream_name, ctrl_seq):
+def build_param_table(wb, rows, line_no, stream_name, ctrl_seq, meta=None):
     ws = wb.create_sheet("Flow_Pattern_Data")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = STEEL
     ncol = len(_TABLE_COLS)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-    _cell(ws, 1, 1,
-          f"FLOW-PATTERN PARAMETERS  |  Line {line_no} <-> Stream {stream_name}"
-          "   |   per-station, local pressure  (replica of Slug-flow Calculation)",
-          bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"FLOW-PATTERN PARAMETERS  |  Line {line_no} <-> Stream {stream_name}"
+             "   |   per-station, local pressure  (replica of Slug-flow Calculation)")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
     _u = _U
     for ci, (h, key, _unit) in enumerate(_TABLE_COLS, 1):
-        _cell(ws, 2, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        _cell(ws, r0, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
         dyn_qty = _TABLE_DYN_QTY.get(key)
         if dyn_qty and _u is not None:
             ulab = _u.label(dyn_qty)
         else:
             ulab = _unit or ""
-        _cell(ws, 3, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
-    ws.row_dimensions[2].height = 30
-    ws.freeze_panes = "C4"
+        _cell(ws, r0 + 1, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
+    ws.row_dimensions[r0].height = 30
+    ws.freeze_panes = f"C{r0 + 2}"
     for i, (st, pr) in enumerate(rows):
-        r = i + 4
+        r = i + r0 + 2
         is_ctrl = (st.seq == ctrl_seq)
         bg = AMBER if is_ctrl else (LGRAY if i % 2 else WHITE)
         for ci, (_, key, _unit) in enumerate(_TABLE_COLS, 1):
@@ -8868,7 +8922,7 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
     return chart, col
 
 
-def build_map_sheets(wb, rows, ctrl_seq):
+def build_map_sheets(wb, rows, ctrl_seq, meta=None):
     """rows = [(station, FPParams)]; build one sheet per map-group with charts."""
     # group maps by output sheet (T&D has three charts on one sheet)
     by_sheet: dict[str, list[MapDef]] = {}
@@ -8882,13 +8936,14 @@ def build_map_sheets(wb, rows, ctrl_seq):
         ws = wb.create_sheet(sheet[:31])
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = GRNHDR
+        start_row = _write_doc_header_block(ws, meta, 6, title=sheet)
         data_col = 30                       # data lives far to the right
         for j, mp in enumerate(maps):
             op_points = [(pr.get(mp.xkey), pr.get(mp.ykey)) for _, pr in rows]
             ctrl_pr = next((pr for st, pr in rows if st.seq == ctrl_seq), None)
             ctrl_point = (ctrl_pr.get(mp.xkey), ctrl_pr.get(mp.ykey)) if ctrl_pr else None
             chart, data_col = _add_scatter(ws, mp, data_col, op_points, ctrl_point)
-            anchor = f"A{2 + j * 23}"
+            anchor = f"A{start_row + j * 23}"
             ws.add_chart(chart, anchor)
     return list(by_sheet)
 
@@ -8896,7 +8951,8 @@ def build_map_sheets(wb, rows, ctrl_seq):
 # ════════════════════════════════════════════════════════════════════════
 #  5.  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════════
-def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_fn):
+def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_fn,
+                             meta=None):
     """Add the parameter table + all flow-pattern map sheets to workbook wb."""
     rows = [(st, params_from_station(sp, st, gas_density_fn)) for st in stations]
     if not rows:
@@ -8904,8 +8960,8 @@ def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_
     # controlling station = max ρg·vg² (gas momentum flux), like the FIV sheet
     ctrl_seq = max(
         rows, key=lambda rp: (rp[1].rgvg2 or 0.0))[0].seq
-    build_param_table(wb, rows, line_no, stream_name, ctrl_seq)
-    sheets = build_map_sheets(wb, rows, ctrl_seq)
+    build_param_table(wb, rows, line_no, stream_name, ctrl_seq, meta=meta)
+    sheets = build_map_sheets(wb, rows, ctrl_seq, meta=meta)
     return ["Flow_Pattern_Data"] + sheets
 
 

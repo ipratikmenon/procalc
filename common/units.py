@@ -139,6 +139,30 @@ SYSTEM_DEFAULTS: dict[str, dict[str, str]] = {
     },
 }
 
+# ── HMB-export unit spellings → app unit strings ────────────────────────────
+# Keyed by quantity code, then by the HMB's raw unit string UPPERCASED with
+# internal whitespace collapsed to a single space (see engine_api.detect_hmb_
+# units's normalization step). Only covers quantities this app itself tracks
+# (QUANTITY_NAMES below) — properties with no app-side quantity code (Cp,
+# thermal conductivity, API gravity, Cp/Cv ratio, Z-factor, acentric factor,
+# critical volume) are intentionally NOT here; they have nothing to override.
+# The two multiplier-quirk spellings ("M LB/HR", "LB/M FT3") are intentionally
+# NOT here either — they are not distinct units, just a value-scaling quirk
+# already handled by _conv_massflow/_conv_density in the HMB readers.
+HMB_UNIT_ALIASES: dict[str, dict[str, str]] = {
+    "P":       {"PSIA": "psia", "KPA": "kPa", "BARA": "bara", "MPA": "MPa"},
+    "T":       {"°F": "degF", "DEG F": "degF", "°C": "degC", "DEG C": "degC"},
+    "mflow":   {"LB/HR": "lb/hr", "KG/HR": "kg/hr", "KG/H": "kg/hr", "T/H": "t/h"},
+    "molflow": {"LB-MOL/HR": "lb-mol/hr", "KGMOL/HR": "kgmol/hr", "KMOL/H": "kmol/h"},
+    "rho":     {"LB/FT3": "lb/ft3", "KG/M3": "kg/m3"},
+    "qvol":    {"FT3/HR": "ft3/hr", "M3/HR": "m3/h", "M3/H": "m3/h"},
+    "h":       {"BTU/LB": "BTU/lb", "KJ/KG": "kJ/kg"},
+    "Q":       {"MM BTU/HR": "MMBTU/hr", "MMBTU/HR": "MMBTU/hr", "KW": "kW"},
+    "visc":    {"CP": "cP"},
+    "MW":      {"G/MOL": "g/mol"},
+    "st":      {"DYNE/CM": "dyn/cm", "MN/M": "mN/m"},
+}
+
 QUANTITY_NAMES = {
     "P": "Pressure (absolute)", "dP": "Pressure drop", "T": "Temperature",
     "dT": "Temperature difference", "mflow": "Mass flow", "molflow": "Molar flow",

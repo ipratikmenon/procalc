@@ -141,9 +141,10 @@ class MainWindow(QMainWindow):
         rw = QWidget(); rw.setLayout(row)
         # units: system + per-quantity overrides (per project)
         self.unit_overrides: dict = {}
+        self._units_customized = False
+        self._applying_units_programmatically = False
         self.cb_units = QComboBox(); self.cb_units.addItems(api.unit_systems())
-        self.cb_units.currentTextChanged.connect(lambda *_: self.unit_overrides.clear()
-                                                 or self.controller.schedule())
+        self.cb_units.currentTextChanged.connect(self._on_units_changed)
         self.btn_units = QPushButton("Overrides…"); self.btn_units.setObjectName("Secondary")
         self.btn_units.clicked.connect(self._edit_unit_overrides)
         urow = QHBoxLayout()
@@ -328,6 +329,12 @@ class MainWindow(QMainWindow):
         self.ed_revision.setText(m.get("revision", "") or "")
         self.ed_page.setText(m.get("page", "") or "")
 
+    def _on_units_changed(self, *_):
+        self.unit_overrides.clear()
+        if not self._applying_units_programmatically:
+            self._units_customized = True
+        self.controller.schedule()
+
     def _edit_unit_overrides(self):
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QGridLayout,
                                        QDialogButtonBox, QScrollArea)
@@ -372,6 +379,7 @@ class MainWindow(QMainWindow):
                                    if cb.currentData()}
             n = len(self.unit_overrides)
             self.btn_units.setText(f"Overrides… ({n})" if n else "Overrides…")
+            self._units_customized = True
             self.controller.schedule()
 
     def _streams_for_delegate(self):
@@ -399,6 +407,27 @@ class MainWindow(QMainWindow):
         # live resolution takes over; the next Save rebuilds a fresh snapshot
         self._stream_snapshot = None
         cases = api.list_cases(path) or ["Case 1"]
+
+        if not self._units_customized:
+            try:
+                sysname, overrides = api.detect_hmb_units(path, cases[0])
+            except Exception:
+                sysname, overrides = None, None
+            if sysname:
+                self._applying_units_programmatically = True
+                try:
+                    ui = self.cb_units.findText(sysname)
+                    self.cb_units.setCurrentIndex(ui if ui >= 0 else 0)
+                    self.unit_overrides = dict(overrides or {})
+                    n = len(self.unit_overrides)
+                    self.btn_units.setText(f"Overrides… ({n})" if n else "Overrides…")
+                finally:
+                    self._applying_units_programmatically = False
+                self.controller.schedule()
+                self._log(f"Units auto-detected from HMB: {sysname} "
+                         f"({len(self.unit_overrides)} override"
+                         f"{'s' if len(self.unit_overrides) != 1 else ''})")
+
         self.cb_case.clear(); self.cb_case.addItems(cases)
         kind = "PRO/II Case-N export" if api.is_proii_export(path) else "per-stream dump"
         n = len(api.list_streams(path, cases[0]))
@@ -429,6 +458,7 @@ class MainWindow(QMainWindow):
         self.model.set_rows([])
         self._set_meta_dict({})
         self.unit_overrides = {}
+        self._units_customized = False
         self.cb_units.setCurrentIndex(0)
         self._refresh_hmb_label()
         self.setWindowTitle("Procalc Hydraulics — T.EN — (untitled)")
@@ -468,6 +498,7 @@ class MainWindow(QMainWindow):
         self.unit_overrides = dict(proj.unit_overrides or {})
         n = len(self.unit_overrides)
         self.btn_units.setText(f"Overrides… ({n})" if n else "Overrides…")
+        self._units_customized = True
 
         self._set_meta_dict(proj.meta)
         self.client_logo_path = None
