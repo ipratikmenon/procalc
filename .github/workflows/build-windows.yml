@@ -1,0 +1,111 @@
+name: Build Windows Installer
+
+# Builds the Procalc Hydraulics Windows installer on a real Windows runner
+# (PyInstaller never cross-compiles -- a Windows .exe can only be produced
+# from a Windows host). Mirrors build/build.ps1 step-for-step; see
+# build/README.md for the manual equivalent and the full smoke-test
+# checklist a human should still run on a clean Windows VM before release.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/psv-cv-calculations-85mwbp
+    paths:
+      - "procalc_app/**"
+      - "Hydraulics/**"
+      - "common/**"
+      - "build/**"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r procalc_app\requirements.txt
+          pip install pyinstaller
+
+      - name: Run PyInstaller
+        working-directory: build
+        run: pyinstaller procalc.spec --clean --noconfirm
+
+      - name: Verify PyInstaller output
+        working-directory: build
+        run: |
+          if (-not (Test-Path "dist\Procalc\Procalc.exe")) {
+            throw "PyInstaller did not produce dist\Procalc\Procalc.exe"
+          }
+          Write-Host "PyInstaller output OK: dist\Procalc\Procalc.exe"
+
+      - name: Smoke-test the frozen exe (offscreen, headless)
+        working-directory: build
+        env:
+          QT_QPA_PLATFORM: offscreen
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\Procalc\Procalc.exe" -PassThru
+          Start-Sleep -Seconds 8
+          if ($proc.HasExited) {
+            Write-Host "Procalc.exe exited early with code $($proc.ExitCode)"
+            throw "Smoke test failed: the frozen app crashed on startup (likely a missing hidden import/DLL)."
+          }
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "Smoke test passed: Procalc.exe stayed alive for 8s without crashing."
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer with Inno Setup
+        working-directory: build
+        shell: pwsh
+        run: |
+          $iscc = $null
+          if (Get-Command iscc.exe -ErrorAction SilentlyContinue) {
+            $iscc = (Get-Command iscc.exe).Source
+          } else {
+            foreach ($cand in @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+            )) {
+              if ($cand -and (Test-Path $cand)) { $iscc = $cand; break }
+            }
+          }
+          if (-not $iscc) { throw "iscc.exe (Inno Setup 6) not found after choco install." }
+          Write-Host "Using Inno Setup: $iscc"
+          & $iscc installer.iss
+
+      - name: Verify installer output
+        working-directory: build
+        run: |
+          $installer = Get-ChildItem -Path "Output" -Filter "ProcalcSetup-*.exe" -ErrorAction SilentlyContinue |
+                       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            throw "Inno Setup did not produce an installer under build\Output\"
+          }
+          Write-Host "Installer OK: $($installer.FullName)"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProcalcSetup
+          path: build/Output/ProcalcSetup-*.exe
+          if-no-files-found: error
+
+      - name: Upload raw PyInstaller dist (debugging aid)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Procalc-dist
+          path: build/dist/Procalc/**
+          if-no-files-found: warn
