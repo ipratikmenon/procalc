@@ -1,0 +1,109 @@
+name: Build macOS App
+
+# Builds the Procalc Hydraulics macOS app (Apple Silicon, unsigned) on a
+# real macOS runner (PyInstaller never cross-compiles -- a macOS .app can
+# only be produced from a macOS host). Mirrors build-windows.yml's
+# structure: PyInstaller -> smoke test -> package -> upload. Packaging uses
+# hdiutil (built into macOS) instead of Inno Setup. Unsigned -- see
+# build/README.md for the one-time Gatekeeper "right-click -> Open" step
+# needed on first launch.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/psv-cv-calculations-85mwbp
+    paths:
+      - "procalc_app/**"
+      - "Hydraulics/**"
+      - "common/**"
+      - "build/**"
+      - ".github/workflows/build-macos.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r procalc_app/requirements.txt
+          pip install pyinstaller
+
+      - name: Generate app icon (.icns from the T.EN logo)
+        working-directory: build
+        run: |
+          set -e
+          SRC="../procalc_app/resources/ten_logo.png"
+          if [ -f "$SRC" ]; then
+            ICONSET=procalc.iconset
+            mkdir -p "$ICONSET"
+            for size in 16 32 128 256 512; do
+              sips -z $size $size "$SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+              double=$((size * 2))
+              sips -z $double $double "$SRC" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+            done
+            iconutil -c icns "$ICONSET" -o procalc.icns
+            rm -rf "$ICONSET"
+            echo "Generated build/procalc.icns"
+          else
+            echo "No source logo at $SRC -- skipping icon generation, PyInstaller will use its default icon."
+          fi
+
+      - name: Run PyInstaller
+        working-directory: build
+        run: pyinstaller procalc.spec --clean --noconfirm
+
+      - name: Verify PyInstaller output
+        working-directory: build
+        run: |
+          if [ ! -d "dist/Procalc.app" ]; then
+            echo "PyInstaller did not produce dist/Procalc.app"
+            exit 1
+          fi
+          echo "PyInstaller output OK: dist/Procalc.app"
+
+      - name: Smoke-test the frozen app (offscreen, headless)
+        working-directory: build
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -e
+          ./dist/Procalc.app/Contents/MacOS/Procalc &
+          PID=$!
+          sleep 8
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "Procalc exited early -- smoke test failed (likely a missing hidden import/Qt plugin)."
+            exit 1
+          fi
+          kill "$PID"
+          echo "Smoke test passed: Procalc stayed alive for 8s without crashing."
+
+      - name: Build DMG
+        working-directory: build
+        run: |
+          set -e
+          hdiutil create -volname "Procalc" -srcfolder dist/Procalc.app -ov -format UDZO ProcalcSetup-0.1.0.dmg
+          ls -lh ProcalcSetup-0.1.0.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProcalcSetup-macOS
+          path: build/ProcalcSetup-0.1.0.dmg
+          if-no-files-found: error
+
+      - name: Upload raw app bundle (debugging aid)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Procalc-app-bundle
+          path: build/dist/Procalc.app
+          if-no-files-found: warn

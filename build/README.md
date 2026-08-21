@@ -1,9 +1,15 @@
-# Procalc Hydraulics — Windows packaging
+# Procalc Hydraulics — packaging (Windows + macOS)
 
-This directory builds **Procalc Hydraulics** into a Windows desktop installer.
+This directory builds **Procalc Hydraulics** into a native desktop package.
 It wraps the PySide6 app in `procalc_app/` together with the hydraulics engine
-in `Hydraulics/` and the shared helpers in `common/`, then produces a signed-
-capable one-dir bundle and an Inno Setup installer.
+in `Hydraulics/` and the shared helpers in `common/`. `procalc.spec` is a
+single, cross-platform PyInstaller spec: on Windows it produces a one-dir
+bundle that `installer.iss` packages into an Inno Setup installer; on macOS
+it additionally wraps that bundle into a `Procalc.app`, packaged into a
+`.dmg` via `hdiutil`. Both are built by CI (`.github/workflows/build-windows.yml`
+/ `build-macos.yml`) since PyInstaller never cross-compiles — a Windows
+build can only come from a Windows host, a macOS build only from a macOS
+host (see each section below).
 
 Everything here is self-contained in `build/` — nothing outside it is modified.
 
@@ -13,11 +19,12 @@ Everything here is self-contained in `build/` — nothing outside it is modified
 
 | File | Purpose |
 |------|---------|
-| `procalc.spec` | PyInstaller spec — **one-dir** build (`dist/Procalc/`). |
+| `procalc.spec` | PyInstaller spec, **shared by both platforms** — one-dir build (`dist/Procalc/`) on Windows; also wraps a `dist/Procalc.app` bundle on macOS. |
 | `rthook_paths.py` | PyInstaller runtime hook — puts the bundled engine dirs on `sys.path`. |
-| `installer.iss` | Inno Setup 6 script — packages `dist/Procalc/` into an installer. |
-| `build.ps1` | PowerShell driver — venv → deps → PyInstaller → Inno Setup. |
-| `procalc.ico` | *(optional, you supply)* app/installer icon. |
+| `installer.iss` | Inno Setup 6 script (Windows only) — packages `dist/Procalc/` into an installer. |
+| `build.ps1` | PowerShell driver (Windows only) — venv → deps → PyInstaller → Inno Setup. |
+| `procalc.ico` | *(optional, you supply)* Windows app/installer icon. |
+| `procalc.icns` | *(optional — CI generates it)* macOS app icon, built from `procalc_app/resources/ten_logo.png`. |
 
 ---
 
@@ -76,6 +83,35 @@ The installer version is set by `#define AppVersion "0.1.0"` at the top of
 
 ---
 
+## macOS build (Apple Silicon, unsigned)
+
+Built by `.github/workflows/build-macos.yml` on a `macos-latest` (Apple
+Silicon) GitHub Actions runner — there's no local build step to run since
+this repo's dev sandbox isn't macOS and PyInstaller can't cross-compile.
+The workflow: installs deps, generates `procalc.icns` from
+`procalc_app/resources/ten_logo.png` (via macOS's built-in `sips`/`iconutil`,
+no extra tooling), runs `pyinstaller procalc.spec --clean --noconfirm` →
+`dist/Procalc.app`, smoke-tests it headless, then packages it with
+`hdiutil create -format UDZO` → `ProcalcSetup-0.1.0.dmg` — the macOS
+equivalent of Inno Setup, built into the OS, no third-party installer needed.
+
+**The app is unsigned** (no Apple Developer account) — on first launch macOS
+Gatekeeper will refuse to open it with a plain double-click. To run it:
+
+1. Drag `Procalc.app` out of the mounted `.dmg` into `/Applications` (or run
+   it in place).
+2. **Right-click** (or Control-click) the app → **Open** → **Open** again in
+   the confirmation dialog. This is a one-time step per machine; every launch
+   after that works normally with a plain double-click.
+3. If step 2 doesn't offer an Open option, go to **System Settings → Privacy
+   & Security**, scroll to the blocked-app notice, and click **Open Anyway**.
+
+This is the standard, expected trade-off of shipping unsigned — there is no
+cost/waiting-free way around it without an Apple Developer Program
+membership ($99/yr) to sign and notarize the build.
+
+---
+
 ## Running the app from source (no packaging)
 
 From the repository root (`procalc/`):
@@ -94,20 +130,23 @@ resolve without any packaging.
 ## Where runtime data lives
 
 * **PMS catalogue (`pms.json`)** — on first launch the app copies the bundled
-  seed `gems_extracted.json` to:
+  seed `gems_extracted.json` to a per-user location:
 
   ```
-  %LOCALAPPDATA%\Procalc\pms.json      (e.g. C:\Users\<you>\AppData\Local\Procalc\pms.json)
+  Windows:  %LOCALAPPDATA%\Procalc\pms.json   (e.g. C:\Users\<you>\AppData\Local\Procalc\pms.json)
+  macOS:    ~/Library/Application Support/Procalc/pms.json
+  Linux:    ~/.local/share/Procalc/pms.json
   ```
 
   This per-user file is what the app edits/uploads; the bundled seed is never
   modified. Delete it to reset the catalogue to the shipped seed. The
-  `PROCALC_PMS_JSON` environment variable overrides the location.
-  The **installer does not create `pms.json`** — the app seeds it per-user on
-  first run.
+  `PROCALC_PMS_JSON` environment variable overrides the location on any
+  platform. The **installer/DMG does not create `pms.json`** — the app seeds
+  it per-user on first run.
 
-* **Run outputs** — result workbooks are written to a temp dir
-  (`%TEMP%\procalc_out_*`) unless the app is told otherwise.
+* **Run outputs** — result workbooks are written to a temp dir (via Python's
+  `tempfile`: `%TEMP%\procalc_out_*` on Windows, `/var/folders/.../procalc_out_*`
+  on macOS) unless the app is told otherwise.
 
 ---
 

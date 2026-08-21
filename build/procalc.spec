@@ -33,6 +33,7 @@
 # =============================================================================
 
 import os
+import sys
 
 block_cipher = None
 
@@ -46,10 +47,11 @@ APP       = os.path.join(ROOT, "procalc_app")
 HYDRA     = os.path.join(ROOT, "Hydraulics")
 COMMON    = os.path.join(ROOT, "common")
 
-# Optional application icon.  Supply build/procalc.ico to brand the exe /
-# installer; if it is absent PyInstaller falls back to its default icon
-# (the build still succeeds).  See README.md.
-_ICON = os.path.join(BUILD_DIR, "procalc.ico")
+# Optional application icon.  Supply build/procalc.ico (Windows) or
+# build/procalc.icns (macOS) to brand the exe/app/installer; if it's absent
+# PyInstaller falls back to its default icon (the build still succeeds).
+# See README.md.
+_ICON = os.path.join(BUILD_DIR, "procalc.icns" if sys.platform == "darwin" else "procalc.ico")
 ICON  = _ICON if os.path.exists(_ICON) else None
 
 # ---------------------------------------------------------------------------
@@ -184,3 +186,18 @@ coll = COLLECT(
     upx_exclude=[],
     name="Procalc",                 # -> dist/Procalc/
 )
+
+# macOS only: wrap the one-dir payload into a real double-clickable .app
+# bundle (-> dist/Procalc.app).  No-op on every other platform -- the
+# Windows/Linux build stops at the COLLECT() above, unchanged.
+if sys.platform == "darwin":
+    app_bundle = BUNDLE(
+        coll,
+        name="Procalc.app",
+        icon=ICON,
+        bundle_identifier="com.ten.procalc",
+        info_plist={
+            "CFBundleShortVersionString": "0.1.0",
+            "NSHighResolutionCapable": True,
+        },
+    )

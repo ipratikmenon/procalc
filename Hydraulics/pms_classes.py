@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import asdict, dataclass, field, replace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,14 +30,18 @@ def user_json_path() -> str:
 
     The app edits / uploads the piping catalogue here so a project change never
     touches the bundled seed.  Windows: %LOCALAPPDATA%/Procalc/pms.json;
-    otherwise ~/.local/share/Procalc/pms.json.  An env override
-    (PROCALC_PMS_JSON) wins so tests / the app can point it anywhere.
+    macOS: ~/Library/Application Support/Procalc/pms.json; otherwise (Linux)
+    ~/.local/share/Procalc/pms.json.  An env override (PROCALC_PMS_JSON) wins
+    so tests / the app can point it anywhere.
     """
     env = os.environ.get("PROCALC_PMS_JSON")
     if env:
         return env
-    base = (os.environ.get("LOCALAPPDATA")
-            or os.path.join(os.path.expanduser("~"), ".local", "share"))
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base = (os.environ.get("LOCALAPPDATA")
+                or os.path.join(os.path.expanduser("~"), ".local", "share"))
     return os.path.join(base, "Procalc", "pms.json")
 
 
