@@ -282,6 +282,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference, Series
+from openpyxl.worksheet.page import PageMargins
 
 import pms_classes as PMS
 import sys as _sys
@@ -444,6 +445,52 @@ def _write_doc_header_block(ws, meta, ncol, start_row=1) -> int:
         _c(ws, rr, vc, val, sz=8)
 
     return r0 + 5
+
+
+# Standard Windows/Excel paper-size codes (openpyxl's page_setup.paperSize
+# takes the raw code, no named constants provided).
+_PAPER_A3 = "8"
+_PAPER_A4 = "9"
+
+
+def _apply_print_setup(ws):
+    """Native-Excel page setup so the workbook prints/exports to PDF
+    reasonably straight out of Excel, no manual setup needed: paper size +
+    orientation picked from the sheet's own column count (narrow sheets get
+    A4 portrait, moderately wide ones A4 landscape, wide data tables A3
+    landscape), fit-to-1-page-wide, and the header rows already frozen via
+    ``freeze_panes`` repeated on every printed page."""
+    if ws.sheet_state != "visible":
+        return
+    if ws.title == "README":
+        paper, orient = _PAPER_A4, "portrait"
+    else:
+        ncol = ws.max_column or 1
+        if ncol <= 6:
+            paper, orient = _PAPER_A4, "portrait"
+        elif ncol <= 12:
+            paper, orient = _PAPER_A4, "landscape"
+        else:
+            paper, orient = _PAPER_A3, "landscape"
+    ws.page_setup.paperSize = paper
+    ws.page_setup.orientation = orient
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.4, right=0.4, top=0.5, bottom=0.5,
+                                  header=0.2, footer=0.2)
+    ws.print_options.horizontalCentered = True
+
+    # repeat the frozen header rows on every printed page — freeze_panes
+    # (e.g. "C9") already marks exactly how many rows are header, no extra
+    # per-sheet bookkeeping needed.
+    fp = ws.freeze_panes
+    if fp:
+        m = re.match(r"[A-Za-z]+(\d+)", fp)
+        if m:
+            last_header_row = int(m.group(1)) - 1
+            if last_header_row >= 1:
+                ws.print_title_rows = f"1:{last_header_row}"
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -5862,6 +5909,12 @@ def run_noiso(
                 seen.add(name)
         ordered += [s for s in wb.worksheets if s.title not in seen]
         wb._sheets = ordered
+
+        # native Excel print setup (paper size/orientation, fit-to-width,
+        # repeated header rows) so the workbook prints/exports to PDF
+        # straight from Excel without the user configuring anything
+        for _ws in wb.worksheets:
+            _apply_print_setup(_ws)
 
         if out_path is None:
             safe_c = re.sub(r"[^A-Za-z0-9_-]", "_", str(cid))
