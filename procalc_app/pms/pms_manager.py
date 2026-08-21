@@ -71,10 +71,10 @@ try:
     from resources import theme
     _TEN = theme.TEN
 except Exception:  # pragma: no cover - theme is best-effort styling only
-    _TEN = {"blue": "#5E6AD2", "navy": "#0D0E10", "amber": "#FDC300",
+    _TEN = {"blue": "#0070EF", "navy": "#0D0E10", "amber": "#FDC300",
             "salmon": "#EE7766", "panel": "#F7F8F8", "bg": "#FFFFFF",
             "text": "#0D0E10", "lgray": "#E4E5E8", "gray": "#6B6E76",
-            "border": "#E4E5E8", "primary_hover": "#828FFF"}
+            "border": "#E4E5E8", "primary_hover": "#0059C1"}
 
 # Sensible NPS bore list for the live-preview drop-down.
 _BORES = ["0.5", "0.75", "1", "1.5", "2", "3", "4", "6", "8", "10", "12",
@@ -184,14 +184,14 @@ class PMSManagerDialog(QDialog):
         # numeric fields
         fields_box = QGroupBox("Design parameters")
         form = QFormLayout(fields_box)
-        self.sp_pressure = self._spin(0.0, 1_000_000.0, 1.0, " psig")
-        self.sp_temp = self._spin(-460.0, 3000.0, 1.0, " °F")
-        self.sp_corr = self._spin(0.0, 5.0, 0.001, " in", decimals=3)
-        self.sp_corr_min = self._spin(0.0, 5.0, 0.001, " in", decimals=3)
-        form.addRow("Design pressure", self.sp_pressure)
-        form.addRow("Design temp", self.sp_temp)
-        form.addRow("Corrosion allow", self.sp_corr)
-        form.addRow("Corrosion allow (min)", self.sp_corr_min)
+        self.sp_pressure = self._spin(0.0, 1_000_000.0, 1.0)
+        self.sp_temp = self._spin(-460.0, 3000.0, 1.0)
+        self.sp_corr = self._spin(0.0, 5.0, 0.001, decimals=3)
+        self.sp_corr_min = self._spin(0.0, 5.0, 0.001, decimals=3)
+        form.addRow("Design pressure (psig)", self.sp_pressure)
+        form.addRow("Design temp (°F)", self.sp_temp)
+        form.addRow("Corrosion allow (in)", self.sp_corr)
+        form.addRow("Corrosion allow, min (in)", self.sp_corr_min)
         lay.addWidget(fields_box)
 
         # pipe rules table
@@ -238,12 +238,11 @@ class PMSManagerDialog(QDialog):
 
         return w
 
-    def _spin(self, lo, hi, step, suffix, decimals=2) -> QDoubleSpinBox:
+    def _spin(self, lo, hi, step, decimals=2) -> QDoubleSpinBox:
         sp = QDoubleSpinBox()
         sp.setRange(lo, hi)
         sp.setSingleStep(step)
         sp.setDecimals(decimals)
-        sp.setSuffix(suffix)
         sp.setKeyboardTracking(False)
         return sp
 

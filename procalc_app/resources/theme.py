@@ -1,11 +1,13 @@
 """Qt stylesheet derived from the Linear marketing design-system spec, with
-the canvas inverted to white (per explicit instruction: "only white bd
-instead of black, strict implementation" — everything else, i.e. the
-lavender-blue accent, the ink/surface ladder, the 4px spacing scale, the
-radius scale and the type scale, follows the spec as given).
+the canvas inverted to white and the accent swapped to T.EN light blue
+(per explicit instructions: "only white bd instead of black, strict
+implementation", then "use light blue instead of lavender" — everything
+else, i.e. the ink/surface ladder, the 4px spacing scale, the radius scale
+and the type scale, follows the spec as given).
 
-Token source: Linear's documented system —
-  primary #5e6ad2 / hover #828fff / focus #5e69d1
+Token source: Linear's documented system, with the accent re-colored —
+  primary #0070ef (T.EN blue, was Linear's lavender #5e6ad2) /
+    hover #0059c1 / focus #0064d6
   radius xs4 sm6 md8 lg12 xl16 xxl24 pill/full 9999
   spacing base 4px: xxs4 xs8 sm12 md16 lg24 xl32 xxl48
   type: display-xl 80/600, display-lg 56/600, display-md 40/600,
@@ -14,8 +16,10 @@ Token source: Linear's documented system —
         eyebrow 13/500(+0.4 tracking), mono 13/400
 Since the spec is a *dark* canvas (#010102) with light ink, every canvas /
 surface / ink token below is the light-mode mirror of the spec's dark
-value; the accent (lavender), success and semantic colors are literal
-(they don't depend on canvas darkness). Font stack substitutes Inter for
+value; the accent, success and semantic colors are literal (they don't
+depend on canvas darkness) — the accent hover/focus shades are darkened
+rather than lightened, since the spec's lighter-on-hover only reads
+correctly against a dark canvas. Font stack substitutes Inter for
 the proprietary Linear Display/Text faces (the spec's own recommendation);
 JetBrains Mono substitutes Linear Mono. Qt Style Sheets have no
 letter-spacing property, so the spec's negative tracking is applied via
@@ -30,7 +34,7 @@ unchanged — this file only styles the Qt app chrome.
 TEN = {
     # accent — reserved for primary CTA / focus ring / active-tab emphasis
     # (Linear's own rule: never used for section titles or body text)
-    "blue":   "#5E6AD2",   # primary (lavender-blue)
+    "blue":   "#0070EF",   # primary (T.EN light blue)
     "navy":   "#0D0E10",   # ink — main text / section-title emphasis
     "teal":   "#3D98B7",
     "green":  "#80C7A0",
@@ -57,8 +61,8 @@ TEN = {
     "text":       "#0D0E10",  # ink
     "text_muted": "#40434A",  # ink-muted
     "text_subtle":"#6B6E76",  # ink-subtle
-    "primary_hover": "#828FFF",
-    "primary_focus": "#5E69D1",
+    "primary_hover": "#0059C1",  # darker on hover — reads correctly on white
+    "primary_focus": "#0064D6",
 }
 
 # radius scale (literal)

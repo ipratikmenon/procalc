@@ -4723,17 +4723,24 @@ def _build_flash_detail_sheet(
     for k, v, unit_note in info:
         _c(ws, r, 1, k, bg=LGRAY, sz=9, bold=True)
         _c(ws, r, 2, v, sz=9, ha="right")
-        _c(ws, r, 3, unit_note, sz=9, fg="808080")
         r += 1
+        if unit_note:
+            ws.merge_cells(f"A{r}:B{r}")
+            _c(ws, r, 1, unit_note, sz=8, fg="808080", italic=True, ha="right")
+            r += 1
     r += 1
 
-    hdr = ["Seq", "Comp ID", u.hdr("P In", "P"), "β (molar)", "Quality (mass)",
-           u.hdr("Vap Moles", "molflow"), u.hdr("Liq Moles", "molflow"),
-           u.hdr("Vap Mass", "mflow"), u.hdr("Liq Mass", "mflow"),
+    _PF_QTY = [None, None, "P", None, None, "molflow", "molflow",
+               "mflow", "mflow", None, None]
+    hdr = ["Seq", "Comp ID", "P In", "β (molar)", "Quality (mass)",
+           "Vap Moles", "Liq Moles", "Vap Mass", "Liq Mass",
            "MW Vapor", "MW Liquid"]
     _hdr(ws, hdr, row=r)
-    head = r
-    ws.freeze_panes = f"A{r + 1}"
+    for ci, qty in enumerate(_PF_QTY, 1):
+        _c(ws, r + 1, ci, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY,
+           sz=8, italic=True, ha="center")
+    head = r + 1
+    ws.freeze_panes = f"A{r + 2}"
     for i, (s, fr) in enumerate(zip(stations, flashes)):
         rr = head + 1 + i
         bg = LGRAY if i % 2 else WHITE
@@ -4783,7 +4790,7 @@ def _build_stream_props_detail_sheet(
     ws = wb.create_sheet(sheet_title)
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
-    ncol = 5
+    ncol = 4
     ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
     _c(ws, 1, 1,
        f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
@@ -4811,7 +4818,7 @@ def _build_stream_props_detail_sheet(
            f"({u.disp('P', s.p_in_psia)} {u.label('P')})",
            bg=STEEL, fg=WHITE, sz=10, bold=True)
         r += 1
-        _hdr(ws, ["Property", "Unit", "Total", "Vapor", "Liquid"], row=r)
+        _hdr(ws, ["Property", "Total", "Vapor", "Liquid"], row=r)
         head = r
         r += 1
 
@@ -4824,11 +4831,15 @@ def _build_stream_props_detail_sheet(
                 return
             bg = LGRAY if (r - head) % 2 else WHITE
             _c(ws, r, 1, label, bg=bg, sz=9, bold=bold)
-            _c(ws, r, 2, unit or "", bg=bg, fg=DGRAY, sz=8, ha="center")
-            for ci, v in ((3, tot), (4, vap), (5, liq)):
+            for ci, v in ((2, tot), (3, vap), (4, liq)):
                 _c(ws, r, ci, "" if v is None else v, bg=bg, sz=9,
                    ha="right" if isinstance(v, (int, float)) else "left", bold=bold)
             r += 1
+            if unit and unit not in ("-", "—"):
+                _c(ws, r, 1, unit, bg=bg, fg=DGRAY, sz=8, italic=True, ha="left")
+                for ci in (2, 3, 4):
+                    _c(ws, r, ci, "", bg=bg)
+                r += 1
 
         row("FLOW RATES", None, None, None, section=True)
         row("Molar Rate", u.disp("molflow", tot_moles, 3) if tot_moles else 0,
@@ -4866,7 +4877,7 @@ def _build_stream_props_detail_sheet(
         row("Viscosity", None, None, sp.liq_visc, unit="cP")
         r += 2      # per-fitting composition now lives in "Composition Phase Splits"
 
-    cw(ws, 1, 28); cw(ws, 2, 10); cw(ws, 3, 16); cw(ws, 4, 16); cw(ws, 5, 16)
+    cw(ws, 1, 28); cw(ws, 2, 16); cw(ws, 3, 16); cw(ws, 4, 16)
     return sheet_title
 
 
@@ -8297,12 +8308,12 @@ AMBER, GREEN = "FFF2CC", "E2EFDA"
 
 
 
-def _cell(ws, r, c, v=None, bg=None, fg=DGRAY, sz=9, bold=False,
+def _cell(ws, r, c, v=None, bg=None, fg=DGRAY, sz=9, bold=False, italic=False,
           ha="left", wrap=False, border=True):
     cl = ws.cell(r, c)
     if v is not None:
         cl.value = v
-    cl.font = Font(name="Calibri", size=sz, bold=bold, color=fg)
+    cl.font = Font(name="Calibri", size=sz, bold=bold, italic=italic, color=fg)
     if bg:
         cl.fill = _fill(bg)
     cl.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=wrap)
@@ -8539,17 +8550,25 @@ MAPS = [
 # ════════════════════════════════════════════════════════════════════════
 #  3.  PARAMETER TABLE SHEET  ("Froude number and corresponding data")
 # ════════════════════════════════════════════════════════════════════════
+#  (caption, key, fixed unit-string or None).  "ID"/"P" (keys "id_in"/"p")
+#  route through the per-project units layer instead — see _TABLE_DYN_QTY —
+#  so their unit is resolved at render time via _u.hdr/_u.label, not fixed
+#  here; everything else is a fixed SI-basis Taitel-Dukler/flow-pattern
+#  correlation parameter, not user-selectable.
+_TABLE_DYN_QTY = {"id_in": "Lin", "p": "P"}
 _TABLE_COLS = [
-    ("Seq", "seq"), ("Comp ID", "comp_id"), ("Fitting", "fitting"),
-    ("ID (in)", "id_in"), ("P (psia)", "p"),
-    ("Vsg (m/s)", "Vsg"), ("Vsl (m/s)", "Vsl"),
-    ("Fr Gas", "FrG"), ("Fr Liq", "FrL"), ("Liquid load Fi", "Fi"),
-    ("X (L-M)", "Xtt"), ("1/X", "invX"), ("K (T-D)", "K"), ("T (T-D)", "T"),
-    ("Gt (kg/s·m²)", "Gt"), ("Vap frac y", "y"),
-    ("R (homog)", "R"), ("C gt", "Cgt"),
-    ("ρl·vl²", "rlvl2"), ("ρg·vg²", "rgvg2"),
-    ("λb", "lb"), ("Fb", "Fb"), ("Qg/λb", "Qg_lb"), ("Ql·Fb", "Ql_Fb"),
-    ("(Qg/Ql)^0.5", "QgQl"), ("Frtp/√L", "Frtp"),
+    ("Seq", "seq", None), ("Comp ID", "comp_id", None), ("Fitting", "fitting", None),
+    ("ID", "id_in", None), ("P", "p", None),
+    ("Vsg", "Vsg", "m/s"), ("Vsl", "Vsl", "m/s"),
+    ("Fr Gas", "FrG", None), ("Fr Liq", "FrL", None), ("Liquid load Fi", "Fi", None),
+    ("X (L-M)", "Xtt", None), ("1/X", "invX", None), ("K (T-D)", "K", None),
+    ("T (T-D)", "T", None),
+    ("Gt", "Gt", "kg/s·m²"), ("Vap frac y", "y", None),
+    ("R (homog)", "R", None), ("C gt", "Cgt", None),
+    ("ρl·vl²", "rlvl2", None), ("ρg·vg²", "rgvg2", None),
+    ("λb", "lb", None), ("Fb", "Fb", None), ("Qg/λb", "Qg_lb", None),
+    ("Ql·Fb", "Ql_Fb", None),
+    ("(Qg/Ql)^0.5", "QgQl", None), ("Frtp/√L", "Frtp", None),
 ]
 
 
@@ -8578,20 +8597,21 @@ def build_param_table(wb, rows, line_no, stream_name, ctrl_seq):
           bg=NAVY, fg=WHITE, sz=11, bold=True)
     ws.row_dimensions[1].height = 22
     _u = _U
-    for ci, (h, _) in enumerate(_TABLE_COLS, 1):
-        if _u is not None:
-            if h == "ID (in)":
-                h = _u.hdr("ID", "Lin")
-            elif h == "P (psia)":
-                h = _u.hdr("P", "P")
+    for ci, (h, key, _unit) in enumerate(_TABLE_COLS, 1):
         _cell(ws, 2, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        dyn_qty = _TABLE_DYN_QTY.get(key)
+        if dyn_qty and _u is not None:
+            ulab = _u.label(dyn_qty)
+        else:
+            ulab = _unit or ""
+        _cell(ws, 3, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
     ws.row_dimensions[2].height = 30
-    ws.freeze_panes = "C3"
+    ws.freeze_panes = "C4"
     for i, (st, pr) in enumerate(rows):
-        r = i + 3
+        r = i + 4
         is_ctrl = (st.seq == ctrl_seq)
         bg = AMBER if is_ctrl else (LGRAY if i % 2 else WHITE)
-        for ci, (_, key) in enumerate(_TABLE_COLS, 1):
+        for ci, (_, key, _unit) in enumerate(_TABLE_COLS, 1):
             if key == "id_in":
                 v = getattr(st, key, None)
                 if _u is not None:
@@ -8605,7 +8625,7 @@ def build_param_table(wb, rows, line_no, stream_name, ctrl_seq):
                 v = pr.get(key)
             _cell(ws, r, ci, _fmt(v), bg=bg, sz=9,
                   bold=is_ctrl, ha="right" if ci > 3 else "left")
-    for ci, (h, _) in enumerate(_TABLE_COLS, 1):
+    for ci, (h, key, _unit) in enumerate(_TABLE_COLS, 1):
         ws.column_dimensions[get_column_letter(ci)].width = max(9, min(15, len(h) + 1))
     return ws
 
@@ -9317,10 +9337,10 @@ _CVDS_BORD  = Border(left=_cvds_thin, right=_cvds_thin,
                      top=_cvds_thin, bottom=_cvds_thin)
 
 
-def _cvc(ws, r, c, v=None, *, bold=False, fill=None, align="left",
+def _cvc(ws, r, c, v=None, *, bold=False, italic=False, fill=None, align="left",
          color="262626", size=10, border=True, wrap=False):
     cell = ws.cell(row=r, column=c, value=v)
-    cell.font = Font(bold=bold, color=color, size=size)
+    cell.font = Font(bold=bold, italic=italic, color=color, size=size)
     cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
     if fill:
         cell.fill = fill
@@ -9351,7 +9371,7 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     title = re.sub(r"[^A-Za-z0-9_-]", "_", f"CV_{tag}")[:31]
     ws = wb.create_sheet(title)
     ws.sheet_view.showGridLines = False
-    for col, w in {"A": 30, "B": 12, "C": 15, "D": 15, "E": 15, "F": 26}.items():
+    for col, w in {"A": 30, "B": 15, "C": 15, "D": 15, "E": 28, "F": 16}.items():
         ws.column_dimensions[col].width = w
 
     P = lambda pa: pa / _CV_PSI_TO_PA
@@ -9404,29 +9424,31 @@ def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main"):
     def sec(label):
         nonlocal r
         _cvc(ws, r, 1, label, bold=True, fill=_CVDS_SEC)
-        for c in range(2, 7):
+        for c in range(2, 6):
             _cvc(ws, r, c, "", fill=_CVDS_SEC)
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
         r += 1
 
     def row(label, unit, mn, no, mx, note=""):
         nonlocal r
         _cvc(ws, r, 1, label, fill=_CVDS_LBL)
-        _cvc(ws, r, 2, unit, align="center")
-        _cvc(ws, r, 3, mn, align="center")
-        _cvc(ws, r, 4, no, align="center", fill=_CVDS_NORM, bold=True)
-        _cvc(ws, r, 5, mx, align="center")
-        _cvc(ws, r, 6, note, wrap=True)
+        _cvc(ws, r, 2, mn, align="center")
+        _cvc(ws, r, 3, no, align="center", fill=_CVDS_NORM, bold=True)
+        _cvc(ws, r, 4, mx, align="center")
+        _cvc(ws, r, 5, note, wrap=True)
         r += 1
+        if unit and unit != "—":
+            _cvc(ws, r, 1, unit, italic=True, size=8, color="808080")
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            r += 1
 
     cMIN, cNOR, cMAX = cases["MIN"], cases["NOR"], cases["MAX"]
     # column header
     _cvc(ws, r, 1, "SERVICE CONDITIONS", bold=True, fill=_CVDS_HDR, color="FFFFFF")
-    _cvc(ws, r, 2, "Units", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
-    _cvc(ws, r, 3, "Minimum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
-    _cvc(ws, r, 4, "Normal", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
-    _cvc(ws, r, 5, "Maximum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
-    _cvc(ws, r, 6, "Notes", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 2, "Minimum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 3, "Normal", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 4, "Maximum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 5, "Notes", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
     r += 1
 
     row("Flow Rate", "lb/h",
