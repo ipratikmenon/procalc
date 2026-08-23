@@ -587,8 +587,10 @@ def resolve_id(spec: str | None, bore) -> IDResult:
     """Internal diameter (in) for a component from its piping spec + bore.
 
     schedule comes from the PMS class pipe-rule whose NPS range covers the
-    bore; wall from ASME B36.10/B36.19.  ID = OD - 2*wall.  CAL rules fall
-    back to their min_schedule wall (handling/structural floor).
+    bore; wall from ASME B36.10/B36.19.  ID = OD - 2*wall.  CAL rules use
+    their explicit special_thickness_in when the sheet gives one; otherwise
+    they fall back to their min_schedule wall (handling/structural floor),
+    exactly as before.
     """
     nps = _nps_string(bore)
     if nps is None or nps not in A.PIPE_OD_IN:
@@ -597,15 +599,24 @@ def resolve_id(spec: str | None, bore) -> IDResult:
 
     cls = _CLASS_BY_NAME.get((spec or "").upper())
     sched = None
+    cal_thickness = None
     if cls:
         for rule in cls.pipe_rules:
             if nps in A.expand_nps_range(rule.nps_low, rule.nps_high):
                 sched = rule.schedule
                 if str(sched).upper() == "CAL":
-                    sched = (rule.min_schedule or "STD")
+                    if rule.special_thickness_in:
+                        cal_thickness = rule.special_thickness_in
+                    else:
+                        sched = (rule.min_schedule or "STD")
                 break
 
     basis = f"{spec} {nps}\""
+    if cal_thickness is not None:
+        wall = cal_thickness
+        basis += f" (CAL: special thickness {wall:g}in)"
+        return IDResult(round(od - 2 * wall, 4), od, wall, "CAL", nps, basis)
+
     if sched is None:
         sched = "STD"
         basis += " (spec n/a -> STD)"

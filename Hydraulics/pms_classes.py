@@ -78,6 +78,22 @@ class PipeRule:
     description: str
     note: str = ""
     min_schedule: str = "STD"   # CAL floor: never thinner than this wall.
+    # Explicit wall thickness (in) for this size range, only meaningful when
+    # schedule == "CAL" -- takes precedence over the min_schedule table-
+    # lookup floor when present. None (the default) reproduces today's
+    # behavior exactly (min_schedule governs).
+    special_thickness_in: float | None = None
+
+
+@dataclass(frozen=True)
+class PTPoint:
+    """One point of a class's Temperature/Pressure derating curve, kept in
+    both unit systems as entered (not cross-derived) since the source sheet
+    hand-enters both independently."""
+    temp_c: float | None = None
+    pressure_kgcm2g: float | None = None
+    temp_f: float | None = None
+    pressure_psig: float | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,11 @@ class PipingClass:
     gems_ref: str = ""
     pipe_rules: tuple[PipeRule, ...] = field(default_factory=tuple)
     components: tuple[ComponentRow, ...] = field(default_factory=tuple)
+    # Up to ~10 Temperature/Pressure derating points (design_pressure_psig/
+    # design_temp_f above stay the single "primary" point most code reads --
+    # auto-derived from pt_curve[0] in _class_from_dict when a curve is
+    # given, so nothing that only reads the scalars regresses).
+    pt_curve: tuple[PTPoint, ...] = field(default_factory=tuple)
 
 
 # ── curated, hand-verified classes (override the extracted copy) ────────────
@@ -184,12 +205,19 @@ PIPE_RULE_PATCHES: dict[str, tuple[PipeRule, ...]] = {
 
 # ── load extracted classes from JSON ────────────────────────────────────────
 def _class_from_dict(d: dict) -> PipingClass:
+    def _f(v):
+        try:
+            return float(v) if v is not None and v != "" else None
+        except (TypeError, ValueError):
+            return None
+
     pipe_rules = tuple(
         PipeRule(
             nps_low=r.get("nps_low", ""), nps_high=r.get("nps_high", ""),
             schedule=r.get("schedule", "STD"), ends=r.get("ends", ""),
             description=r.get("description", ""), note=r.get("note", ""),
             min_schedule=r.get("min_schedule", "STD"),
+            special_thickness_in=_f(r.get("special_thickness_in")),
         )
         for r in d.get("pipe_rules", [])
         if r.get("nps_low") and r.get("nps_high")
@@ -204,19 +232,33 @@ def _class_from_dict(d: dict) -> PipingClass:
         )
         for r in d.get("components", [])
     )
+    pt_curve = tuple(
+        PTPoint(temp_c=_f(p.get("temp_c")), pressure_kgcm2g=_f(p.get("pressure_kgcm2g")),
+               temp_f=_f(p.get("temp_f")), pressure_psig=_f(p.get("pressure_psig")))
+        for p in d.get("pt_curve", [])
+    )
+
+    design_pressure_psig = _f(d.get("design_pressure_psig"))
+    design_temp_f = _f(d.get("design_temp_f"))
+    if pt_curve:
+        # scalar "primary" point stays in sync with the curve when both are
+        # given but disagree -- the curve is the richer, authoritative source.
+        design_pressure_psig = pt_curve[0].pressure_psig or design_pressure_psig
+        design_temp_f = pt_curve[0].temp_f or design_temp_f
+
     return PipingClass(
         name=d["name"], moc=d.get("moc", ""), moc_tag=d.get("moc_tag", ""),
         material_group=d.get("material_group", ""),
         typical_service=d.get("typical_service", ""),
         nominal_rating=d.get("nominal_rating", ""),
         pt_limit_text=d.get("pt_limit_text", ""),
-        design_pressure_psig=float(d.get("design_pressure_psig", 0) or 0),
-        design_temp_f=float(d.get("design_temp_f", 100) or 100),
+        design_pressure_psig=design_pressure_psig or 0.0,
+        design_temp_f=design_temp_f if design_temp_f is not None else 100.0,
         corrosion_allow_in=float(d.get("corrosion_allow_in", 0) or 0),
         corrosion_allow_min_in=float(d.get("corrosion_allow_min_in", 0) or 0),
         nace_moc=d.get("nace_moc", ""), special_moc=d.get("special_moc", ""),
         rev=d.get("rev", ""), gems_ref=d.get("gems_ref", ""),
-        pipe_rules=pipe_rules, components=components,
+        pipe_rules=pipe_rules, components=components, pt_curve=pt_curve,
     )
 
 
@@ -243,10 +285,12 @@ def load_classes(json_path: str = _JSON) -> list[PipingClass]:
 
 def _to_jsonable(pc: PipingClass) -> dict:
     """PipingClass -> plain dict for gems_extracted.json (round-trips through
-    _class_from_dict).  pipe_rules / components become lists of dicts."""
+    _class_from_dict).  pipe_rules / components / pt_curve become lists of
+    dicts."""
     d = asdict(pc)
     d["pipe_rules"] = [dict(r) for r in d.get("pipe_rules", ())]
     d["components"] = [dict(c) for c in d.get("components", ())]
+    d["pt_curve"] = [dict(p) for p in d.get("pt_curve", ())]
     return d
 
 

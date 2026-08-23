@@ -81,7 +81,9 @@ _BORES = ["0.5", "0.75", "1", "1.5", "2", "3", "4", "6", "8", "10", "12",
           "16", "20", "24"]
 
 _RULE_COLS = ["NPS low", "NPS high", "Schedule", "Min schedule", "Ends",
-              "Description"]
+              "Description", "Special Thickness (in)"]
+
+_PT_COLS = ["Temp (°C)", "Pressure (kg/cm2g)", "Temp (°F)", "Pressure (psig)"]
 
 
 class PMSManagerDialog(QDialog):
@@ -115,9 +117,16 @@ class PMSManagerDialog(QDialog):
         self.btn_load = QPushButton("Load catalogue (JSON)…")
         self.btn_load.setObjectName("LoadCatalogue")
         self.btn_load.clicked.connect(self._on_load_catalogue)
+        self.btn_load_xlsx = QPushButton("Load catalogue (Excel)…")
+        self.btn_load_xlsx.clicked.connect(self._on_load_catalogue_xlsx)
+        self.btn_export_xlsx = QPushButton("Save as Excel…")
+        self.btn_export_xlsx.setObjectName("Secondary")
+        self.btn_export_xlsx.clicked.connect(self._on_export_xlsx)
         self.status_lbl = QLabel("")
         self.status_lbl.setObjectName("Status")
         top.addWidget(self.btn_load)
+        top.addWidget(self.btn_load_xlsx)
+        top.addWidget(self.btn_export_xlsx)
         top.addWidget(self.status_lbl, 1)
         root.addLayout(top)
 
@@ -215,6 +224,29 @@ class PMSManagerDialog(QDialog):
         rbtns.addStretch(1)
         rlay.addLayout(rbtns)
         lay.addWidget(rules_box, 1)
+
+        # temperature/pressure curve -- shown for the selected spec (see
+        # PipingClass.pt_curve), up to 10 points, SI and FPS independently
+        # (real HURL sheets don't always use a pure unit conversion between
+        # the two, so both are stored and edited as given).
+        pt_box = QGroupBox("Temperature / Pressure curve")
+        ptlay = QVBoxLayout(pt_box)
+        self.pt_table = QTableWidget(0, len(_PT_COLS))
+        self.pt_table.setHorizontalHeaderLabels(_PT_COLS)
+        self.pt_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.pt_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.pt_table.itemChanged.connect(self._on_rule_changed)
+        ptlay.addWidget(self.pt_table)
+        ptbtns = QHBoxLayout()
+        self.btn_add_pt = QPushButton("Add point")
+        self.btn_add_pt.clicked.connect(self._on_add_pt)
+        self.btn_rm_pt = QPushButton("Remove point")
+        self.btn_rm_pt.clicked.connect(self._on_remove_pt)
+        ptbtns.addWidget(self.btn_add_pt)
+        ptbtns.addWidget(self.btn_rm_pt)
+        ptbtns.addStretch(1)
+        ptlay.addLayout(ptbtns)
+        lay.addWidget(pt_box)
 
         # live preview
         prev_box = QGroupBox("Live ID preview")
@@ -377,9 +409,18 @@ class PMSManagerDialog(QDialog):
             self.table.setRowCount(len(rules))
             for r, rule in enumerate(rules):
                 vals = [rule.nps_low, rule.nps_high, rule.schedule,
-                        rule.min_schedule, rule.ends, rule.description]
+                        rule.min_schedule, rule.ends, rule.description,
+                        rule.special_thickness_in]
                 for c, v in enumerate(vals):
-                    self.table.setItem(r, c, QTableWidgetItem(str(v or "")))
+                    self.table.setItem(r, c, QTableWidgetItem(str(v) if v not in (None, "") else ""))
+
+            curve = cls.pt_curve or ()
+            self.pt_table.setRowCount(0)
+            self.pt_table.setRowCount(len(curve))
+            for r, pt in enumerate(curve):
+                vals = [pt.temp_c, pt.pressure_kgcm2g, pt.temp_f, pt.pressure_psig]
+                for c, v in enumerate(vals):
+                    self.pt_table.setItem(r, c, QTableWidgetItem(str(v) if v is not None else ""))
 
             ro = self._is_readonly(cls.name)
             self._set_editor_readonly(ro)
@@ -395,11 +436,14 @@ class PMSManagerDialog(QDialog):
             sp.setEnabled(not ro)
         self.btn_add_row.setEnabled(not ro)
         self.btn_rm_row.setEnabled(not ro)
+        self.btn_add_pt.setEnabled(not ro)
+        self.btn_rm_pt.setEnabled(not ro)
         self.btn_save.setEnabled(not ro)
         # table cells: toggle editability
         trigger = (QAbstractItemView.NoEditTriggers if ro
                    else QAbstractItemView.AllEditTriggers)
         self.table.setEditTriggers(trigger)
+        self.pt_table.setEditTriggers(trigger)
 
     # ── pipe-rule table actions ─────────────────────────────────────────
     def _on_add_row(self):
@@ -426,6 +470,26 @@ class PMSManagerDialog(QDialog):
         if not self._loading:
             self._update_preview()
 
+    # ── T/P curve table actions ──────────────────────────────────────────
+    def _on_add_pt(self):
+        self._loading = True
+        try:
+            r = self.pt_table.rowCount()
+            self.pt_table.insertRow(r)
+            for c in range(len(_PT_COLS)):
+                self.pt_table.setItem(r, c, QTableWidgetItem(""))
+        finally:
+            self._loading = False
+        self._update_preview()
+
+    def _on_remove_pt(self):
+        r = self.pt_table.currentRow()
+        if r < 0:
+            r = self.pt_table.rowCount() - 1
+        if r >= 0:
+            self.pt_table.removeRow(r)
+            self._update_preview()
+
     # ── build a working (unsaved) PipingClass from editor state ─────────
     def _cell(self, r, c):
         it = self.table.item(r, c)
@@ -439,6 +503,11 @@ class PMSManagerDialog(QDialog):
             nps_high = self._cell(r, 1)
             if not nps_low and not nps_high:
                 continue
+            thin_txt = self._cell(r, 6)
+            try:
+                thin = float(thin_txt) if thin_txt else None
+            except ValueError:
+                thin = None
             rules.append(PipeRule(
                 nps_low=nps_low,
                 nps_high=nps_high or nps_low,
@@ -447,8 +516,31 @@ class PMSManagerDialog(QDialog):
                 description=self._cell(r, 5),
                 note="",
                 min_schedule=self._cell(r, 3) or "STD",
+                special_thickness_in=thin,
             ))
         return tuple(rules)
+
+    def _pt_cell(self, r, c):
+        it = self.pt_table.item(r, c)
+        return (it.text() if it is not None else "").strip()
+
+    def _pt_curve_from_table(self):
+        PTPoint = self._pms.PTPoint
+        points = []
+        for r in range(self.pt_table.rowCount()):
+            vals = [self._pt_cell(r, c) for c in range(4)]
+            if not any(vals):
+                continue
+
+            def _f(s):
+                try:
+                    return float(s) if s else None
+                except ValueError:
+                    return None
+
+            points.append(PTPoint(temp_c=_f(vals[0]), pressure_kgcm2g=_f(vals[1]),
+                                  temp_f=_f(vals[2]), pressure_psig=_f(vals[3])))
+        return tuple(points)
 
     def _working_class(self):
         """Rebuild the edited class as a frozen PipingClass, or None."""
@@ -465,6 +557,7 @@ class PMSManagerDialog(QDialog):
                 corrosion_allow_in=float(self.sp_corr.value()),
                 corrosion_allow_min_in=float(self.sp_corr_min.value()),
                 pipe_rules=self._rules_from_table(),
+                pt_curve=self._pt_curve_from_table(),
             )
         except Exception:
             return base
@@ -525,6 +618,40 @@ class PMSManagerDialog(QDialog):
         if self.list.currentRow() < 0 and self.list.rowCount():
             self.list.setCurrentCell(0, 0)
         self._update_preview()
+
+    def _on_load_catalogue_xlsx(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load PMS catalogue (Excel)", "", "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            n = api.install_pms_catalogue_from_flat_sheet(path)
+        except ValueError as e:
+            QMessageBox.critical(self, "Invalid catalogue", str(e))
+            return
+        except Exception as e:  # unexpected; still surface it, don't crash
+            QMessageBox.critical(self, "Load failed", str(e))
+            return
+        self.status_lbl.setText(
+            f"Loaded {n} classes from {os.path.basename(path)}")
+        keep = self._current_name
+        self._refresh_class_list(select_name=keep)
+        if self.list.currentRow() < 0 and self.list.rowCount():
+            self.list.setCurrentCell(0, 0)
+        self._update_preview()
+
+    def _on_export_xlsx(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PMS catalogue as Excel", "pms_catalogue.xlsx",
+            "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            n = api.export_pms_catalogue_to_flat_sheet(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        self.status_lbl.setText(f"Exported {n} classes to {os.path.basename(path)}")
 
     # ── new code ────────────────────────────────────────────────────────
     def _on_new_code(self):

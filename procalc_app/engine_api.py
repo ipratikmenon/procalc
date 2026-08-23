@@ -20,6 +20,7 @@ for _p in (os.path.join(_ROOT, "common"), os.path.join(_ROOT, "Hydraulics")):
 
 import hydraulics_XOM as H          # noqa: E402
 import pms_classes as PMS           # noqa: E402
+import pms_flat_sheet as PFS        # noqa: E402
 import hmb_proii_reader as HMBP     # noqa: E402
 
 # wire the Case-N reader into the engine dispatch (it imports it as optional)
@@ -147,6 +148,28 @@ def install_pms_catalogue(json_path: str) -> int:
     n = PMS.install_catalogue(json_path)
     H.reload_pms()
     return n
+
+
+def install_pms_catalogue_from_flat_sheet(xlsx_path: str, sheet_name: str = "PMS") -> int:
+    """Validate + activate an uploaded flat-sheet PMS workbook (the human-
+    editable master format -- see Hydraulics/pms_flat_sheet.py), reindex the
+    engine.  Raises ValueError with a row-numbered message list on anything
+    malformed, same contract as install_pms_catalogue()."""
+    classes = PFS.flat_sheet_to_classes(xlsx_path, sheet_name)
+    path = PMS.user_json_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    PMS.save_user_classes(classes, path)
+    H.reload_pms(path)
+    return len(PMS.CLASSES)
+
+
+def export_pms_catalogue_to_flat_sheet(xlsx_path: str, sheet_name: str = "PMS") -> int:
+    """Write the active (non-curated) catalogue out as a flat-sheet workbook.
+    Returns the number of classes written."""
+    curated_names = {pc.name.upper() for pc in PMS.CURATED}
+    classes = [c for c in PMS.CLASSES if c.name.upper() not in curated_names]
+    PFS.classes_to_flat_sheet(classes, xlsx_path, sheet_name)
+    return len(classes)
 
 
 def reload_pms(json_path: str | None = None) -> int:
