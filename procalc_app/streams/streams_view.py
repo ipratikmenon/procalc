@@ -1,8 +1,11 @@
 """Reconstructed "Streams" table: every stream in the loaded HMB, laid out
-with streams as columns and properties as rows — the same row-group order
-Hydraulics/HMB.xlsx's own per-stream sheets use (Conditions, Flow Rates,
-Vapor/Liquid Phase Properties, Critical Properties, Composition), just
-transposed into one wide table instead of one sheet per stream.
+with streams as columns and properties as rows — the same property
+vocabulary/order Hydraulics/hmb_proii_reader.py's own "Case N" transposed
+PRO/II report uses (its _SCALAR_MAP, PRO/II's native col-A label list),
+just transposed back the other way: PRO/II's report already has properties
+as rows and streams as columns per case sheet — this table reproduces that
+same row list/order for every source kind (Case-N, per-stream dump, or
+live), not just Case-N inputs.
 
 Each numeric property row gets ONE clickable unit dropdown in its row
 header (not one per cell) — changing it re-renders every stream's value in
@@ -22,21 +25,51 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel,
 import engine_api as api
 
 # (row label, StreamProps field, quantity code | None, decimals)
+# Order/labels mirror Hydraulics/hmb_proii_reader.py's _SCALAR_MAP (PRO/II's
+# own "Case N" transposed-report vocabulary) and _KEY_TO_QTY (quantity-code
+# assignments for the unit dropdown) — the PRO/II-native reference the
+# Streams table's property list/order is built from. Fields with no entry
+# in _KEY_TO_QTY have no modeled unit in common/units.py and render as
+# plain unitless numbers (qty=None), matching "Phase"/"Vapor Z Factor"'s
+# existing qty=None convention.
+#
+# Two _SCALAR_MAP entries don't survive to StreamProps and are adapted
+# rather than shown as permanently-blank rows: "Total Molar Rate"
+# (total_molar) is parsed but dropped at the HMBStream->StreamProps
+# boundary (streamprops_from_hmb, hydraulics_XOM.py) with no field to
+# carry it, so it's omitted here; "Liquid Weight Fraction" (liq_wt_frac)
+# is consumed there to derive the real per-phase mass split, so it's shown
+# as that split (Vapor/Liquid Mass Flow) instead of the fraction itself.
 _ROWS = [
     ("Phase", "phase", None, None),
-    ("Temperature", "temp_f", "T", 2),
-    ("Pressure", "pres_psia", "P", 3),
-    ("Total Mass Flow", "total_mass", "mflow", 1),
+    ("Total Mass Rate", "total_mass", "mflow", 1),
     ("Vapor Mass Flow", "vap_mass", "mflow", 1),
     ("Liquid Mass Flow", "liq_mass", "mflow", 1),
-    ("Molecular Weight", "mol_weight", "MW", 3),
-    ("Vapor Density", "vap_density", "rho", 4),
-    ("Liquid Density", "liq_density", "rho", 4),
-    ("Vapor Viscosity", "vap_visc", "visc", 4),
-    ("Liquid Viscosity", "liq_visc", "visc", 4),
-    ("Vapor Z Factor", "vap_z", None, 4),
-    ("Critical Temperature", "tc_f", "T", 2),
-    ("Critical Pressure", "pc_psia", "P", 3),
+    ("Total Std. Liq. Vol Rate", "total_std_liq", "qvol", 1),
+    ("Total Std. Vap. Vol Rate", "total_std_vap", "qvol", 1),
+    ("Temperature", "temp_f", "T", 2),
+    ("Pressure", "pres_psia", "P", 3),
+    ("Total Molecular Weight", "mol_weight", "MW", 3),
+    ("Total Actual Density", "total_density", "rho", 4),
+    ("Total Z (from actual density)", "total_z", None, 4),
+    ("True Critical Temperature", "tc_f", "T", 2),
+    ("True Critical Pressure", "pc_psia", "P", 3),
+    ("Dry Vapor Molecular Weight", "vap_mw", "MW", 3),
+    ("Dry Vapor Act. Density", "vap_density", "rho", 4),
+    ("Dry Vapor Cp/Cv Ratio", "vap_cp_cv", None, 4),
+    ("Dry Vapor Cp", "vap_cp", None, 4),
+    ("Dry Vapor Viscosity", "vap_visc", "visc", 4),
+    ("Dry Vapor Z (from actual)", "vap_z", None, 4),
+    ("Dry Vapor Thermal Conductivity", "vap_therm_cond", None, 5),
+    ("Dry Vapor Sp. Enthalpy", "vap_sp_enthalpy", "h", 2),
+    ("Dry Liquid Molecular Weight", "liq_mw", "MW", 3),
+    ("Dry Liquid Act. Density", "liq_density", "rho", 4),
+    ("Dry Liquid Cp", "liq_cp", None, 4),
+    ("Dry Liquid Viscosity", "liq_visc", "visc", 4),
+    ("Dry Liquid Thermal Conductivity", "liq_therm_cond", None, 5),
+    ("Dry Liquid Sp. Enthalpy", "liq_sp_enthalpy", "h", 2),
+    ("Surface Tension", "liq_surf_tens", "st", 3),
+    ("Acentric Factor", "acentric", None, 4),
 ]
 
 
