@@ -642,9 +642,30 @@ try:
     import stream_map as SMAP              # optional — line→stream mapping
 except ImportError:                        # pragma: no cover
     SMAP = None
+try:
+    import hysys_com_reader as HYSYS_COM   # optional — live HYSYS COM (.hsc)
+except ImportError:                        # pragma: no cover
+    HYSYS_COM = None
+try:
+    import proii_com_reader as PROII_COM   # optional — live PRO/II COM (.prz)
+except ImportError:                        # pragma: no cover
+    PROII_COM = None
 
 SKIP_SHEETS = {"UNITS", "COMPONENTS", "INPUT", "OUTPUT", "Summary",
                "Component Index", "Legend", "CASES", "README"}
+
+
+def _source_kind(path: str | Path) -> str:
+    """Extension-based routing ahead of the Excel content-sniff below —
+    '.hsc'/'.prz' are never valid openpyxl input, so they must be routed
+    before anything tries to open them as a workbook.  Returns one of
+    "hysys" | "proii_com" | "proii_xlsx" | "per_stream_xlsx"."""
+    ext = Path(str(path)).suffix.lower()
+    if ext == ".hsc":
+        return "hysys"
+    if ext == ".prz":
+        return "proii_com"
+    return "proii_xlsx" if is_proii_export(path) else "per_stream_xlsx"
 
 
 def is_proii_export(path: str | Path) -> bool:
@@ -653,7 +674,9 @@ def is_proii_export(path: str | Path) -> bool:
     Content-based — the filename is NOT used.  A td_parser per-stream dump (which
     may also be named ``HMB_..._from_proii_*.xlsx``) has UNITS/COMPONENTS/INPUT/
     OUTPUT + one sheet per stream and NO ``Case 1`` sheet, so it correctly routes
-    to the per-stream ``extract_stream`` reader instead.
+    to the per-stream ``extract_stream`` reader instead.  Live sources (``.hsc``/
+    ``.prz``) are not Excel and always return False here — route them via
+    ``_source_kind()`` instead, before this function ever sees the path.
     """
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -1551,9 +1574,20 @@ def build_stream_sheet(wb, sp, phase, meta=None):
 
 
 def load_stream_props(hmb_path, sim_stream, case="Case 1") -> StreamProps | None:
-    """Read one stream as StreamProps from either the PRO/II export or a
-    legacy per-stream HMB workbook."""
-    if is_proii_export(hmb_path):
+    """Read one stream as StreamProps from a PRO/II export, a legacy
+    per-stream HMB workbook, or a live HYSYS/PRO-II COM connection."""
+    kind = _source_kind(hmb_path)
+    if kind in ("hysys", "proii_com"):
+        reader = HYSYS_COM if kind == "hysys" else PROII_COM
+        if reader is None:
+            return None
+        try:
+            hs = reader.get_stream(sim_stream, hmb_path, case)
+        except Exception as exc:
+            print(f"  (live {kind} connect failed for {sim_stream}@{case}: {exc})")
+            return None
+        return streamprops_from_hmb(hs) if hs else None
+    if kind == "proii_xlsx":
         if HMBPROII is None:
             return None
         hs = HMBPROII.get_stream(sim_stream, path=hmb_path, case=case)
@@ -8459,9 +8493,30 @@ def _from_td_dump(hmb_path, stream, sp) -> FlashFeed | None:
                        y_d=buckets.get("y", {}), const_map=const_map)
 
 
+def _from_live_source(hmb_path, stream, case, sp, kind) -> FlashFeed | None:
+    """Build a FlashFeed from a live HYSYS/PRO-II COM connector's already-
+    fetched composition.  Re-invokes get_stream() rather than threading the
+    HMBStream through from load_stream_props() — cheap, since each
+    connector caches its session/parse internally, and keeps this function
+    symmetric with _from_casesheet/_from_td_dump (hmb_path+stream+case in,
+    FlashFeed out)."""
+    reader = HYSYS_COM if kind == "hysys" else PROII_COM
+    if reader is None:
+        return None
+    hs = reader.get_stream(stream, hmb_path, case)
+    if hs is None or not hs.composition:
+        return None
+    const_map = _read_comp_constants(hmb_path)
+    return _build_feed(hs.composition, {}, {}, {}, sp, y_d=None,
+                       const_map=const_map)
+
+
 def read_feed(hmb_path, stream, case, sp, is_casesheet: bool) -> FlashFeed | None:
     """Build a FlashFeed for `stream` from whichever HMB layout is supplied."""
     try:
+        kind = _source_kind(hmb_path)
+        if kind in ("hysys", "proii_com"):
+            return _from_live_source(hmb_path, stream, case, sp, kind)
         if is_casesheet:
             return _from_casesheet(hmb_path, stream, case, sp)
         return _from_td_dump(hmb_path, stream, sp)

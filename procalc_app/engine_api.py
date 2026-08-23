@@ -80,8 +80,37 @@ def is_proii_export(path: str) -> bool:
         return False
 
 
+def hmb_source_kind(path: str) -> str:
+    """One of "hysys" | "proii_com" | "proii_xlsx" | "per_stream_xlsx" —
+    extension-routed for the two live-connector sources, content-sniffed
+    for the two Excel-based ones (see hydraulics_XOM._source_kind)."""
+    try:
+        return H._source_kind(path)
+    except Exception:
+        return "per_stream_xlsx"
+
+
 def list_cases(path: str) -> list[str]:
-    if is_proii_export(path):
+    """Case/session names for an HMB source. For the two live-connector
+    kinds (HYSYS/.hsc, PRO/II/.prz) a connection failure is NOT swallowed
+    here — it propagates so the caller (the app's "Load HMB" action) can
+    show the user a clear, actionable error instead of a silently-empty
+    case list. The two Excel-based kinds keep their existing
+    swallow-to-safe-default behavior unchanged."""
+    kind = hmb_source_kind(path)
+    if kind == "hysys":
+        if H.HYSYS_COM is None:
+            raise RuntimeError(
+                "Live HYSYS connection requires Windows with pywin32 "
+                "installed and a running Aspen HYSYS instance.")
+        return H.HYSYS_COM.list_cases(path)
+    if kind == "proii_com":
+        if H.PROII_COM is None:
+            raise RuntimeError(
+                "Live PRO/II connection requires Windows with pywin32 "
+                "installed and a licensed PRO/II install.")
+        return H.PROII_COM.list_cases(path)
+    if kind == "proii_xlsx":
         try:
             return HMBP.list_cases(path)
         except Exception:
@@ -90,9 +119,23 @@ def list_cases(path: str) -> list[str]:
 
 
 def list_streams(path: str, case: str = "Case 1") -> list[str]:
-    """Stream names in an HMB dump (both layouts)."""
+    """Stream names in an HMB source (all four layouts). Live-connector
+    failures propagate — see list_cases()'s docstring."""
+    kind = hmb_source_kind(path)
+    if kind == "hysys":
+        if H.HYSYS_COM is None:
+            raise RuntimeError(
+                "Live HYSYS connection requires Windows with pywin32 "
+                "installed and a running Aspen HYSYS instance.")
+        return H.HYSYS_COM.list_streams(path, case)
+    if kind == "proii_com":
+        if H.PROII_COM is None:
+            raise RuntimeError(
+                "Live PRO/II connection requires Windows with pywin32 "
+                "installed and a licensed PRO/II install.")
+        return H.PROII_COM.list_streams(path, case)
     try:
-        if is_proii_export(path):
+        if kind == "proii_xlsx":
             return HMBP.list_streams(path, case)
         from pathlib import Path
         return H.list_streams(Path(path))

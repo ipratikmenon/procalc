@@ -385,7 +385,13 @@ class MainWindow(QMainWindow):
     def _streams_for_delegate(self):
         if not self.hmb_path:
             return []
-        return api.list_streams(self.hmb_path, self.cb_case.currentText() or "Case 1")
+        try:
+            return api.list_streams(self.hmb_path, self.cb_case.currentText() or "Case 1")
+        except Exception:
+            # a transient live-connector hiccup (HYSYS/PRO-II) shouldn't crash
+            # the dropdown editor — _load_hmb() is where a connect failure
+            # gets a real, actionable error message
+            return []
 
     def _dup_row(self):
         idx = self.view.currentIndex()
@@ -398,15 +404,23 @@ class MainWindow(QMainWindow):
             self.model.delete_row(idx.row())
 
     def _load_hmb(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load HMB dump", "",
-                                              "Excel (*.xlsx)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load HMB / connect to a simulation", "",
+            "All supported (*.xlsx *.hsc *.prz);;Excel HMB dump (*.xlsx);;"
+            "HYSYS case — live, must already be open (*.hsc);;"
+            "PRO/II database — live (*.prz)")
         if not path:
+            return
+        self.err_bar.hide()
+        try:
+            cases = api.list_cases(path) or ["Case 1"]
+        except Exception as exc:
+            self._show_error(f"Could not connect to {os.path.basename(path)}: {exc}")
             return
         self.hmb_path = path
         # a freshly-loaded HMB supersedes any snapshot restored from a .calc —
         # live resolution takes over; the next Save rebuilds a fresh snapshot
         self._stream_snapshot = None
-        cases = api.list_cases(path) or ["Case 1"]
 
         if not self._units_customized:
             try:
@@ -429,10 +443,19 @@ class MainWindow(QMainWindow):
                          f"{'s' if len(self.unit_overrides) != 1 else ''})")
 
         self.cb_case.clear(); self.cb_case.addItems(cases)
-        kind = "PRO/II Case-N export" if api.is_proii_export(path) else "per-stream dump"
-        n = len(api.list_streams(path, cases[0]))
-        self._refresh_hmb_label(f"{os.path.basename(path)}  ·  {kind}  ·  {n} streams")
-        self._log(f"Loaded HMB: {path}  ({kind}, {n} streams, cases={cases})")
+        kind_label = {
+            "hysys": "HYSYS (live)",
+            "proii_com": "PRO/II (live, re-solved on connect)",
+            "proii_xlsx": "PRO/II Case-N export",
+            "per_stream_xlsx": "per-stream dump",
+        }.get(api.hmb_source_kind(path), "per-stream dump")
+        try:
+            n = len(api.list_streams(path, cases[0]))
+        except Exception as exc:
+            self._show_error(f"Connected, but could not list streams: {exc}")
+            n = 0
+        self._refresh_hmb_label(f"{os.path.basename(path)}  ·  {kind_label}  ·  {n} streams")
+        self._log(f"Loaded HMB: {path}  ({kind_label}, {n} streams, cases={cases})")
 
     def _refresh_hmb_label(self, text=None):
         if hasattr(self, "hmb_lbl"):
@@ -651,6 +674,11 @@ class MainWindow(QMainWindow):
 
     def _log(self, line):
         self.log_view.appendPlainText(line)
+
+    def _show_error(self, msg):
+        self.err_bar.setText(msg)
+        self.err_bar.show()
+        self._log("ERROR: " + msg)
 
     def _on_finished(self, paths):
         self._set_running(False)

@@ -87,6 +87,12 @@ hiddenimports = [
     "td_parser",
     "pms_classes",
     "comp_constants",
+    # Live simulation connectors: importable on every platform (the actual
+    # win32com dependency inside each is guarded by its own try/except
+    # ImportError, so these are a no-op — "feature unavailable" — anywhere
+    # pywin32 isn't present, e.g. macOS/Linux).
+    "hysys_com_reader",
+    "proii_com_reader",
     # --- shared helpers (common/*.py, imported top-level) ---
     "units",
     "style",
@@ -110,6 +116,12 @@ hiddenimports = [
     "openpyxl.cell._writer",   # optimized write path, imported by name
     "PIL",                     # Pillow: openpyxl.drawing.image embeds the logo
 ]
+
+# Windows only: pywin32's COM plumbing, used by hysys_com_reader.py /
+# proii_com_reader.py for live HYSYS/PRO-II automation. Not needed (and not
+# installed — see requirements.txt's sys_platform marker) on macOS/Linux.
+if sys.platform == "win32":
+    hiddenimports += ["win32com", "win32com.client", "pythoncom", "pywintypes"]
 
 # ---------------------------------------------------------------------------
 # Excludes.  Trim heavy / unused libraries and Qt sub-modules the app never
