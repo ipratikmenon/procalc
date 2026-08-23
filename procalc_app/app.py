@@ -5,13 +5,14 @@ import base64
 import os
 import tempfile
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QPixmap, QIcon, QFont
-from PySide6.QtWidgets import (QMainWindow, QWidget, QToolBar, QSplitter,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QToolButton,
+                               QSplitter, QDialog, QFrame, QScrollArea,
                                QTableView, QTabWidget, QPlainTextEdit, QLabel,
                                QFileDialog, QComboBox, QLineEdit, QFormLayout,
                                QGroupBox, QVBoxLayout, QHBoxLayout, QMessageBox,
-                               QAbstractItemView, QStatusBar, QWidgetAction, QMenu,
+                               QAbstractItemView, QStatusBar, QMenu,
                                QPushButton, QStackedWidget)
 
 import engine_api as api
@@ -21,6 +22,9 @@ from model.project import Project
 from run.controller import RunController
 from results.results_view import ResultsView
 from resources import theme
+from widgets.scroll_toolbar import HScrollToolbar
+from widgets.run_control import RunAutoControl
+from stream_details.stream_details_panel import StreamDetailsPanel
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,6 +39,7 @@ class MainWindow(QMainWindow):
         self._project_path: str | None = None   # None until New/Open/Save
         self._stream_snapshot = None             # set on Open, cleared on new HMB load
         self.client_logo_path: str | None = None
+        self._project_active = False             # True once New/Open has run (dashboard state)
 
         # start with an empty grid — the landing page ("Build a Project")
         # is what actually seeds it via New/Open, not an auto-populated sample
@@ -52,14 +57,20 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_statusbar()
         self._refresh_hmb_label()
-        self._central_stack.setCurrentWidget(self._landing)
+        self._refresh_dashboard()
+        self._central_stack.setCurrentWidget(self._dashboard)
+
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self.toolbar)
+        cl.addWidget(self._central_stack, 1)
+        self.setCentralWidget(container)
 
     # ── UI construction ──
     def _build_toolbar(self):
-        tb = QToolBar("Main")
-        tb.setIconSize(QSize(18, 18))
-        tb.setMovable(False)
-        self.addToolBar(tb)
+        self.toolbar = HScrollToolbar(self)
 
         brand = QLabel("Procalc")
         brand.setObjectName("Brand")
@@ -67,49 +78,47 @@ class MainWindow(QMainWindow):
         bf.setLetterSpacing(QFont.AbsoluteSpacing, -0.6)
         brand.setFont(bf)
         brand.setContentsMargins(4, 0, 12, 0)
-        tb.addWidget(brand)
-        tb.addSeparator()
+        self.toolbar.add_widget(brand)
+        self.toolbar.add_separator()
 
-        def act(text, slot):
+        def act(text, slot, checkable=False):
             a = QAction(text, self)
+            a.setCheckable(checkable)
             a.triggered.connect(slot)
-            tb.addAction(a)
+            btn = QToolButton()
+            btn.setDefaultAction(a)
+            self.toolbar.add_widget(btn)
             return a
 
         act("New", self._new_project)
         act("Open…", self._open_project)
         act("Save", self._save_project)
         act("Save As…", self._save_project_as)
-        tb.addSeparator()
+        self.toolbar.add_separator()
+        act("🏠 Dashboard", lambda: self._central_stack.setCurrentWidget(self._dashboard))
+        act("Project…", self._open_project_dialog)
+        self.toolbar.add_separator()
         act("＋ Row", lambda: self.model.add_row(template={"Circuit": "C1", "Run Type": "Main"}))
         act("⧉ Duplicate", self._dup_row)
         act("🗑 Delete", self._del_row)
-        tb.addSeparator()
+        self.toolbar.add_separator()
         act("📂 Load HMB", self._load_hmb)
-        self.run_act = act("▶ Run", self.controller.run_now)
-        self.auto_act = QAction("Auto", self, checkable=True)
-        self.auto_act.toggled.connect(self._toggle_auto)
-        tb.addAction(self.auto_act)
-        tb.addSeparator()
+
+        self.run_auto = RunAutoControl(self)
+        self.run_auto.run_btn.clicked.connect(self.controller.run_now)
+        self.run_auto.toggle.toggled.connect(self._toggle_auto)
+        self.toolbar.add_widget(self.run_auto)
+
+        self.toolbar.add_separator()
         act("PMS…", self._open_pms)
         act("Export…", self._export)
-        # make the primary Run button read as a solid blue pill
-        rb = tb.widgetForAction(self.run_act)
-        if rb is not None:
-            rb.setObjectName("RunBtn")
 
-    def _build_central(self):
-        self._central_stack = QStackedWidget()
-        self._landing = self._build_landing()
-        self._central_stack.addWidget(self._landing)
-
-        split = QSplitter(Qt.Horizontal)
-
-        # left: project meta + grid
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(12, 12, 12, 12)
-        lv.setSpacing(10)
+    def _build_project_meta_boxes(self):
+        """The Project + Document-header fields — no longer shown inline in
+        the Circuit Builder screen (moved to a separate dialog, see
+        _open_project_dialog); the widgets themselves stay MainWindow
+        attributes since _context()/_meta_dict()/_save_to()/_open_project()
+        all read/write them directly by name."""
         meta_box = QGroupBox("Project")
         form = QFormLayout(meta_box)
         form.setHorizontalSpacing(10)
@@ -161,7 +170,6 @@ class MainWindow(QMainWindow):
         form.addRow("Circuit Name", self.ed_circuit_name)
         form.addRow(rw)
         form.addRow(uw)
-        lv.addWidget(meta_box)
 
         # document header-block admin fields (Prep/Chk/Appr By, Revision,
         # Page) + the client-logo upload — collapsed into their own card so
@@ -183,7 +191,40 @@ class MainWindow(QMainWindow):
         aform.addRow(pcw)
         aform.addRow(rpw)
         aform.addRow(self.btn_client_logo)
-        lv.addWidget(admin_box)
+
+        return meta_box, admin_box
+
+    def _open_project_dialog(self):
+        self._project_dlg.show()
+        self._project_dlg.raise_()
+        self._project_dlg.activateWindow()
+
+    def _build_central(self):
+        self._central_stack = QStackedWidget()
+        self._dashboard = self._build_dashboard()
+        self._central_stack.addWidget(self._dashboard)
+
+        meta_box, admin_box = self._build_project_meta_boxes()
+        self._project_dlg = QDialog(self)
+        self._project_dlg.setWindowTitle("Project")
+        self._project_dlg.resize(480, 520)
+        pdl = QVBoxLayout(self._project_dlg)
+        pdl.setContentsMargins(16, 16, 16, 16)
+        pdl.setSpacing(12)
+        pdl.addWidget(meta_box)
+        pdl.addWidget(admin_box)
+        pdl.addStretch(1)
+
+        # ── outer split: [grid + Stream Details | Results/Log] ──
+        outer = QSplitter(Qt.Horizontal)
+
+        grid_wrap = QWidget()
+        gv = QVBoxLayout(grid_wrap)
+        gv.setContentsMargins(12, 12, 12, 12)
+        gv.setSpacing(8)
+        builder_lbl = QLabel("Circuit builder")
+        builder_lbl.setObjectName("SectionTitle")
+        gv.addWidget(builder_lbl)
 
         self.view = QTableView()
         self.view.setModel(self.model)
@@ -194,11 +235,20 @@ class MainWindow(QMainWindow):
         install_delegates(self.view, self.model, self._streams_for_delegate)
         # hide the rarely-used columns for a clean first view
         self._apply_column_visibility()
-        builder_lbl = QLabel("Circuit builder")
-        builder_lbl.setObjectName("SectionTitle")
-        lv.addWidget(builder_lbl)
-        lv.addWidget(self.view, 1)
-        split.addWidget(left)
+        gv.addWidget(self.view, 1)
+
+        self.stream_details = StreamDetailsPanel()
+        self.view.selectionModel().currentChanged.connect(self._on_grid_row_selected)
+        self._stream_details_timer = QTimer(self)
+        self._stream_details_timer.setSingleShot(True)
+        self._stream_details_timer.timeout.connect(self._resolve_stream_details)
+        self._pending_stream_row = None
+
+        left_col = QSplitter(Qt.Vertical)
+        left_col.addWidget(grid_wrap)
+        left_col.addWidget(self.stream_details)
+        left_col.setSizes([560, 220])
+        outer.addWidget(left_col)
 
         # right: results + log tabs, with a dismissible error banner on top
         right_wrap = QWidget()
@@ -219,36 +269,40 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit(); self.log_view.setReadOnly(True)
         right.addTab(self.log_view, "Log")
         self.right_tabs = right
-        split.addWidget(right_wrap)
-        split.setSizes([720, 640])
-        self._workspace = split
+        outer.addWidget(right_wrap)
+        outer.setSizes([760, 600])
+        self._workspace = outer
         self._central_stack.addWidget(self._workspace)
-        self.setCentralWidget(self._central_stack)
 
-    def _build_landing(self):
+    def _build_dashboard(self):
         w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setAlignment(Qt.AlignCenter)
-        lay.setSpacing(10)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(20)
+
+        header = QVBoxLayout()
+        header.setAlignment(Qt.AlignHCenter)
+        header.setSpacing(8)
 
         logo = QLabel()
-        if os.path.exists(api.LOGO_PATH):
-            pm = QPixmap(api.LOGO_PATH).scaledToHeight(64, Qt.SmoothTransformation)
+        logo_path = getattr(api, "PROCALC_LOGO_PATH", None) or api.LOGO_PATH
+        if logo_path and os.path.exists(logo_path):
+            pm = QPixmap(logo_path).scaledToHeight(56, Qt.SmoothTransformation)
             logo.setPixmap(pm)
         logo.setAlignment(Qt.AlignCenter)
-        lay.addWidget(logo)
+        header.addWidget(logo)
 
-        heading = QLabel("Build a Project")
+        heading = QLabel("Dashboard")
         heading.setObjectName("Brand")
         hf = heading.font(); hf.setPointSize(20)
         heading.setFont(hf)
         heading.setAlignment(Qt.AlignCenter)
-        lay.addWidget(heading)
+        header.addWidget(heading)
 
         sub = QLabel("Start a new hydraulic circuit, or open an existing .calc project.")
         sub.setObjectName("Muted")
         sub.setAlignment(Qt.AlignCenter)
-        lay.addWidget(sub)
+        header.addWidget(sub)
 
         btn_row = QHBoxLayout()
         btn_row.setAlignment(Qt.AlignCenter)
@@ -261,8 +315,69 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(btn_new)
         btn_row.addWidget(btn_open)
         btn_row_w = QWidget(); btn_row_w.setLayout(btn_row)
-        lay.addWidget(btn_row_w)
+        header.addWidget(btn_row_w)
+        header_w = QWidget(); header_w.setLayout(header)
+        outer.addWidget(header_w)
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(16)
+        self._card_circuits = self._make_dashboard_card("Recent Circuits")
+        self._card_streams = self._make_dashboard_card("Recent Streams")
+        self._card_valves = self._make_dashboard_card("Control Valves")
+        for card in (self._card_circuits, self._card_streams, self._card_valves):
+            cards_row.addWidget(card["frame"], 1)
+        outer.addLayout(cards_row)
+        outer.addStretch(1)
         return w
+
+    def _make_dashboard_card(self, title):
+        frame = QFrame()
+        frame.setObjectName("Card")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(6)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("CardTitle")
+        lay.addWidget(title_lbl)
+        body = QLabel("")
+        body.setObjectName("Muted")
+        body.setWordWrap(True)
+        body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(body)
+        lay.addWidget(scroll, 1)
+        return {"frame": frame, "body": body}
+
+    def _refresh_dashboard(self):
+        cards = (self._card_circuits, self._card_streams, self._card_valves)
+        if not getattr(self, "_project_active", False):
+            msg = "Start a new project or open one to see project data here."
+            for card in cards:
+                card["body"].setText(msg)
+            return
+        rows = self.model.to_rows()
+        if not rows:
+            msg = "No rows yet — add circuit rows in the builder."
+            for card in cards:
+                card["body"].setText(msg)
+            return
+        circuits = list(dict.fromkeys(r.get("Circuit") for r in rows if r.get("Circuit")))
+        self._card_circuits["body"].setText(
+            "\n".join(circuits) if circuits else "No circuits in this project.")
+        streams = list(dict.fromkeys(
+            r.get("Stream Lookup") for r in rows if r.get("Stream Lookup")))
+        self._card_streams["body"].setText(
+            "\n".join(streams) if streams else "No stream lookups set yet.")
+        valves = [r for r in rows
+                 if str(r.get("Fitting Name", "")).lower() == "control valve"]
+        if valves:
+            lines = [f"{r.get('Comp ID', '?')} — {r.get('Control Valve Type') or 'F'}"
+                    for r in valves]
+            self._card_valves["body"].setText("\n".join(lines))
+        else:
+            self._card_valves["body"].setText("No control valves in this circuit.")
 
     def _build_statusbar(self):
         sb = QStatusBar()
@@ -393,6 +508,49 @@ class MainWindow(QMainWindow):
             # gets a real, actionable error message
             return []
 
+    def _on_grid_row_selected(self, current, previous):
+        if not current.isValid() or current.row() >= len(self.model.rows):
+            self.stream_details.show_empty(
+                "Select a row with a Stream Lookup value to see resolved "
+                "stream properties.")
+            self._pending_stream_row = None
+            return
+        # debounced so fast arrow-key navigation doesn't fire one live
+        # resolve per row — the connector's own session cache (Change 12/13)
+        # keeps a settled selection cheap either way
+        self._pending_stream_row = current.row()
+        self._stream_details_timer.start(200)
+
+    def _resolve_stream_details(self):
+        row_idx = self._pending_stream_row
+        if row_idx is None or row_idx >= len(self.model.rows):
+            return
+        row = self.model.rows[row_idx]
+        stream = row.get("Stream Lookup")
+        if not stream:
+            self.stream_details.show_empty(
+                "Select a row with a Stream Lookup value to see resolved "
+                "stream properties.")
+            return
+        hmb = row.get("HMB File") or self.hmb_path
+        case = row.get("Case") or (self.cb_case.currentText() or "Case 1")
+        sp = None
+        if hmb:
+            try:
+                sp, _feed = api.resolve_stream_for_snapshot(hmb, case, stream)
+            except Exception:
+                sp = None
+        if sp is None and self._stream_snapshot:
+            entry = self._stream_snapshot.get((hmb, case, stream))
+            if entry:
+                sp = entry[0]
+        if sp is None:
+            self.stream_details.show_empty(
+                f"Could not resolve stream {stream!r} — check the HMB "
+                "connection and case.")
+            return
+        self.stream_details.show_props(sp)
+
     def _dup_row(self):
         idx = self.view.currentIndex()
         if idx.isValid():
@@ -485,6 +643,8 @@ class MainWindow(QMainWindow):
         self.cb_units.setCurrentIndex(0)
         self._refresh_hmb_label()
         self.setWindowTitle("Procalc Hydraulics — T.EN — (untitled)")
+        self._project_active = True
+        self._refresh_dashboard()
         self._central_stack.setCurrentWidget(self._workspace)
 
     def _open_project(self):
@@ -542,6 +702,8 @@ class MainWindow(QMainWindow):
             else (f"{os.path.basename(self.hmb_path)}  ·  from saved snapshot (file not found)"
                   if self.hmb_path else None))
         self.setWindowTitle(f"Procalc Hydraulics — T.EN — {os.path.basename(path)}")
+        self._project_active = True
+        self._refresh_dashboard()
         self._central_stack.setCurrentWidget(self._workspace)
         self._log(f"Opened project: {path}")
 
@@ -596,7 +758,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_auto(self, on):
         self.controller.auto = on
-        self.auto_act.setText("Auto ●" if on else "Auto")
+        self.run_auto.auto_lbl.setText("Auto ●" if on else "Auto")
         if on:
             rows = self.model.rows
             heavy = len(rows) > 60 or any(
@@ -611,6 +773,7 @@ class MainWindow(QMainWindow):
 
     def _on_grid_edited(self):
         self.controller.schedule()
+        self._refresh_dashboard()
 
     def _open_pms(self):
         try:
@@ -667,7 +830,7 @@ class MainWindow(QMainWindow):
 
     # ── run signals ──
     def _set_running(self, running):
-        self.run_act.setEnabled(not running)
+        self.run_auto.run_btn.setEnabled(not running)
 
     def _on_state(self, s):
         self.state_lbl.setText(s)

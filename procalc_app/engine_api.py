@@ -27,6 +27,10 @@ import hmb_proii_reader as HMBP     # noqa: E402
 H.HMBPROII = HMBP
 
 LOGO_PATH = os.path.join(_HERE, "resources", "ten_logo.png")
+# ProCalc's own brand mark (blue pipe-fitting + water-drop icon) — separate
+# from the T.EN company logo above. Every consumer guards with
+# os.path.exists() since the asset may not be present in every checkout.
+PROCALC_LOGO_PATH = os.path.join(_HERE, "resources", "procalc_logo.png")
 
 
 # ── schema / drop-downs ────────────────────────────────────────────────────

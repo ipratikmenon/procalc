@@ -23,49 +23,11 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QDoubleSpinBox, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QMessageBox, QInputDialog, QAbstractItemView,
+    QStackedWidget, QScrollArea, QButtonGroup, QToolButton, QFrame,
 )
 
 import engine_api as api
-
-
-# short material code from the full MOC text (KCS / LTCS / SS304 / A20 …)
-_MOC_RULES = [
-    ("low temp", "LTCS"), ("lt carbon", "LTCS"), ("impact tested", "LTCS"),
-    ("killed carbon", "KCS"), ("carbon steel", "CS"), ("carbon stl", "CS"),
-    ("304l", "SS304L"), ("304", "SS304"), ("316l", "SS316L"), ("316", "SS316"),
-    ("321", "SS321"), ("347", "SS347"), ("317", "SS317"),
-    ("duplex", "DSS"), ("2205", "DSS"), ("2507", "SDSS"),
-    ("alloy 20", "A20"), ("n08020", "A20"), ("825", "A825"), ("625", "IN625"),
-    ("inconel", "INC"), ("incoloy", "INC"), ("monel", "MONEL"),
-    ("hastelloy", "HAST"), ("nickel", "NI"),
-    ("5cr", "5Cr"), ("5 cr", "5Cr"), ("9cr", "9Cr"), ("9 cr", "9Cr"),
-    ("1.25cr", "1¼Cr"), ("2.25cr", "2¼Cr"), ("chrome", "Cr-Mo"),
-    ("ductile", "DI"), ("nodular", "DI"), ("cast iron", "CI"),
-    ("galvan", "GALV"), ("copper", "Cu"), ("cupro", "CuNi"),
-    ("titanium", "Ti"), ("gre", "GRE"), ("frp", "FRP"), ("pvc", "PVC"),
-    ("pvdf", "PVDF"), ("ptfe", "PTFE"),
-]
-
-
-def _short_moc(moc: str, moc_tag: str = "") -> str:
-    s = (moc or "").lower()
-    for key, code in _MOC_RULES:
-        if key in s:
-            return code
-    if (" cr" in s or s.strip().endswith("cr")) and "chrome" not in s:
-        return "Cr-Mo"
-    if "high density" in s or "hdpe" in s:
-        return "HDPE"
-    if moc_tag and str(moc_tag).strip():
-        return str(moc_tag).strip()[:8]
-    # fall back to the first word that looks like a material name, skipping
-    # extraction noise (numbers, 'allowance', 'note', punctuation)
-    first = (moc or "").split(",")[0].strip()
-    low = first.lower()
-    if not first or first[0].isdigit() or any(
-            k in low for k in ("allowance", "note", "n/a", "see ")):
-        return "—"
-    return first[:10]
+from pms.pms_card import PMSCardWidget, short_moc as _short_moc
 
 try:
     from resources import theme
@@ -154,9 +116,26 @@ class PMSManagerDialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
+
+        top_row = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search code / MOC…")
         self.search.textChanged.connect(self._apply_filter)
+        top_row.addWidget(self.search, 1)
+
+        self.btn_view_list = QToolButton(text="☰", checkable=True, checked=True)
+        self.btn_view_list.setToolTip("List view")
+        self.btn_view_cards = QToolButton(text="▦", checkable=True)
+        self.btn_view_cards.setToolTip("Card view")
+        self._view_group = QButtonGroup(self)
+        self._view_group.setExclusive(True)
+        self._view_group.addButton(self.btn_view_list, 0)
+        self._view_group.addButton(self.btn_view_cards, 1)
+        self._view_group.idClicked.connect(self._on_view_mode_changed)
+        top_row.addWidget(self.btn_view_list)
+        top_row.addWidget(self.btn_view_cards)
+        lay.addLayout(top_row)
+
         self.list = QTableWidget(0, 4)
         self.list.setHorizontalHeaderLabels(["Code", "MOC", "C.A. (in)", "Rating"])
         self.list.verticalHeader().setVisible(False)
@@ -171,9 +150,41 @@ class PMSManagerDialog(QDialog):
         hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.list.currentCellChanged.connect(
             lambda r, *_: self._on_row_selected(r))
-        lay.addWidget(self.search)
-        lay.addWidget(self.list, 1)
+
+        self.card_scroll = QScrollArea()
+        self.card_scroll.setWidgetResizable(True)
+        self.card_scroll.setFrameShape(QFrame.NoFrame)
+        self.card_host = QWidget()
+        self.card_layout = QVBoxLayout(self.card_host)
+        self.card_layout.setContentsMargins(0, 0, 4, 0)
+        self.card_layout.setSpacing(8)
+        self.card_layout.addStretch(1)
+        self.card_scroll.setWidget(self.card_host)
+        self._cards: dict[str, PMSCardWidget] = {}
+        self._cards_built = False
+
+        self.list_stack = QStackedWidget()
+        self.list_stack.addWidget(self.list)
+        self.list_stack.addWidget(self.card_scroll)
+        lay.addWidget(self.list_stack, 1)
         return w
+
+    def _on_view_mode_changed(self, idx):
+        if idx == 1 and not self._cards_built:
+            self._rebuild_cards()
+        self.list_stack.setCurrentIndex(idx)
+
+    def _rebuild_cards(self):
+        for card in self._cards.values():
+            card.setParent(None)
+        self._cards.clear()
+        for c in self._classes():
+            card = PMSCardWidget(c, self.card_host)
+            card.clicked.connect(self._select_by_name)
+            self.card_layout.insertWidget(self.card_layout.count() - 1, card)
+            self._cards[c.name] = card
+        self._cards_built = True
+        self._apply_filter()
 
     def _build_right(self) -> QWidget:
         w = QWidget()
@@ -344,7 +355,10 @@ class PMSManagerDialog(QDialog):
                 it.setToolTip(c.moc or "")
                 self.list.setItem(i, col, it)
         self._loading = False
-        self._apply_filter()
+        if self._cards_built:
+            self._rebuild_cards()   # rebuilds + applies the filter internally
+        else:
+            self._apply_filter()
         if select_name is not None:
             self._select_by_name(select_name)
         elif self.list.rowCount():
@@ -363,6 +377,11 @@ class PMSManagerDialog(QDialog):
             hay = " ".join((self.list.item(i, c).text() if self.list.item(i, c) else "")
                            for c in range(self.list.columnCount())).lower()
             self.list.setRowHidden(i, bool(term) and term not in hay)
+        if self._cards_built:
+            for name, card in self._cards.items():
+                cls = self._find_class(name)
+                hay = f"{name} {getattr(cls, 'moc', '') or ''}".lower()
+                card.setVisible(not term or term in hay)
 
     def _find_class(self, name):
         for c in self._classes():

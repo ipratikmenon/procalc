@@ -80,16 +80,20 @@ def qss() -> str:
         font-size: 14px; }}
 
     /* toolbar — white top-nav, ghost buttons (ink text, lavender reserved
-       for the primary Run action and the active/checked state) */
-    QToolBar {{ background: {t['bg']}; spacing: {SP_XS}; padding: {SP_XS} {SP_SM};
-        border: 0; border-bottom: 1px solid {t['border']}; min-height: 40px; }}
-    QToolBar::separator {{ background: {t['border']}; width: 1px; margin: {SP_XXS} {SP_XS}; }}
-    QToolBar QToolButton {{ color: {t['text']}; background: transparent;
+       for the primary Run action and the active/checked state). A scroll
+       area (HScrollToolbar) replaces the native QToolBar so the bar can
+       scroll horizontally instead of overflowing behind Qt's chevron. */
+    QScrollArea#MainToolbarArea {{ background: {t['bg']}; border: 0;
+        border-bottom: 1px solid {t['border']}; }}
+    QWidget#MainToolbar {{ background: {t['bg']}; }}
+    QFrame#TBSep {{ background: {t['border']}; max-width: 1px; min-width: 1px;
+        margin: {SP_XXS} {SP_XS}; }}
+    QWidget#MainToolbar QToolButton {{ color: {t['text']}; background: transparent;
         padding: {SP_XS} {SP_SM}; border-radius: {R_MD}; font-weight: 500;
         font-size: 13px; }}
-    QToolBar QToolButton:hover {{ background: {t['surface2']}; }}
-    QToolBar QToolButton:checked {{ background: {t['hover']}; color: {t['blue']}; }}
-    QToolBar QToolButton:disabled {{ color: {t['text_subtle']}; }}
+    QWidget#MainToolbar QToolButton:hover {{ background: {t['surface2']}; }}
+    QWidget#MainToolbar QToolButton:checked {{ background: {t['hover']}; color: {t['blue']}; }}
+    QWidget#MainToolbar QToolButton:disabled {{ color: {t['text_subtle']}; }}
     QToolButton#RunBtn {{ background: {t['blue']}; color: white; font-weight: 600;
         padding: {SP_XS} {SP_MD}; }}
     QToolButton#RunBtn:hover {{ background: {t['primary_hover']}; }}
@@ -150,6 +154,12 @@ def qss() -> str:
         background: {t['card']}; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: {SP_SM}; padding: 0 {SP_XXS};
         color: {t['text']}; }}
+
+    /* dashboard / PMS card tiles */
+    QFrame#Card {{ background: {t['card']}; border: 1px solid {t['border']};
+        border-radius: {R_LG}; }}
+    QFrame#Card:hover {{ border: 1px solid {t['border2']}; }}
+    QLabel#CardTitle {{ color: {t['text']}; font-weight: 600; font-size: 14px; }}
 
     /* misc */
     QStatusBar {{ background: {t['bg']}; border-top: 1px solid {t['border']};
