@@ -8507,7 +8507,9 @@ def _from_live_source(hmb_path, stream, case, sp, kind) -> FlashFeed | None:
     if hs is None or not hs.composition:
         return None
     const_map = _read_comp_constants(hmb_path)
-    return _build_feed(hs.composition, {}, {}, {}, sp, y_d=None,
+    x_d = getattr(hs, "composition_x", None) or {}
+    y_d = getattr(hs, "composition_y", None) or None
+    return _build_feed(hs.composition, x_d, {}, {}, sp, y_d=y_d,
                        const_map=const_map)
 
 

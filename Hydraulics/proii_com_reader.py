@@ -64,7 +64,9 @@ class HMBStream:
     case: str
     phase: str | None = None
     props: dict = field(default_factory=dict)
-    composition: dict = field(default_factory=dict)   # total mole fraction (z)
+    composition: dict = field(default_factory=dict)     # total mole fraction (z)
+    composition_y: dict = field(default_factory=dict)   # vapor mole fraction
+    composition_x: dict = field(default_factory=dict)   # liquid mole fraction
 
 
 class ProiiComError(RuntimeError):
@@ -209,17 +211,50 @@ def _connect(prz_path):
     return db
 
 
-# Attribute names are provisional — pinned down against the real PRO/II COM
-# object model once tested on a Windows machine with PRO/II installed; this
-# sandbox has no PRO/II to verify against.
+# Attribute names are cross-referenced against Hydraulics/HMB.xlsx's real
+# per-stream "TD Property Dump" report labels (Molar Rate, Mass Rate,
+# Temperature, Pressure, per-phase Actual Density/Viscosity/Thermal
+# Conductivity, Surface Tension, Z Factor, True Critical
+# Temperature/Pressure, Acentric Factor, ...) and hmb_proii_reader.py's own
+# Case-N label set, PascalCase-converted and Calc/Total-prefixed consistent
+# with the one confirmed-real COM pair (TotalMolarRate, TotalComposition,
+# from github.com/bryanpiguave/Air-Separation) — a much stronger grounding
+# than pure guesswork, but the exact attribute strings and Calc-suffix
+# convention remain provisional until tested against real PRO/II.
 _SCALAR_ATTRS = [
     ("TemperatureCalc", "temp_f"),
     ("PressureCalc", "pres_psia"),
     ("TotalMassRate", "total_mass"),
-    ("TotalMolarRate", "total_molar"),
-    ("MolecularWeight", "mol_weight"),
-    ("VapourMoleFraction", "_vap_mole_frac"),
+    ("TotalMolarRate", "total_molar"),          # confirmed real
+    ("TotalMolecularWeight", "mol_weight"),
+    ("VaporMoleFraction", "_vap_mole_frac"),
+    ("VaporActualDensity", "vap_density"),
+    ("LiquidActualDensity", "liq_density"),
+    ("VaporViscosity", "vap_visc"),
+    ("LiquidViscosity", "liq_visc"),
+    ("VaporThermalConductivity", "vap_therm_cond"),
+    ("LiquidThermalConductivity", "liq_therm_cond"),
+    ("SurfaceTension", "liq_surf_tens"),
+    ("VaporZFactor", "vap_z"),
+    ("TrueCriticalTemperature", "tc_f"),
+    ("TrueCriticalPressure", "pc_psia"),
+    ("AcentricFactor", "acentric"),
 ]
+
+
+def _read_composition(strm, attr, comp_index) -> dict[str, float]:
+    """GetAttribute(attr, idx) per component -- TotalComposition is the one
+    confirmed-real form; VaporComposition/LiquidComposition are best-guess
+    PascalCase siblings for the phase-split (y/x) reads, same indexing."""
+    out: dict[str, float] = {}
+    for idx, comp_name in comp_index.items():
+        try:
+            v = strm.GetAttribute(attr, idx)
+        except Exception:
+            continue
+        if v is not None:
+            out[comp_name] = float(v)
+    return out
 
 
 def get_stream(name, path, case: str = "Default") -> HMBStream | None:
@@ -252,14 +287,10 @@ def get_stream(name, path, case: str = "Default") -> HMBStream | None:
         phase = ("Vapor" if vap_frac > 0.999 else
                  "Liquid" if vap_frac < 0.001 else "Mixed")
 
-    composition: dict[str, float] = {}
-    for idx, comp_name in comp_index.items():
-        try:
-            v = strm.GetAttribute("TotalComposition", idx)
-        except Exception:
-            continue
-        if v is not None:
-            composition[comp_name] = float(v)
+    composition = _read_composition(strm, "TotalComposition", comp_index)
+    composition_y = _read_composition(strm, "VaporComposition", comp_index)
+    composition_x = _read_composition(strm, "LiquidComposition", comp_index)
 
     return HMBStream(name=str(name), case=case, phase=phase, props=props,
+                     composition_y=composition_y, composition_x=composition_x,
                      composition=composition)
