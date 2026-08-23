@@ -18,6 +18,7 @@ import dataclasses
 import os
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog, QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
@@ -25,9 +26,60 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QInputDialog, QAbstractItemView,
     QStackedWidget, QScrollArea, QButtonGroup, QToolButton, QFrame,
 )
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtGui import QColor
 
 import engine_api as api
 from pms.pms_card import PMSCardWidget, short_moc as _short_moc
+from resources.theme import TEN as _CHART_TEN
+
+
+def _pt_curve_chart(pt_curve):
+    """A themed Design-Pressure-vs-Design-Temperature QChartView from a
+    PipingClass's pt_curve (FPS basis: temp_f / pressure_psig), or None if
+    there aren't at least 2 usable points. Mirrors the QtCharts pattern
+    already established in results/charts.py's pressure_profile_chart."""
+    pts = [(p.temp_f, p.pressure_psig) for p in pt_curve
+          if p.temp_f is not None and p.pressure_psig is not None]
+    if len(pts) < 2:
+        return None
+    pts.sort(key=lambda xy: xy[0])
+
+    series = QLineSeries()
+    series.setName("Design envelope")
+    pen = QPen(QColor(_CHART_TEN.get("blue", "#0070EF")))
+    pen.setWidth(2)
+    series.setPen(pen)
+    series.setPointsVisible(True)
+    xs, ys = [], []
+    for t, p in pts:
+        series.append(t, p)
+        xs.append(t)
+        ys.append(p)
+
+    chart = QChart()
+    chart.setTitle("Temperature / Pressure envelope")
+    chart.addSeries(series)
+    chart.legend().setVisible(False)
+    chart.setBackgroundBrush(QColor(_CHART_TEN.get("panel", "#FFFFFF")))
+
+    ax = QValueAxis(); ax.setTitleText("Temperature (°F)")
+    ay = QValueAxis(); ay.setTitleText("Pressure (psig)")
+    chart.addAxis(ax, Qt.AlignBottom)
+    chart.addAxis(ay, Qt.AlignLeft)
+    series.attachAxis(ax)
+    series.attachAxis(ay)
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    xpad = (xmax - xmin) * 0.08 or 10.0
+    ypad = (ymax - ymin) * 0.08 or 10.0
+    ax.setRange(xmin - xpad, xmax + xpad)
+    ay.setRange(ymin - ypad, ymax + ypad)
+
+    view = QChartView(chart)
+    view.setRenderHint(QPainter.Antialiasing, True)
+    view.setMinimumHeight(180)
+    return view
 
 try:
     from resources import theme
@@ -257,11 +309,15 @@ class PMSManagerDialog(QDialog):
         ptbtns.addWidget(self.btn_rm_pt)
         ptbtns.addStretch(1)
         ptlay.addLayout(ptbtns)
+        self._pt_chart_slot = QVBoxLayout()
+        ptlay.addLayout(self._pt_chart_slot)
+        self._pt_chart_view = None
         lay.addWidget(pt_box)
 
         # live preview
         prev_box = QGroupBox("Live ID preview")
-        play = QHBoxLayout(prev_box)
+        pvlay = QVBoxLayout(prev_box)
+        play = QHBoxLayout()
         play.addWidget(QLabel("Bore (in)"))
         self.cb_bore = QComboBox()
         self.cb_bore.addItems(_BORES)
@@ -272,6 +328,24 @@ class PMSManagerDialog(QDialog):
         self.preview_lbl.setObjectName("Preview")
         self.preview_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         play.addWidget(self.preview_lbl, 1)
+        pvlay.addLayout(play)
+
+        oprow = QHBoxLayout()
+        oprow.addWidget(QLabel("Operating pressure (psig)"))
+        self.sp_op_pressure = self._spin(-14.7, 1_000_000.0, 1.0)
+        self.sp_op_pressure.valueChanged.connect(self._update_preview)
+        oprow.addWidget(self.sp_op_pressure)
+        oprow.addWidget(QLabel("Operating temp (°F)"))
+        self.sp_op_temp = self._spin(-460.0, 3000.0, 1.0)
+        self.sp_op_temp.valueChanged.connect(self._update_preview)
+        oprow.addWidget(self.sp_op_temp)
+        oprow.addStretch(1)
+        pvlay.addLayout(oprow)
+
+        self.recommend_lbl = QLabel("—")
+        self.recommend_lbl.setObjectName("Preview")
+        self.recommend_lbl.setWordWrap(True)
+        pvlay.addWidget(self.recommend_lbl)
         lay.addWidget(prev_box)
 
         # recompute preview on numeric edits
@@ -422,6 +496,10 @@ class PMSManagerDialog(QDialog):
             self.sp_temp.setValue(float(cls.design_temp_f or 0.0))
             self.sp_corr.setValue(float(cls.corrosion_allow_in or 0.0))
             self.sp_corr_min.setValue(float(cls.corrosion_allow_min_in or 0.0))
+            # operating P/T resets to this spec's own design point on every
+            # selection, so it starts inside the envelope ("✓ OK") by default
+            self.sp_op_pressure.setValue(float(cls.design_pressure_psig or 0.0))
+            self.sp_op_temp.setValue(float(cls.design_temp_f or 0.0))
 
             rules = cls.pipe_rules or ()
             self.table.setRowCount(0)
@@ -588,6 +666,8 @@ class PMSManagerDialog(QDialog):
         wc = self._working_class()
         if wc is None:
             self.preview_lbl.setText("—")
+            self.recommend_lbl.setText("—")
+            self._set_pt_chart(None)
             return
         bore = self.cb_bore.currentText()
 
@@ -615,6 +695,69 @@ class PMSManagerDialog(QDialog):
         line += f"    ·  flange class {fc if fc is not None else '—'}"
 
         self.preview_lbl.setText(line)
+        self._set_pt_chart(_pt_curve_chart(wc.pt_curve))
+
+        try:
+            op_p = self.sp_op_pressure.value()
+            op_t = self.sp_op_temp.value()
+            self.recommend_lbl.setText(self._recommend_spec(bore, op_p, op_t, wc))
+        except Exception as e:  # never crash on a bad edit
+            self.recommend_lbl.setText(f"—   (adequacy check error: {e})")
+
+    def _set_pt_chart(self, view):
+        if self._pt_chart_view is not None:
+            self._pt_chart_slot.removeWidget(self._pt_chart_view)
+            self._pt_chart_view.setParent(None)
+            self._pt_chart_view.deleteLater()
+            self._pt_chart_view = None
+        if view is not None:
+            self._pt_chart_slot.addWidget(view)
+            self._pt_chart_view = view
+
+    def _class_envelope(self, cls):
+        """(pmin, pmax, tmin, tmax) psig/°F covered by a class's pt_curve,
+        or derived from the scalar design_pressure_psig/design_temp_f alone
+        (0..design) when no curve is present. None if nothing usable."""
+        curve = getattr(cls, "pt_curve", None) or ()
+        pts = [(p.temp_f, p.pressure_psig) for p in curve
+              if p.temp_f is not None and p.pressure_psig is not None]
+        if pts:
+            ts = [t for t, _ in pts]
+            ps = [p for _, p in pts]
+            return (min(ps), max(ps), min(ts), max(ts))
+        dp, dt = cls.design_pressure_psig, cls.design_temp_f
+        if dp is not None and dt is not None:
+            return (0.0, float(dp), -460.0, float(dt))
+        return None
+
+    def _recommend_spec(self, bore, op_p, op_t, current_cls) -> str:
+        """Checks whether (op_p, op_t) falls inside the selected class's own
+        design envelope; if not, scans the rest of the catalogue for a spec
+        that covers the operating point AND has a real pipe-rule match for
+        the current bore, and suggests the first one found."""
+        env = self._class_envelope(current_cls)
+        if env is None:
+            return "No design envelope on this spec — cannot check adequacy."
+        pmin, pmax, tmin, tmax = env
+        if pmin <= op_p <= pmax and tmin <= op_t <= tmax:
+            return "✓ OK — operating point is within this spec's envelope."
+        for c in self._classes():
+            if c.name == current_cls.name:
+                continue
+            env2 = self._class_envelope(c)
+            if env2 is None:
+                continue
+            pmin2, pmax2, tmin2, tmax2 = env2
+            if not (pmin2 <= op_p <= pmax2 and tmin2 <= op_t <= tmax2):
+                continue
+            try:
+                idr = api.resolve_id_preview(c, bore)
+            except Exception:
+                continue
+            if idr.schedule:
+                return f"⚠ Out of range for this spec — consider {c.name} instead."
+        return ("⚠ Out of range for this spec — no covering alternative "
+               "found in the catalogue for this bore.")
 
     # ── catalogue upload ────────────────────────────────────────────────
     def _on_load_catalogue(self):

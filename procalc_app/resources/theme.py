@@ -148,6 +148,13 @@ def qss() -> str:
         border: 1px solid {t['blue']}; }}
     QComboBox::drop-down {{ border: 0; width: 20px; }}
 
+    /* clickable unit picker (UnitValueLabel) — compact, reads as a link
+       rather than a full input box, since it sits inline next to a value */
+    QComboBox#UnitPicker {{ background: transparent; border: 0; color: {t['blue']};
+        font-weight: 600; font-size: 12px; padding: 0 2px; min-height: 0; }}
+    QComboBox#UnitPicker:hover {{ background: {t['hover']}; border-radius: {R_MD}; }}
+    QComboBox#UnitPicker::drop-down {{ border: 0; width: 14px; }}
+
     /* group cards */
     QGroupBox {{ font-weight: 600; font-size: 13px; border: 1px solid {t['border']};
         border-radius: {R_LG}; margin-top: 14px; padding: {SP_MD} {SP_SM} {SP_SM} {SP_SM};

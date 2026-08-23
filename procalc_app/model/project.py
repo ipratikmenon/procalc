@@ -45,6 +45,11 @@ class Project:
     # "hmb||case||stream" -> {"sp": {...}, "feed": {...}|None}.
     stream_snapshot: dict = dataclasses.field(default_factory=dict)
     client_logo_b64: str | None = None
+    # user-entered, saved case descriptions (case name -> free text) — no
+    # HMB reader captures a case description itself (Case-N Excel, HYSYS,
+    # PRO/II, and per-stream dumps all give bare names only), so this is
+    # purely additive project metadata, edited on the Dashboard.
+    case_descriptions: dict = dataclasses.field(default_factory=dict)
 
     def save(self, path: str) -> None:
         payload = json.dumps(dataclasses.asdict(self)).encode("utf-8")

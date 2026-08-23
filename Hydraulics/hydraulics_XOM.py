@@ -855,6 +855,68 @@ def extract_stream(path: Path, stream_name: str) -> StreamProps | None:
     return sp
 
 
+def extract_all_streams(path: Path) -> dict[str, StreamProps]:
+    """Batch version of extract_stream() -- opens the workbook ONCE and reads
+    every stream sheet in a single pass. list_streams()+extract_stream()
+    each reopen the whole workbook per call, which is fine for one row's
+    lookup but prohibitively slow for a reconstructed table over a
+    400+-stream file (the Streams view, FOLLOW-UP CHANGE 15)."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out: dict[str, StreamProps] = {}
+    for ws in wb.worksheets:
+        if ws.title in SKIP_SHEETS:
+            continue
+        name, _ = _stream_title(ws)
+        if name:
+            out[name] = _extract_from_sheet(ws)
+    wb.close()
+    return out
+
+
+def _composition_buckets_from_sheet(ws) -> dict[str, dict[str, float]]:
+    """Per-sheet component composition parsing -- the same section-header
+    bucketing _from_td_dump does (below), factored out so it can run once
+    per sheet during a single-open batch pass instead of duplicated."""
+    buckets: dict[str, dict[str, float]] = {}
+    cur = None
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or len(row) < 2 or row[1] is None:
+            continue
+        label = str(row[1]).strip()
+        if re.match(r"^\d+\.\s", label):
+            cur = _section_key(label.upper())
+            continue
+        if cur is None or label.lower() == "component":
+            continue
+        val = row[3] if len(row) > 3 else None
+        if isinstance(val, (int, float)):
+            buckets.setdefault(cur, {})[label] = float(val)
+    return buckets
+
+
+def extract_all_compositions(path: Path) -> dict[str, dict[str, float]]:
+    """{stream_name: {component_name: mole_fraction}} for every stream in
+    the workbook, single-open. Only the total ("z") composition bucket is
+    surfaced -- matches the composition basis FlashFeed.names/.z already
+    use elsewhere, and is what the Streams view's Composition row-group
+    needs. Values are re-normalised to sum to 1 (mirrors _build_feed's own
+    normalisation, so this matches what a real flash would use)."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out: dict[str, dict[str, float]] = {}
+    for ws in wb.worksheets:
+        if ws.title in SKIP_SHEETS:
+            continue
+        name, _ = _stream_title(ws)
+        if not name:
+            continue
+        z = _composition_buckets_from_sheet(ws).get("z")
+        if z:
+            total = sum(z.values()) or 1.0
+            out[name] = {k: v / total for k, v in z.items()}
+    wb.close()
+    return out
+
+
 def _extract_from_sheet(ws) -> StreamProps:
     name, title = _stream_title(ws)
     ph = re.search(r"Phase:\s*([^|]+)", title)
@@ -8470,20 +8532,7 @@ def _from_td_dump(hmb_path, stream, sp) -> FlashFeed | None:
         wb.close()
         return None
 
-    buckets: dict[str, dict[str, float]] = {}
-    cur = None
-    for row in target.iter_rows(min_row=2, values_only=True):
-        if not row or len(row) < 2 or row[1] is None:
-            continue
-        label = str(row[1]).strip()
-        if re.match(r"^\d+\.\s", label):          # section header
-            cur = _section_key(label.upper())
-            continue
-        if cur is None or label.lower() == "component":
-            continue
-        val = row[3] if len(row) > 3 else None     # column D = Value
-        if isinstance(val, (int, float)):
-            buckets.setdefault(cur, {})[label] = float(val)
+    buckets = _composition_buckets_from_sheet(target)
     wb.close()
     if "z" not in buckets:
         return None

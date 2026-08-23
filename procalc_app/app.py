@@ -24,7 +24,7 @@ from results.results_view import ResultsView
 from resources import theme
 from widgets.scroll_toolbar import HScrollToolbar
 from widgets.run_control import RunAutoControl
-from stream_details.stream_details_panel import StreamDetailsPanel
+from stream_details.stream_details_panel import CircuitStreamsPanel, _StreamCard
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self._stream_snapshot = None             # set on Open, cleared on new HMB load
         self.client_logo_path: str | None = None
         self._project_active = False             # True once New/Open has run (dashboard state)
+        self._case_descriptions: dict[str, str] = {}   # case name -> user text, saved in .calc
 
         # start with an empty grid — the landing page ("Build a Project")
         # is what actually seeds it via New/Open, not an auto-populated sample
@@ -103,6 +104,9 @@ class MainWindow(QMainWindow):
         act("🗑 Delete", self._del_row)
         self.toolbar.add_separator()
         act("📂 Load HMB", self._load_hmb)
+        self.streams_act = act("📊 Streams", self._open_streams)
+        self.streams_act.setEnabled(False)
+        self.streams_act.setToolTip("Load an HMB file first")
 
         self.run_auto = RunAutoControl(self)
         self.run_auto.run_btn.clicked.connect(self.controller.run_now)
@@ -237,12 +241,11 @@ class MainWindow(QMainWindow):
         self._apply_column_visibility()
         gv.addWidget(self.view, 1)
 
-        self.stream_details = StreamDetailsPanel()
+        self.stream_details = CircuitStreamsPanel()
         self.view.selectionModel().currentChanged.connect(self._on_grid_row_selected)
         self._stream_details_timer = QTimer(self)
         self._stream_details_timer.setSingleShot(True)
-        self._stream_details_timer.timeout.connect(self._resolve_stream_details)
-        self._pending_stream_row = None
+        self._stream_details_timer.timeout.connect(self._refresh_circuit_streams)
 
         left_col = QSplitter(Qt.Vertical)
         left_col.addWidget(grid_wrap)
@@ -312,23 +315,72 @@ class MainWindow(QMainWindow):
         btn_open = QPushButton("Open Project…")
         btn_open.setObjectName("Secondary")
         btn_open.clicked.connect(self._open_project)
+        self.btn_new_circuit = QPushButton("New Circuit")
+        self.btn_new_circuit.setObjectName("Secondary")
+        self.btn_new_circuit.setEnabled(False)
+        self.btn_new_circuit.clicked.connect(self._on_new_circuit)
         btn_row.addWidget(btn_new)
         btn_row.addWidget(btn_open)
+        btn_row.addWidget(self.btn_new_circuit)
         btn_row_w = QWidget(); btn_row_w.setLayout(btn_row)
         header.addWidget(btn_row_w)
+
+        self.dash_identity_lbl = QLabel("")
+        self.dash_identity_lbl.setObjectName("Muted")
+        self.dash_identity_lbl.setAlignment(Qt.AlignCenter)
+        header.addWidget(self.dash_identity_lbl)
+
         header_w = QWidget(); header_w.setLayout(header)
         outer.addWidget(header_w)
 
         cards_row = QHBoxLayout()
         cards_row.setSpacing(16)
         self._card_circuits = self._make_dashboard_card("Recent Circuits")
-        self._card_streams = self._make_dashboard_card("Recent Streams")
         self._card_valves = self._make_dashboard_card("Control Valves")
-        for card in (self._card_circuits, self._card_streams, self._card_valves):
+        for card in (self._card_circuits, self._card_valves):
             cards_row.addWidget(card["frame"], 1)
         outer.addLayout(cards_row)
+
+        streams_title = QLabel("Recent Streams")
+        streams_title.setObjectName("SectionTitle")
+        outer.addWidget(streams_title)
+        self._streams_row, streams_scroll = self._make_mini_card_row()
+        outer.addWidget(streams_scroll)
+
+        cases_title = QLabel("HMB Cases")
+        cases_title.setObjectName("SectionTitle")
+        outer.addWidget(cases_title)
+        self._cases_row, cases_scroll = self._make_mini_card_row()
+        outer.addWidget(cases_scroll)
+
         outer.addStretch(1)
         return w
+
+    def _make_mini_card_row(self):
+        """A horizontally-scrolling row of small tiles — shared layout for
+        the Dashboard's Recent Streams and HMB Cases sections."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFixedHeight(150)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 4, 0)
+        row.setSpacing(10)
+        row.addStretch(1)
+        scroll.setWidget(host)
+        return row, scroll
+
+    def _on_new_circuit(self):
+        rows = self.model.rows
+        existing = {str(r.get("Circuit")) for r in rows if r.get("Circuit")}
+        n = 1
+        while f"C{n}" in existing:
+            n += 1
+        self.model.add_row(template={"Circuit": f"C{n}", "Run Type": "Main"})
+        self._refresh_dashboard()
 
     def _make_dashboard_card(self, title):
         frame = QFrame()
@@ -351,25 +403,34 @@ class MainWindow(QMainWindow):
         return {"frame": frame, "body": body}
 
     def _refresh_dashboard(self):
-        cards = (self._card_circuits, self._card_streams, self._card_valves)
-        if not getattr(self, "_project_active", False):
+        active = bool(getattr(self, "_project_active", False))
+        self.btn_new_circuit.setEnabled(active)
+        proj_bits = [b for b in (self.ed_project.text(), self.ed_client.text(),
+                                 self.ed_site.text()) if b]
+        self.dash_identity_lbl.setText("  ·  ".join(proj_bits))
+
+        self._clear_row(self._streams_row)
+        self._clear_row(self._cases_row)
+
+        cards = (self._card_circuits, self._card_valves)
+        if not active:
             msg = "Start a new project or open one to see project data here."
             for card in cards:
                 card["body"].setText(msg)
+            self._populate_cases_row()
             return
         rows = self.model.to_rows()
         if not rows:
             msg = "No rows yet — add circuit rows in the builder."
             for card in cards:
                 card["body"].setText(msg)
+            self._populate_cases_row()
             return
+
         circuits = list(dict.fromkeys(r.get("Circuit") for r in rows if r.get("Circuit")))
         self._card_circuits["body"].setText(
             "\n".join(circuits) if circuits else "No circuits in this project.")
-        streams = list(dict.fromkeys(
-            r.get("Stream Lookup") for r in rows if r.get("Stream Lookup")))
-        self._card_streams["body"].setText(
-            "\n".join(streams) if streams else "No stream lookups set yet.")
+
         valves = [r for r in rows
                  if str(r.get("Fitting Name", "")).lower() == "control valve"]
         if valves:
@@ -378,6 +439,75 @@ class MainWindow(QMainWindow):
             self._card_valves["body"].setText("\n".join(lines))
         else:
             self._card_valves["body"].setText("No control valves in this circuit.")
+
+        # streams: distinct streams referenced anywhere in the project,
+        # resolved via the same helper the Circuit Builder panel uses
+        stream_rows: dict[str, dict] = {}
+        for r in rows:
+            s = r.get("Stream Lookup")
+            if s and s not in stream_rows:
+                stream_rows[s] = r
+        if stream_rows:
+            for name, row in stream_rows.items():
+                sp = self._resolve_stream(row, name)
+                self._streams_row.insertWidget(
+                    self._streams_row.count() - 1, _StreamCard(name, sp))
+        else:
+            empty = QLabel("No stream lookups set yet.")
+            empty.setObjectName("Muted")
+            self._streams_row.insertWidget(0, empty)
+
+        self._populate_cases_row()
+
+    def _clear_row(self, row_layout):
+        while row_layout.count() > 1:
+            item = row_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _populate_cases_row(self):
+        if not self.hmb_path:
+            empty = QLabel("Load an HMB file to see its cases here.")
+            empty.setObjectName("Muted")
+            self._cases_row.insertWidget(0, empty)
+            return
+        try:
+            cases = api.list_cases(self.hmb_path) or []
+        except Exception:
+            cases = []
+        if not cases:
+            empty = QLabel("No cases found.")
+            empty.setObjectName("Muted")
+            self._cases_row.insertWidget(0, empty)
+            return
+        for c in cases:
+            self._cases_row.insertWidget(self._cases_row.count() - 1, self._make_case_tile(c))
+
+    def _make_case_tile(self, case_name):
+        frame = QFrame()
+        frame.setObjectName("Card")
+        frame.setFixedWidth(170)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+        title = QLabel(case_name)
+        title.setObjectName("CardTitle")
+        lay.addWidget(title)
+        ed = QLineEdit(self._case_descriptions.get(case_name, ""))
+        ed.setPlaceholderText("Add description…")
+        ed.editingFinished.connect(
+            lambda name=case_name, e=ed: self._on_case_description_edited(name, e))
+        lay.addWidget(ed)
+        lay.addStretch(1)
+        return frame
+
+    def _on_case_description_edited(self, case_name, edit):
+        text = edit.text().strip()
+        if text:
+            self._case_descriptions[case_name] = text
+        else:
+            self._case_descriptions.pop(case_name, None)
 
     def _build_statusbar(self):
         sb = QStatusBar()
@@ -509,29 +639,29 @@ class MainWindow(QMainWindow):
             return []
 
     def _on_grid_row_selected(self, current, previous):
-        if not current.isValid() or current.row() >= len(self.model.rows):
-            self.stream_details.show_empty(
-                "Select a row with a Stream Lookup value to see resolved "
-                "stream properties.")
-            self._pending_stream_row = None
-            return
-        # debounced so fast arrow-key navigation doesn't fire one live
-        # resolve per row — the connector's own session cache (Change 12/13)
-        # keeps a settled selection cheap either way
-        self._pending_stream_row = current.row()
+        # a new row selection may land in a different circuit -- debounced
+        # so fast arrow-key navigation doesn't fire one refresh per row
         self._stream_details_timer.start(200)
 
-    def _resolve_stream_details(self):
-        row_idx = self._pending_stream_row
-        if row_idx is None or row_idx >= len(self.model.rows):
-            return
-        row = self.model.rows[row_idx]
-        stream = row.get("Stream Lookup")
-        if not stream:
-            self.stream_details.show_empty(
-                "Select a row with a Stream Lookup value to see resolved "
-                "stream properties.")
-            return
+    def _current_circuit(self):
+        """The circuit the streams panel should summarize: the selected
+        row's circuit, or the first circuit present if nothing's selected."""
+        rows = self.model.rows
+        idx = self.view.currentIndex()
+        if idx.isValid() and idx.row() < len(rows):
+            cid = rows[idx.row()].get("Circuit")
+            if cid:
+                return cid
+        for r in rows:
+            if r.get("Circuit"):
+                return r.get("Circuit")
+        return None
+
+    def _resolve_stream(self, row, stream):
+        """Resolve one (row, stream-name) to a StreamProps, via the live
+        HMB connection or the .calc-restored snapshot -- shared by the
+        Circuit Builder's stream summary and the Dashboard's stream cards
+        so both use one resolution path, not two."""
         hmb = row.get("HMB File") or self.hmb_path
         case = row.get("Case") or (self.cb_case.currentText() or "Case 1")
         sp = None
@@ -544,12 +674,30 @@ class MainWindow(QMainWindow):
             entry = self._stream_snapshot.get((hmb, case, stream))
             if entry:
                 sp = entry[0]
-        if sp is None:
+        return sp
+
+    def _refresh_circuit_streams(self):
+        cid = self._current_circuit()
+        if not cid:
             self.stream_details.show_empty(
-                f"Could not resolve stream {stream!r} — check the HMB "
-                "connection and case.")
+                "Select a circuit with a Stream Lookup value to see its "
+                "streams here.")
             return
-        self.stream_details.show_props(sp)
+        rows = [r for r in self.model.rows if r.get("Circuit") == cid]
+        # first row that carries each distinct stream name, in first-
+        # appearance order (same dict.fromkeys idiom used for the Dashboard
+        # cards, now filtered to just this circuit)
+        row_by_stream: dict[str, dict] = {}
+        for r in rows:
+            s = r.get("Stream Lookup")
+            if s and s not in row_by_stream:
+                row_by_stream[s] = r
+        if not row_by_stream:
+            self.stream_details.show_empty(f"No streams used in circuit {cid} yet.")
+            return
+        results = [(name, self._resolve_stream(row, name))
+                  for name, row in row_by_stream.items()]
+        self.stream_details.refresh(results)
 
     def _dup_row(self):
         idx = self.view.currentIndex()
@@ -614,6 +762,8 @@ class MainWindow(QMainWindow):
             n = 0
         self._refresh_hmb_label(f"{os.path.basename(path)}  ·  {kind_label}  ·  {n} streams")
         self._log(f"Loaded HMB: {path}  ({kind_label}, {n} streams, cases={cases})")
+        self.streams_act.setEnabled(True)
+        self.streams_act.setToolTip("")
 
     def _refresh_hmb_label(self, text=None):
         if hasattr(self, "hmb_lbl"):
@@ -635,6 +785,7 @@ class MainWindow(QMainWindow):
         self._stream_snapshot = None
         self.hmb_path = None
         self.client_logo_path = None
+        self._case_descriptions = {}
         self.btn_client_logo.setText("Client Logo…")
         self.model.set_rows([])
         self._set_meta_dict({})
@@ -642,6 +793,8 @@ class MainWindow(QMainWindow):
         self._units_customized = False
         self.cb_units.setCurrentIndex(0)
         self._refresh_hmb_label()
+        self.streams_act.setEnabled(False)
+        self.streams_act.setToolTip("Load an HMB file first")
         self.setWindowTitle("Procalc Hydraulics — T.EN — (untitled)")
         self._project_active = True
         self._refresh_dashboard()
@@ -663,6 +816,7 @@ class MainWindow(QMainWindow):
         self.hmb_path = proj.hmb_path
         self._stream_snapshot = (api.stream_snapshot_from_json(proj.stream_snapshot)
                                  if proj.stream_snapshot else None)
+        self._case_descriptions = dict(proj.case_descriptions or {})
 
         cases = []
         if self.hmb_path and os.path.exists(self.hmb_path):
@@ -670,6 +824,11 @@ class MainWindow(QMainWindow):
                 cases = api.list_cases(self.hmb_path) or []
             except Exception:
                 cases = []
+            self.streams_act.setEnabled(True)
+            self.streams_act.setToolTip("")
+        else:
+            self.streams_act.setEnabled(False)
+            self.streams_act.setToolTip("Load an HMB file first")
         self.cb_case.clear()
         self.cb_case.addItems(cases or [proj.case or "Case 1"])
         idx = self.cb_case.findText(proj.case or "Case 1")
@@ -745,6 +904,7 @@ class MainWindow(QMainWindow):
             flash_mode=ctx["flash_mode"], unit_system=ctx["units"],
             unit_overrides=ctx["unit_overrides"], meta=ctx["meta"],
             stream_snapshot=snapshot_json, client_logo_b64=client_logo_b64,
+            case_descriptions=dict(self._case_descriptions),
         )
         try:
             proj.save(path)
@@ -774,6 +934,7 @@ class MainWindow(QMainWindow):
     def _on_grid_edited(self):
         self.controller.schedule()
         self._refresh_dashboard()
+        self._stream_details_timer.start(200)
 
     def _open_pms(self):
         try:
@@ -781,6 +942,16 @@ class MainWindow(QMainWindow):
             PMSManagerDialog(self).exec()
         except Exception as e:  # pragma: no cover
             QMessageBox.information(self, "PMS", f"PMS manager: {e}")
+
+    def _open_streams(self):
+        if not self.hmb_path:
+            return
+        try:
+            from streams.streams_view import StreamsDialog
+            case = self.cb_case.currentText() or "Case 1"
+            StreamsDialog(self.hmb_path, case, self).exec()
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Streams", f"Could not build the Streams table: {e}")
 
     def _export(self):
         path = self.results.current_workbook_path()

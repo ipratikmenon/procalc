@@ -147,6 +147,60 @@ def list_streams(path: str, case: str = "Case 1") -> list[str]:
         return []
 
 
+def list_all_stream_data(hmb_path: str, case: str = "Case 1") -> dict:
+    """{stream_name: {"props": StreamProps|None, "composition": dict|None}}
+    for every stream in the HMB source, batched where the source format
+    supports it cheaply:
+      - per_stream_xlsx: a single-open batch reader (extract_all_streams/
+        extract_all_compositions) -- reading each stream individually would
+        reopen the whole workbook per stream, ~40x slower on a real
+        400+-stream file (measured).
+      - proii_xlsx: hmb_proii_reader's own per-case parse is already
+        memoized (one parse serves every stream), so this just loops the
+        already-cheap per-stream accessors.
+      - hysys / proii_com (live): resolving 400+ streams over a live COM
+        connection is impractical (COM round-trips, and for proii_com a
+        RunCalcs()-backed session) -- returns names only (props/composition
+        left None); the Streams table resolves those lazily per-column via
+        resolve_stream_for_snapshot(), the same on-demand path already used
+        elsewhere for live sources.
+    """
+    kind = hmb_source_kind(hmb_path)
+    out: dict[str, dict] = {}
+
+    if kind == "per_stream_xlsx":
+        from pathlib import Path
+        all_props = H.extract_all_streams(Path(hmb_path))
+        all_comp = H.extract_all_compositions(Path(hmb_path))
+        for name, sp in all_props.items():
+            out[name] = {"props": sp, "composition": all_comp.get(name)}
+        return out
+
+    if kind == "proii_xlsx":
+        try:
+            import td_parser
+            streams, comp_data, _names = td_parser.parse_proii(hmb_path, case)
+        except Exception:
+            streams, comp_data = [], {}
+        for name in streams:
+            try:
+                hs = HMBP.get_stream(name, path=hmb_path, case=case)
+                sp = H.streamprops_from_hmb(hs) if hs else None
+            except Exception:
+                sp = None
+            out[name] = {"props": sp,
+                        "composition": comp_data.get(name, {}).get("MOLE_FRAC") or None}
+        return out
+
+    try:
+        names = list_streams(hmb_path, case)
+    except Exception:
+        names = []
+    for name in names:
+        out[name] = {"props": None, "composition": None}
+    return out
+
+
 # ── units ────────────────────────────────────────────────────────────────
 def detect_hmb_units(hmb_path: str, case: str | None = None) -> tuple[str, dict]:
     """Best-guess (unit_system, unit_overrides) from an HMB workbook's own
@@ -294,6 +348,40 @@ def unit_quantities() -> list[tuple[str, str, dict]]:
         defs = {sys: H.UN.SYSTEM_DEFAULTS[sys].get(qty) for sys in H.UN.SYSTEM_DEFAULTS}
         out.append((qty, name, {"units": units, "defaults": defs}))
     return out
+
+
+def units_for(qty: str) -> list[str]:
+    """Every unit string common/units.py knows for one quantity code."""
+    return list(H.UN._CONVERTERS.get(qty, {}).keys())
+
+
+def internal_unit(qty: str) -> str | None:
+    """The unit a quantity's value is in internally (the engine's FPS
+    canonical basis, e.g. "psia" for pressure, "degF" for temperature) --
+    every StreamProps/FlashFeed field is already expressed in this unit,
+    so a widget seeding its initial display from a raw internal value
+    should label it with this, not guess at dict ordering."""
+    return H.UN.SYSTEM_DEFAULTS["FPS"].get(qty)
+
+
+def convert(qty: str, value, from_unit: str, to_unit: str):
+    """Convert a single value between two named units of the same quantity
+    (e.g. qty="P", from_unit="psia", to_unit="bara") — the single-value
+    primitive UnitSystem doesn't expose directly (it only converts against
+    whichever unit is currently selected for a whole UnitSystem instance).
+    Returns `value` unchanged if the quantity/unit pair is unknown or value
+    is None (mirrors UnitSystem.to_internal/from_internal's own leniency)."""
+    if value is None:
+        return None
+    conv = H.UN._CONVERTERS.get(qty)
+    if not conv or from_unit not in conv or to_unit not in conv:
+        return value
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    internal = conv[from_unit][0](v)
+    return conv[to_unit][1](internal)
 
 
 def resolve_stream_for_snapshot(hmb_path: str, case: str, stream: str):
