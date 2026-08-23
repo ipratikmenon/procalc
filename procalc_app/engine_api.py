@@ -157,6 +157,17 @@ def normalize_hmb_unit(qty: str, raw_unit) -> str | None:
     return H.UN.HMB_UNIT_ALIASES.get(qty, {}).get(key)
 
 
+def raw_hmb_unit_for(qty: str) -> str | None:
+    """A real, HMB_UNIT_ALIASES-recognized raw unit STRING for a quantity
+    (e.g. "PSIA" for "P", "°F" for "T") -- the reverse of normalize_hmb_unit.
+    Used when synthesizing an in-memory sheet (a live HYSYS/PRO-II
+    connection has no on-disk HMB file to read a raw unit string from) so
+    the synthesized cell still round-trips through the same normalization
+    path a real file's printed unit would."""
+    aliases = H.UN.HMB_UNIT_ALIASES.get(qty)
+    return next(iter(aliases), None) if aliases else None
+
+
 def property_quantity_for(label: str) -> str | None:
     """The quantity code a per-stream/OUTPUT sheet row's Property label
     represents (e.g. "Vapor Actual Density" -> "rho"), or None if that
