@@ -855,24 +855,6 @@ def extract_stream(path: Path, stream_name: str) -> StreamProps | None:
     return sp
 
 
-def extract_all_streams(path: Path) -> dict[str, StreamProps]:
-    """Batch version of extract_stream() -- opens the workbook ONCE and reads
-    every stream sheet in a single pass. list_streams()+extract_stream()
-    each reopen the whole workbook per call, which is fine for one row's
-    lookup but prohibitively slow for a reconstructed table over a
-    400+-stream file (the Streams view, FOLLOW-UP CHANGE 15)."""
-    wb = load_workbook(path, read_only=True, data_only=True)
-    out: dict[str, StreamProps] = {}
-    for ws in wb.worksheets:
-        if ws.title in SKIP_SHEETS:
-            continue
-        name, _ = _stream_title(ws)
-        if name:
-            out[name] = _extract_from_sheet(ws)
-    wb.close()
-    return out
-
-
 def _composition_buckets_from_sheet(ws) -> dict[str, dict[str, float]]:
     """Per-sheet component composition parsing -- the same section-header
     bucketing _from_td_dump does (below), factored out so it can run once
@@ -892,29 +874,6 @@ def _composition_buckets_from_sheet(ws) -> dict[str, dict[str, float]]:
         if isinstance(val, (int, float)):
             buckets.setdefault(cur, {})[label] = float(val)
     return buckets
-
-
-def extract_all_compositions(path: Path) -> dict[str, dict[str, float]]:
-    """{stream_name: {component_name: mole_fraction}} for every stream in
-    the workbook, single-open. Only the total ("z") composition bucket is
-    surfaced -- matches the composition basis FlashFeed.names/.z already
-    use elsewhere, and is what the Streams view's Composition row-group
-    needs. Values are re-normalised to sum to 1 (mirrors _build_feed's own
-    normalisation, so this matches what a real flash would use)."""
-    wb = load_workbook(path, read_only=True, data_only=True)
-    out: dict[str, dict[str, float]] = {}
-    for ws in wb.worksheets:
-        if ws.title in SKIP_SHEETS:
-            continue
-        name, _ = _stream_title(ws)
-        if not name:
-            continue
-        z = _composition_buckets_from_sheet(ws).get("z")
-        if z:
-            total = sum(z.values()) or 1.0
-            out[name] = {k: v / total for k, v in z.items()}
-    wb.close()
-    return out
 
 
 def _extract_from_sheet(ws) -> StreamProps:
@@ -1050,6 +1009,52 @@ def _extract_from_sheet(ws) -> StreamProps:
     return sp
 
 
+# label substring -> common/units.py quantity code. Order matters only
+# where one needle is a prefix of another (longest/most-specific first).
+_LABEL_QTY_RULES: list[tuple[str, str]] = [
+    ("molar rate", "molflow"),
+    ("mass rate", "mflow"),
+    ("std liq", "qvol"),
+    ("std vap", "qvol"),
+    ("actual vol", "qvol"),
+    ("std lv rate", "qvol"),
+    ("critical temp", "T"),
+    ("temperature", "T"),
+    ("critical press", "P"),
+    ("pressure", "P"),
+    ("molecular weight", "MW"),
+    ("specific enthalpy", "h"),
+    ("actual density", "rho"),
+    ("std density", "rho"),
+    ("viscosity", "visc"),
+    ("surface tension", "st"),
+]
+
+
+def property_quantity_for(label: str) -> str | None:
+    """The common/units.py quantity code a per-stream/OUTPUT sheet's row
+    Property label represents (e.g. "Vapor Actual Density" -> "rho",
+    "Critical Temperature" -> "T"), or None if the property has no modeled
+    unit (Cp, Z-factor, API Gravity, Watson K, acentric factor, thermal
+    conductivity, ...). Section-agnostic on purpose: the physical quantity
+    a label names doesn't depend on which numbered section or Vapor/Liquid/
+    Total column it appears under, which is what lets one small matcher
+    work for both the per-stream sheets (section-scoped, undecorated
+    labels like "Actual Density") and OUTPUT (flat, phase-prefixed labels
+    like "Vapor Actual Density") with no per-sheet-shape special-casing."""
+    ll = (label or "").strip().lower()
+    if not ll:
+        return None
+    if ll == "density":              # older dump variants print bare "Density"
+        return "rho"
+    if "viscosity" in ll and "kin" in ll:
+        return None
+    for needle, qty in _LABEL_QTY_RULES:
+        if needle in ll:
+            return qty
+    return None
+
+
 def extract_stream_units(path: Path) -> dict[str, str]:
     """Raw {quantity_code: unit_string} from the first usable per-stream-dump
     sheet's own Unit column (row[2]) — mirrors _extract_from_sheet's per-row
@@ -1064,41 +1069,18 @@ def extract_stream_units(path: Path) -> dict[str, str]:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         if not rows:
             continue
-        section = ""
         for rv in rows[1:]:
             if not rv or len(rv) < 2 or rv[1] is None:
                 continue
             label = str(rv[1]).strip()
             unit = str(rv[2]).strip() if len(rv) > 2 and rv[2] is not None else ""
             if re.match(r"^\d+[.\s]", label):
-                section = label.upper()
                 continue
             if not unit:
                 continue
-            ll = label.lower()
-            if "FLOW RATE" in section:
-                if ll == "mass rate" or "total mass flow" in ll:
-                    out.setdefault("mflow", unit)
-                elif "molar rate" in ll:
-                    out.setdefault("molflow", unit)
-                elif "std liq" in ll or "std vap" in ll or "actual vol" in ll:
-                    out.setdefault("qvol", unit)
-            elif "CONDITION" in section:
-                if "temperature" in ll:
-                    out.setdefault("T", unit)
-                elif "pressure" in ll:
-                    out.setdefault("P", unit)
-                elif "molecular weight" in ll:
-                    out.setdefault("MW", unit)
-                elif "specific enthalpy" in ll:
-                    out.setdefault("h", unit)
-            elif "VAPOR PHASE" in section or "LIQUID PHASE" in section:
-                if "actual density" in ll or ll == "density":
-                    out.setdefault("rho", unit)
-                elif "viscosity" in ll and "kin" not in ll:
-                    out.setdefault("visc", unit)
-                elif "surface tension" in ll:
-                    out.setdefault("st", unit)
+            qty = property_quantity_for(label)
+            if qty:
+                out.setdefault(qty, unit)
         if out:
             break
     wb.close()

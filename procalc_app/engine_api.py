@@ -147,61 +147,23 @@ def list_streams(path: str, case: str = "Case 1") -> list[str]:
         return []
 
 
-def list_all_stream_data(hmb_path: str, case: str = "Case 1") -> dict:
-    """{stream_name: {"props": StreamProps|None, "composition": dict|None}}
-    for every stream in the HMB source, batched where the source format
-    supports it cheaply:
-      - per_stream_xlsx: a single-open batch reader (extract_all_streams/
-        extract_all_compositions) -- reading each stream individually would
-        reopen the whole workbook per stream, ~40x slower on a real
-        400+-stream file (measured).
-      - proii_xlsx: hmb_proii_reader's own per-case parse is already
-        memoized (one parse serves every stream), so this just loops the
-        already-cheap per-stream accessors.
-      - hysys / proii_com (live): resolving 400+ streams over a live COM
-        connection is impractical (COM round-trips, and for proii_com a
-        RunCalcs()-backed session) -- returns names only (props/composition
-        left None); the Streams table resolves those lazily per-column via
-        resolve_stream_for_snapshot(), the same on-demand path already used
-        elsewhere for live sources.
-    """
-    kind = hmb_source_kind(hmb_path)
-    out: dict[str, dict] = {}
-
-    if kind == "per_stream_xlsx":
-        from pathlib import Path
-        all_props = H.extract_all_streams(Path(hmb_path))
-        all_comp = H.extract_all_compositions(Path(hmb_path))
-        for name, sp in all_props.items():
-            out[name] = {"props": sp, "composition": all_comp.get(name)}
-        return out
-
-    if kind == "proii_xlsx":
-        try:
-            import td_parser
-            streams, comp_data, _names = td_parser.parse_proii(hmb_path, case)
-        except Exception:
-            streams, comp_data = [], {}
-        for name in streams:
-            try:
-                hs = HMBP.get_stream(name, path=hmb_path, case=case)
-                sp = H.streamprops_from_hmb(hs) if hs else None
-            except Exception:
-                sp = None
-            out[name] = {"props": sp,
-                        "composition": comp_data.get(name, {}).get("MOLE_FRAC") or None}
-        return out
-
-    try:
-        names = list_streams(hmb_path, case)
-    except Exception:
-        names = []
-    for name in names:
-        out[name] = {"props": None, "composition": None}
-    return out
-
-
 # ── units ────────────────────────────────────────────────────────────────
+def normalize_hmb_unit(qty: str, raw_unit) -> str | None:
+    """An HMB-printed unit string (e.g. "PSIA", "°F", "cP") -> the app's own
+    unit spelling for that quantity (e.g. "psia", "degF"), or None if it
+    isn't a recognized spelling for `qty` (HMB_UNIT_ALIASES doesn't cover
+    it, or the printed unit is a placeholder like "-")."""
+    key = " ".join(str(raw_unit).strip().upper().split())
+    return H.UN.HMB_UNIT_ALIASES.get(qty, {}).get(key)
+
+
+def property_quantity_for(label: str) -> str | None:
+    """The quantity code a per-stream/OUTPUT sheet row's Property label
+    represents (e.g. "Vapor Actual Density" -> "rho"), or None if that
+    property has no modeled unit. See hydraulics_XOM.property_quantity_for."""
+    return H.property_quantity_for(label)
+
+
 def detect_hmb_units(hmb_path: str, case: str | None = None) -> tuple[str, dict]:
     """Best-guess (unit_system, unit_overrides) from an HMB workbook's own
     printed unit strings — for propagating them as fresh-project defaults.
@@ -221,8 +183,7 @@ def detect_hmb_units(hmb_path: str, case: str | None = None) -> tuple[str, dict]
 
     normalized = {}
     for qty, u in raw.items():
-        key = " ".join(str(u).strip().upper().split())
-        norm = H.UN.HMB_UNIT_ALIASES.get(qty, {}).get(key)
+        norm = normalize_hmb_unit(qty, u)
         if norm:
             normalized[qty] = norm
     if not normalized:

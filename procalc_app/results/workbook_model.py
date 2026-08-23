@@ -3,8 +3,13 @@ cell values (number-formatted), fills, bold/colour fonts, alignment, merges,
 and approximate column widths."""
 from __future__ import annotations
 
+from openpyxl.utils import get_column_letter
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QAbstractItemView, QTableView
+
+# Excel row-height / column-width units are points/characters; Qt wants px.
+_PT_TO_PX = 1.333
 
 
 def _argb_to_qcolor(rgb):
@@ -124,3 +129,38 @@ class SheetTableModel(QAbstractTableModel):
 
     def headerData(self, section, orient, role=Qt.DisplayRole):
         return None      # sheets carry their own header rows
+
+
+def build_sheet_view(ws, model_cls=SheetTableModel, parent=None) -> QTableView:
+    """One sheet, rendered as close to Excel as possible: cell values/styles
+    (via `model_cls`, defaulting to SheetTableModel), merged-cell spans, and
+    approximate column widths/row heights read straight off the worksheet.
+    Shared by the Results tab (engine output workbooks) and the HMB viewer
+    (Streams dialog) so both render a real openpyxl sheet identically --
+    `model_cls` is the only thing a caller customizes (e.g. a unit-aware
+    subclass that overlays per-row unit conversion on top of the same data).
+    """
+    view = QTableView(parent)
+    view.setModel(model_cls(ws))
+    view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    view.horizontalHeader().setVisible(False)
+    view.verticalHeader().setVisible(False)
+    view.setShowGrid(True)
+    view.setAlternatingRowColors(False)
+    m = view.model()
+    for (ar, ac), (rs, cs) in m.spans.items():
+        view.setSpan(ar - 1, ac - 1, rs, cs)
+    for c in range(m.ncols):
+        letter = get_column_letter(c + 1)
+        w = ws.column_dimensions[letter].width if letter in ws.column_dimensions else None
+        view.setColumnWidth(c, int((w or 10) * 7) + 6)
+    for r in range(m.nrows):
+        rd = ws.row_dimensions.get(r + 1)
+        h = getattr(rd, "height", None) if rd is not None else None
+        if h:
+            view.setRowHeight(r, int(round(h * _PT_TO_PX)))
+    # TODO (fidelity): freeze the top 2 header rows on vertical scroll by
+    # stacking a second QTableView that shares this model and shows only
+    # rows 0-1. Deferred: interacts awkwardly with setSpan on merged
+    # headers, and the table already renders correctly without it.
+    return view

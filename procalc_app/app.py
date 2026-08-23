@@ -41,6 +41,10 @@ class MainWindow(QMainWindow):
         self.client_logo_path: str | None = None
         self._project_active = False             # True once New/Open has run (dashboard state)
         self._case_descriptions: dict[str, str] = {}   # case name -> user text, saved in .calc
+        # (path, mtime) -> loaded openpyxl.Workbook, so re-opening the
+        # Streams/HMB viewer for the same file in this session is instant
+        # instead of re-paying its full-fidelity parse.
+        self._hmb_workbook_cache: dict = {}
 
         # start with an empty grid — the landing page ("Build a Project")
         # is what actually seeds it via New/Open, not an auto-populated sample
@@ -786,6 +790,7 @@ class MainWindow(QMainWindow):
         self.hmb_path = None
         self.client_logo_path = None
         self._case_descriptions = {}
+        self._hmb_workbook_cache.clear()
         self.btn_client_logo.setText("Client Logo…")
         self.model.set_rows([])
         self._set_meta_dict({})
@@ -949,7 +954,8 @@ class MainWindow(QMainWindow):
         try:
             from streams.streams_view import StreamsDialog
             case = self.cb_case.currentText() or "Case 1"
-            StreamsDialog(self.hmb_path, case, self).exec()
+            StreamsDialog(self.hmb_path, case, self,
+                         workbook_cache=self._hmb_workbook_cache).exec()
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Streams", f"Could not build the Streams table: {e}")
 

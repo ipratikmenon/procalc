@@ -5,53 +5,19 @@ from __future__ import annotations
 import os
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
-                               QLabel, QTabWidget, QTableView, QHeaderView,
-                               QAbstractItemView)
+                               QLabel, QTabWidget)
 
-from results.workbook_model import SheetTableModel
+from results.workbook_model import build_sheet_view
 from results.charts import pressure_profile_chart, flow_pattern_chart
-
-# Excel row-height / column-width units are points/characters; Qt wants px.
-_PT_TO_PX = 1.333
-
-
-class _SheetTab(QTableView):
-    def __init__(self, ws, parent=None):
-        super().__init__(parent)
-        self.setModel(SheetTableModel(ws))
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.horizontalHeader().setVisible(False)
-        self.verticalHeader().setVisible(False)
-        self.setShowGrid(True)
-        self.setAlternatingRowColors(False)
-        m = self.model()
-        for (ar, ac), (rs, cs) in m.spans.items():
-            self.setSpan(ar - 1, ac - 1, rs, cs)
-        # approximate column widths from the sheet
-        for c in range(m.ncols):
-            letter = get_column_letter(c + 1)
-            w = ws.column_dimensions[letter].width if letter in ws.column_dimensions else None
-            self.setColumnWidth(c, int((w or 10) * 7) + 6)
-        # honour explicit Excel row heights (points -> px)
-        for r in range(m.nrows):
-            rd = ws.row_dimensions.get(r + 1)
-            h = getattr(rd, "height", None) if rd is not None else None
-            if h:
-                self.setRowHeight(r, int(round(h * _PT_TO_PX)))
-        # TODO (fidelity): freeze the top 2 header rows on vertical scroll by
-        # stacking a second QTableView that shares this model and shows only
-        # rows 0-1. Deferred: interacts awkwardly with setSpan on merged
-        # headers, and the table already renders correctly without it.
 
 
 def _build_tab(ws, wb):
     """A sheet tab. For chart sheets, pair the table with a QtCharts re-plot in
     an inner Table/Chart QTabWidget. Any chart failure falls back to table-only.
     """
-    table = _SheetTab(ws)
+    table = build_sheet_view(ws)
     title = ws.title or ""
     chart_view = None
     try:
