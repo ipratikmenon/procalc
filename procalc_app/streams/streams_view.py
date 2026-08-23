@@ -18,6 +18,7 @@ on the left, not repeated per stream).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel,
                                QLineEdit, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
@@ -73,6 +74,19 @@ _ROWS = [
 ]
 
 
+# Fixed caption AND combo widths so every row header's unit combo starts
+# (and ends) at the same x offset, column-0-wide (long captions like "Dry
+# Vapor Thermal Conductivity" are elided with the full text kept as a
+# tooltip). Fixing the combo's width too, not just the caption's, avoids a
+# subtler alignment break: with only the caption pinned, a row whose combo
+# has a wider natural sizeHint (e.g. Pressure's longer unit strings like
+# "kg/cm2g") can still pull the whole row's layout into a tighter squeeze
+# that shifts its own start position left of the fixed-width rows.
+_ROW_HEADER_CAP_W = 132
+_ROW_HEADER_COMBO_W = 78
+_ROW_HEADER_COL_W = 240
+
+
 class _RowHeader(QWidget):
     """Row-header cell: a caption + (for numeric rows) a clickable unit
     dropdown, styled the same as UnitValueLabel's #UnitPicker combo."""
@@ -82,11 +96,22 @@ class _RowHeader(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 0, 4, 0)
         lay.setSpacing(4)
-        lay.addWidget(QLabel(caption))
+        cap_lbl = QLabel()
+        cap_lbl.setFixedWidth(_ROW_HEADER_CAP_W)
+        # ensurePolished() forces the app stylesheet's font (e.g. Inter,
+        # wider than the pre-style default) to apply before measuring --
+        # eliding against the pre-style font underestimates the real
+        # rendered width and the caption clips without an ellipsis.
+        cap_lbl.ensurePolished()
+        fm = QFontMetrics(cap_lbl.font())
+        cap_lbl.setText(fm.elidedText(caption, Qt.ElideRight, _ROW_HEADER_CAP_W))
+        cap_lbl.setToolTip(caption)
+        lay.addWidget(cap_lbl)
         self.combo = None
         if qty:
             self.combo = QComboBox()
             self.combo.setObjectName("UnitPicker")
+            self.combo.setFixedWidth(_ROW_HEADER_COMBO_W)
             self.combo.addItems(api.units_for(qty))
             i = self.combo.findText(unit)
             if i >= 0:
@@ -155,7 +180,7 @@ class StreamsTableWidget(QWidget):
         self.table.setHorizontalHeaderItem(0, QTableWidgetItem(""))
         for c, name in enumerate(self._stream_names, start=1):
             self.table.setHorizontalHeaderItem(c, QTableWidgetItem(name))
-        self.table.setColumnWidth(0, 190)
+        self.table.setColumnWidth(0, _ROW_HEADER_COL_W)
         for c in range(1, n_streams + 1):
             self.table.setColumnWidth(c, 100)
         self.table.verticalHeader().setVisible(False)

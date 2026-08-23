@@ -16,12 +16,18 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QScrollArea,
 import engine_api as api
 from widgets.unit_field import UnitValueLabel
 
+# Shared fixed caption/value widths so every UnitValueLabel row in a card
+# lines its unit dropdown up in one column, regardless of caption length
+# ("T" vs "Liquid") -- see UnitValueLabel's caption_width/value_width.
+_CAP_W, _VAL_W = 46, 56
+_CARD_W = 210
+
 
 class _StreamCard(QFrame):
     def __init__(self, name, sp, parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
-        self.setFixedWidth(190)
+        self.setFixedWidth(_CARD_W)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(3)
@@ -42,15 +48,20 @@ class _StreamCard(QFrame):
         lay.addWidget(phase_lbl)
 
         lay.addWidget(UnitValueLabel("T", sp.temp_f, api.internal_unit("T"),
-                                     caption="T", decimals=1))
+                                     caption="T", decimals=1,
+                                     caption_width=_CAP_W, value_width=_VAL_W))
         lay.addWidget(UnitValueLabel("P", sp.pres_psia, api.internal_unit("P"),
-                                     caption="P", decimals=2))
+                                     caption="P", decimals=2,
+                                     caption_width=_CAP_W, value_width=_VAL_W))
         lay.addWidget(UnitValueLabel("mflow", sp.total_mass, api.internal_unit("mflow"),
-                                     caption="Total", decimals=0))
+                                     caption="Total", decimals=0,
+                                     caption_width=_CAP_W, value_width=_VAL_W))
         lay.addWidget(UnitValueLabel("mflow", sp.vap_mass, api.internal_unit("mflow"),
-                                     caption="Vapor", decimals=0))
+                                     caption="Vapor", decimals=0,
+                                     caption_width=_CAP_W, value_width=_VAL_W))
         lay.addWidget(UnitValueLabel("mflow", sp.liq_mass, api.internal_unit("mflow"),
-                                     caption="Liquid", decimals=0))
+                                     caption="Liquid", decimals=0,
+                                     caption_width=_CAP_W, value_width=_VAL_W))
 
 
 class CircuitStreamsPanel(QWidget):

@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QDoubleSpinBox, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QMessageBox, QInputDialog, QAbstractItemView,
-    QStackedWidget, QScrollArea, QButtonGroup, QToolButton, QFrame,
+    QStackedWidget, QScrollArea, QButtonGroup, QToolButton, QFrame, QMenu,
+    QSizePolicy,
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtGui import QColor
@@ -78,7 +79,8 @@ def _pt_curve_chart(pt_curve):
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.Antialiasing, True)
-    view.setMinimumHeight(180)
+    view.setMinimumHeight(260)
+    view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     return view
 
 try:
@@ -292,27 +294,36 @@ class PMSManagerDialog(QDialog):
         # PipingClass.pt_curve), up to 10 points, SI and FPS independently
         # (real HURL sheets don't always use a pure unit conversion between
         # the two, so both are stored and edited as given).
-        pt_box = QGroupBox("Temperature / Pressure curve")
+        pt_box = QGroupBox()
         ptlay = QVBoxLayout(pt_box)
+        pt_hdr = QHBoxLayout()
+        pt_title = QLabel("Temperature / Pressure curve")
+        pt_title.setObjectName("CardTitle")
+        pt_hdr.addWidget(pt_title)
+        pt_hdr.addStretch(1)
+        self.btn_pt_options = QToolButton(text="⋯")
+        self.btn_pt_options.setToolTip("Add/remove a curve point")
+        self.btn_pt_options.setPopupMode(QToolButton.InstantPopup)
+        pt_menu = QMenu(self.btn_pt_options)
+        pt_menu.addAction("Add point", self._on_add_pt)
+        pt_menu.addAction("Remove point", self._on_remove_pt)
+        self.btn_pt_options.setMenu(pt_menu)
+        pt_hdr.addWidget(self.btn_pt_options)
+        ptlay.addLayout(pt_hdr)
         self.pt_table = QTableWidget(0, len(_PT_COLS))
         self.pt_table.setHorizontalHeaderLabels(_PT_COLS)
         self.pt_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.pt_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pt_table.itemChanged.connect(self._on_rule_changed)
+        # Bounded so it never competes with the chart below it for the
+        # QVBoxLayout's stretch space (up to 10 points, own scrollbar
+        # handles overflow beyond what's visible).
+        self.pt_table.setMaximumHeight(220)
         ptlay.addWidget(self.pt_table)
-        ptbtns = QHBoxLayout()
-        self.btn_add_pt = QPushButton("Add point")
-        self.btn_add_pt.clicked.connect(self._on_add_pt)
-        self.btn_rm_pt = QPushButton("Remove point")
-        self.btn_rm_pt.clicked.connect(self._on_remove_pt)
-        ptbtns.addWidget(self.btn_add_pt)
-        ptbtns.addWidget(self.btn_rm_pt)
-        ptbtns.addStretch(1)
-        ptlay.addLayout(ptbtns)
         self._pt_chart_slot = QVBoxLayout()
-        ptlay.addLayout(self._pt_chart_slot)
+        ptlay.addLayout(self._pt_chart_slot, 1)
         self._pt_chart_view = None
-        lay.addWidget(pt_box)
+        lay.addWidget(pt_box, 1)
 
         # live preview
         prev_box = QGroupBox("Live ID preview")
@@ -533,8 +544,7 @@ class PMSManagerDialog(QDialog):
             sp.setEnabled(not ro)
         self.btn_add_row.setEnabled(not ro)
         self.btn_rm_row.setEnabled(not ro)
-        self.btn_add_pt.setEnabled(not ro)
-        self.btn_rm_pt.setEnabled(not ro)
+        self.btn_pt_options.setEnabled(not ro)
         self.btn_save.setEnabled(not ro)
         # table cells: toggle editability
         trigger = (QAbstractItemView.NoEditTriggers if ro

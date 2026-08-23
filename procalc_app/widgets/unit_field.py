@@ -6,7 +6,8 @@ static "Pressure (psia)" string).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QWidget
 
 import engine_api as api
@@ -31,7 +32,15 @@ class UnitValueLabel(QWidget):
     unit_changed = Signal(str)   # new unit string
 
     def __init__(self, qty: str, value=None, unit: str | None = None,
-                caption: str | None = None, decimals: int = 4, parent=None):
+                caption: str | None = None, decimals: int = 4, parent=None,
+                caption_width: int | None = None,
+                value_width: int | None = None):
+        """caption_width/value_width: when given, fix the caption/value
+        label to that pixel width (caption elided with a full-text tooltip,
+        value right-aligned) so the unit combo that follows always starts
+        at the same x offset across every instance sharing the same pair
+        -- the mechanism that lines up unit dropdowns in one column when
+        several of these are stacked (e.g. one per row of a card)."""
         super().__init__(parent)
         self._qty = qty
         self._decimals = decimals
@@ -44,10 +53,22 @@ class UnitValueLabel(QWidget):
 
         self._caption_lbl = QLabel(caption or "")
         self._caption_lbl.setObjectName("Muted")
+        if caption_width:
+            self._caption_lbl.setFixedWidth(caption_width)
+            # ensurePolished() first: measuring against the pre-stylesheet
+            # font (narrower than the app's real "Inter" font) elides too
+            # little and the caption clips without an ellipsis once styled.
+            self._caption_lbl.ensurePolished()
+            fm = QFontMetrics(self._caption_lbl.font())
+            self._caption_lbl.setText(fm.elidedText(caption or "", Qt.ElideRight, caption_width))
+            self._caption_lbl.setToolTip(caption or "")
         if caption:
             lay.addWidget(self._caption_lbl)
 
         self._value_lbl = QLabel()
+        if value_width:
+            self._value_lbl.setFixedWidth(value_width)
+            self._value_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self._value_lbl)
 
         self._unit_combo = QComboBox()
