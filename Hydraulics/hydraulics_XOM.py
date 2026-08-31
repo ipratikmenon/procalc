@@ -282,6 +282,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference, Series
+from openpyxl.worksheet.page import PageMargins
 
 import pms_classes as PMS
 import sys as _sys
@@ -316,6 +317,22 @@ F_TO_K_OFFSET = 459.67              # degF -> degR additive; K = degR / 1.8
 # ── Style ──────────────────────────────────────────────────────────────────
 NAVY="1F4973"; STEEL="2E75B6"; WHITE="FFFFFF"; LGRAY="F2F2F2"; DGRAY="404040"
 ORANGE="C55A11"; AMBER="FFF2CC"; GREEN="E2EFDA"; GRNHDR="375623"; RED="FCE4D6"
+
+# ── T.EN brand theme palette (from the corporate template) ──────────────────
+# Single source of the branded colours used on the output cover / headers;
+# the app mirrors these in its Qt theme so screen and workbook match.
+TEN_BLUE   = "0070EF"   # primary bright blue
+TEN_NAVY   = "004C84"   # dark navy (headers / title bands)
+TEN_TEAL   = "3D98B7"
+TEN_GREEN  = "80C7A0"
+TEN_LIME   = "A2C61C"
+TEN_AMBER  = "FDC300"
+TEN_SALMON = "EE7766"
+TEN_RED    = "E84242"   # FAIL / alarm
+TEN_GRAY   = "878787"
+TEN_LGRAY  = "DEDEDE"   # zebra / light fill
+_TEN_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "assets", "ten_logo.png")
 LTBLUE="DEEAF1"; PURPLE="7030A0"; MGRAY="A0A0A0"
 
 def _fill(h): return PatternFill("solid", fgColor=h)
@@ -360,10 +377,179 @@ def txt(v):
     return s or None
 
 
+def _write_doc_header_block(ws, meta, ncol, title, start_row=1) -> int:
+    """Drawing-style document header: T.EN logo + client-logo slot STACKED
+    in a single column on the left, the sheet's title in a single column
+    next to them, and the Prep/Chk/Appr/Revision/Page + Client/Project/
+    Site/Unit/Circuit Name fields grouped together on the right.  5 rows
+    tall.  Returns the next free row so callers can start their own content
+    there directly — the title lives inside this block now, it no longer
+    needs its own row below.
+
+    Fixed 6-column footprint (not adaptive to the sheet's own width, and
+    not adaptive to ``ncol`` — accepted for call-site compatibility only):
+    logo 1 (stacked T.EN/client), title 2, admin 3-4, identity 5-6 — the
+    same compact layout on every sheet regardless of how wide its own data
+    table is, chosen to fit within a narrow 6-column sheet (e.g. the CV
+    datasheet) with no overhang."""
+    m = meta or {}
+    r0 = start_row
+    for i in range(5):
+        ws.row_dimensions[r0 + i].height = 16
+
+    # ── col 1: logos stacked — T.EN on top (2 rows), client below (3 rows) ──
+    ws.merge_cells(start_row=r0, start_column=1, end_row=r0 + 1, end_column=1)
+    _c(ws, r0, 1, "", bg=TEN_LGRAY, ha="center")
+    try:
+        if os.path.exists(_TEN_LOGO_PATH):
+            from openpyxl.drawing.image import Image as _XLImage
+            img = _XLImage(_TEN_LOGO_PATH)
+            img.height, img.width = 28, 56
+            ws.add_image(img, f"A{r0}")
+    except Exception:
+        pass
+
+    ws.merge_cells(start_row=r0 + 2, start_column=1, end_row=r0 + 4, end_column=1)
+    clp = m.get("client_logo_path")
+    _c(ws, r0 + 2, 1, "" if (clp and os.path.exists(clp)) else "Client logo",
+       bg=TEN_LGRAY, fg=DGRAY, sz=8, ha="center")
+    try:
+        if clp and os.path.exists(clp):
+            from openpyxl.drawing.image import Image as _XLImage
+            img2 = _XLImage(clp)
+            img2.height, img2.width = 44, 88
+            ws.add_image(img2, f"A{r0 + 2}")
+    except Exception:
+        pass
+
+    # ── col 2: title (single column, not spanned) ──
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0 + 4, end_column=2)
+    _c(ws, r0, 2, title or "", sz=8, bold=True, fg=NAVY, ha="center",
+       va="center", wrap=True)
+
+    # ── admin block (cols 3/4) ──
+    admin = [
+        ("Prep By", m.get("prep_by") or ""),
+        ("Chk By", m.get("chk_by") or ""),
+        ("Appr By", m.get("appr_by") or ""),
+        ("Revision", m.get("revision") or ""),
+        ("Page", m.get("page") or ""),
+    ]
+    for i, (lbl, val) in enumerate(admin):
+        rr = r0 + i
+        _c(ws, rr, 3, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True, ha="right")
+        _c(ws, rr, 4, val, sz=8)
+
+    # ── identity block (cols 5/6) ──
+    ident = [
+        ("Client", m.get("client") or "—"),
+        ("Project", m.get("project") or "—"),
+        ("Site", m.get("site") or "—"),
+        ("Unit", m.get("unit") or "—"),
+        ("Circuit Name", m.get("circuit_name") or "—"),
+    ]
+    for i, (lbl, val) in enumerate(ident):
+        rr = r0 + i
+        _c(ws, rr, 5, lbl, bg=TEN_LGRAY, fg=DGRAY, sz=8, bold=True)
+        _c(ws, rr, 6, val, sz=8)
+
+    return r0 + 5
+
+
+# Standard Windows/Excel paper-size codes (openpyxl's page_setup.paperSize
+# takes the raw code, no named constants provided).
+_PAPER_A3 = "8"
+_PAPER_A4 = "9"
+
+
+def _apply_print_setup(ws):
+    """Native-Excel page setup so the workbook prints/exports to PDF
+    reasonably straight out of Excel, no manual setup needed: paper size +
+    orientation picked from the sheet's own column count (narrow sheets get
+    A4 portrait, moderately wide ones A4 landscape, wide data tables A3
+    landscape), fit-to-1-page-wide, and the header rows already frozen via
+    ``freeze_panes`` repeated on every printed page."""
+    if ws.sheet_state != "visible":
+        return
+    if ws.title == "README":
+        paper, orient = _PAPER_A4, "portrait"
+    else:
+        ncol = ws.max_column or 1
+        if ncol <= 6:
+            paper, orient = _PAPER_A4, "portrait"
+        elif ncol <= 12:
+            paper, orient = _PAPER_A4, "landscape"
+        else:
+            paper, orient = _PAPER_A3, "landscape"
+    ws.page_setup.paperSize = paper
+    ws.page_setup.orientation = orient
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.4, right=0.4, top=0.5, bottom=0.5,
+                                  header=0.2, footer=0.2)
+    ws.print_options.horizontalCentered = True
+
+    # repeat the frozen header rows on every printed page — freeze_panes
+    # (e.g. "C9") already marks exactly how many rows are header, no extra
+    # per-sheet bookkeeping needed.
+    fp = ws.freeze_panes
+    if fp:
+        m = re.match(r"[A-Za-z]+(\d+)", fp)
+        if m:
+            last_header_row = int(m.group(1)) - 1
+            if last_header_row >= 1:
+                ws.print_title_rows = f"1:{last_header_row}"
+
+
+# Title prefixes of the sheet families that carry the shared document
+# header block (_write_doc_header_block) — matched against startswith() so
+# per-run-label variants (Pressure_Profile_Min, CV_FCV-01, Comp Phase
+# Splits Branch_1, ...) all match their family. "Stream_Props" alone also
+# covers "Stream_Props_Detail*" via startswith(). README carries the header
+# block too (see _build_readme_noiso) but is deliberately NOT listed here —
+# _apply_uniform_columns' forced 15-width/wrap on every column would wreck
+# its single-wide-column (width 120) free-text layout.
+_HEADER_BLOCK_SHEET_PREFIXES = (
+    "Cover", "Line_List", "Pressure_Profile", "Flash_Profile",
+    "Composition Splits", "Comp Phase Splits", "Composition Phase Splits",
+    "CV_", "Input_Pipeline",
+    "Component_Detail", "Stream_Props", "FIV_EI_T2.2", "AIV",
+    "Two_Phase_Regime", "Flow_Pattern_Data", "H ", "V ",
+)
+
+
+def _apply_uniform_columns(ws):
+    """Fixed 15-char column width + wrap-text on every column, for the 9
+    header-block sheet families — a native-file formatting request (not
+    applied to the denser/repeating-block sheets, which keep their own
+    tuned widths). Excel can't auto-fit row height for wrapped text without
+    a live render, so rows that already have an explicit height set may
+    still need one manual Format -> AutoFit Row Height pass in Excel."""
+    for c in range(1, (ws.max_column or 1) + 1):
+        cw(ws, c, 15)
+    for row in ws.iter_rows():
+        for cell in row:
+            al = cell.alignment
+            cell.alignment = Alignment(horizontal=al.horizontal, vertical=al.vertical,
+                                       wrap_text=True)
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  1.  INTERNAL DIAMETER from piping spec + bore (PMS catalogue + ASME)
 # ════════════════════════════════════════════════════════════════════════
 _CLASS_BY_NAME = {c.name.upper(): c for c in PMS.CLASSES}
+
+
+def reload_pms(json_path=None):
+    """Reload the PMS catalogue (e.g. after the app uploads a new
+    gems_extracted.json) and rebuild the name index this module resolves
+    against.  resolve_id() uses the refreshed classes on its next call."""
+    PMS.reload(json_path)
+    global _CLASS_BY_NAME
+    _CLASS_BY_NAME = {c.name.upper(): c for c in PMS.CLASSES}
+    return len(PMS.CLASSES)
+
 
 # Map a numeric bore to the canonical NPS string used by asme_data.
 _NPS_BY_FLOAT = {
@@ -401,8 +587,10 @@ def resolve_id(spec: str | None, bore) -> IDResult:
     """Internal diameter (in) for a component from its piping spec + bore.
 
     schedule comes from the PMS class pipe-rule whose NPS range covers the
-    bore; wall from ASME B36.10/B36.19.  ID = OD - 2*wall.  CAL rules fall
-    back to their min_schedule wall (handling/structural floor).
+    bore; wall from ASME B36.10/B36.19.  ID = OD - 2*wall.  CAL rules use
+    their explicit special_thickness_in when the sheet gives one; otherwise
+    they fall back to their min_schedule wall (handling/structural floor),
+    exactly as before.
     """
     nps = _nps_string(bore)
     if nps is None or nps not in A.PIPE_OD_IN:
@@ -411,15 +599,24 @@ def resolve_id(spec: str | None, bore) -> IDResult:
 
     cls = _CLASS_BY_NAME.get((spec or "").upper())
     sched = None
+    cal_thickness = None
     if cls:
         for rule in cls.pipe_rules:
             if nps in A.expand_nps_range(rule.nps_low, rule.nps_high):
                 sched = rule.schedule
                 if str(sched).upper() == "CAL":
-                    sched = (rule.min_schedule or "STD")
+                    if rule.special_thickness_in:
+                        cal_thickness = rule.special_thickness_in
+                    else:
+                        sched = (rule.min_schedule or "STD")
                 break
 
     basis = f"{spec} {nps}\""
+    if cal_thickness is not None:
+        wall = cal_thickness
+        basis += f" (CAL: special thickness {wall:g}in)"
+        return IDResult(round(od - 2 * wall, 4), od, wall, "CAL", nps, basis)
+
     if sched is None:
         sched = "STD"
         basis += " (spec n/a -> STD)"
@@ -445,9 +642,30 @@ try:
     import stream_map as SMAP              # optional — line→stream mapping
 except ImportError:                        # pragma: no cover
     SMAP = None
+try:
+    import hysys_com_reader as HYSYS_COM   # optional — live HYSYS COM (.hsc)
+except ImportError:                        # pragma: no cover
+    HYSYS_COM = None
+try:
+    import proii_com_reader as PROII_COM   # optional — live PRO/II COM (.prz)
+except ImportError:                        # pragma: no cover
+    PROII_COM = None
 
 SKIP_SHEETS = {"UNITS", "COMPONENTS", "INPUT", "OUTPUT", "Summary",
                "Component Index", "Legend", "CASES", "README"}
+
+
+def _source_kind(path: str | Path) -> str:
+    """Extension-based routing ahead of the Excel content-sniff below —
+    '.hsc'/'.prz' are never valid openpyxl input, so they must be routed
+    before anything tries to open them as a workbook.  Returns one of
+    "hysys" | "proii_com" | "proii_xlsx" | "per_stream_xlsx"."""
+    ext = Path(str(path)).suffix.lower()
+    if ext == ".hsc":
+        return "hysys"
+    if ext == ".prz":
+        return "proii_com"
+    return "proii_xlsx" if is_proii_export(path) else "per_stream_xlsx"
 
 
 def is_proii_export(path: str | Path) -> bool:
@@ -456,7 +674,9 @@ def is_proii_export(path: str | Path) -> bool:
     Content-based — the filename is NOT used.  A td_parser per-stream dump (which
     may also be named ``HMB_..._from_proii_*.xlsx``) has UNITS/COMPONENTS/INPUT/
     OUTPUT + one sheet per stream and NO ``Case 1`` sheet, so it correctly routes
-    to the per-stream ``extract_stream`` reader instead.
+    to the per-stream ``extract_stream`` reader instead.  Live sources (``.hsc``/
+    ``.prz``) are not Excel and always return False here — route them via
+    ``_source_kind()`` instead, before this function ever sees the path.
     """
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -635,6 +855,27 @@ def extract_stream(path: Path, stream_name: str) -> StreamProps | None:
     return sp
 
 
+def _composition_buckets_from_sheet(ws) -> dict[str, dict[str, float]]:
+    """Per-sheet component composition parsing -- the same section-header
+    bucketing _from_td_dump does (below), factored out so it can run once
+    per sheet during a single-open batch pass instead of duplicated."""
+    buckets: dict[str, dict[str, float]] = {}
+    cur = None
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or len(row) < 2 or row[1] is None:
+            continue
+        label = str(row[1]).strip()
+        if re.match(r"^\d+\.\s", label):
+            cur = _section_key(label.upper())
+            continue
+        if cur is None or label.lower() == "component":
+            continue
+        val = row[3] if len(row) > 3 else None
+        if isinstance(val, (int, float)):
+            buckets.setdefault(cur, {})[label] = float(val)
+    return buckets
+
+
 def _extract_from_sheet(ws) -> StreamProps:
     name, title = _stream_title(ws)
     ph = re.search(r"Phase:\s*([^|]+)", title)
@@ -766,6 +1007,84 @@ def _extract_from_sheet(ws) -> StreamProps:
         elif sp.liq_mass is not None and sp.vap_mass is None:
             sp.vap_mass = max(0.0, sp.total_mass - sp.liq_mass)
     return sp
+
+
+# label substring -> common/units.py quantity code. Order matters only
+# where one needle is a prefix of another (longest/most-specific first).
+_LABEL_QTY_RULES: list[tuple[str, str]] = [
+    ("molar rate", "molflow"),
+    ("mass rate", "mflow"),
+    ("std liq", "qvol"),
+    ("std vap", "qvol"),
+    ("actual vol", "qvol"),
+    ("std lv rate", "qvol"),
+    ("critical temp", "T"),
+    ("temperature", "T"),
+    ("critical press", "P"),
+    ("pressure", "P"),
+    ("molecular weight", "MW"),
+    ("specific enthalpy", "h"),
+    ("actual density", "rho"),
+    ("std density", "rho"),
+    ("viscosity", "visc"),
+    ("surface tension", "st"),
+]
+
+
+def property_quantity_for(label: str) -> str | None:
+    """The common/units.py quantity code a per-stream/OUTPUT sheet's row
+    Property label represents (e.g. "Vapor Actual Density" -> "rho",
+    "Critical Temperature" -> "T"), or None if the property has no modeled
+    unit (Cp, Z-factor, API Gravity, Watson K, acentric factor, thermal
+    conductivity, ...). Section-agnostic on purpose: the physical quantity
+    a label names doesn't depend on which numbered section or Vapor/Liquid/
+    Total column it appears under, which is what lets one small matcher
+    work for both the per-stream sheets (section-scoped, undecorated
+    labels like "Actual Density") and OUTPUT (flat, phase-prefixed labels
+    like "Vapor Actual Density") with no per-sheet-shape special-casing."""
+    ll = (label or "").strip().lower()
+    if not ll:
+        return None
+    if ll == "density":              # older dump variants print bare "Density"
+        return "rho"
+    if "viscosity" in ll and "kin" in ll:
+        return None
+    for needle, qty in _LABEL_QTY_RULES:
+        if needle in ll:
+            return qty
+    return None
+
+
+def extract_stream_units(path: Path) -> dict[str, str]:
+    """Raw {quantity_code: unit_string} from the first usable per-stream-dump
+    sheet's own Unit column (row[2]) — mirrors _extract_from_sheet's per-row
+    section/label parsing above but captures the unit string instead of the
+    value, and stops at the first sheet that yields any hits (unit
+    convention is per-workbook, not per-stream)."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out: dict[str, str] = {}
+    for ws in wb.worksheets:
+        if ws.title in SKIP_SHEETS:
+            continue
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        if not rows:
+            continue
+        for rv in rows[1:]:
+            if not rv or len(rv) < 2 or rv[1] is None:
+                continue
+            label = str(rv[1]).strip()
+            unit = str(rv[2]).strip() if len(rv) > 2 and rv[2] is not None else ""
+            if re.match(r"^\d+[.\s]", label):
+                continue
+            if not unit:
+                continue
+            qty = property_quantity_for(label)
+            if qty:
+                out.setdefault(qty, unit)
+        if out:
+            break
+    wb.close()
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -970,6 +1289,7 @@ class Station:
     dp_elev_psi: float
     dp_total_psi: float
     note: str = ""
+    cv_raw: dict | None = None      # control-valve sizing capture (CV datasheet)
 
 
 def build_profile(rows, sp, phase, p_start_psia) -> list[Station]:
@@ -1213,7 +1533,7 @@ def build_profile_sheet(wb, stations, line_no, stream_name, phase, sp=None):
         ws.add_chart(chart, f"A{sr + 2}")
 
 
-def build_detail_sheet(wb, stations, phase):
+def build_detail_sheet(wb, stations, phase, meta=None):
     ws = wb.create_sheet("Component_Detail")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -1225,19 +1545,17 @@ def build_detail_sheet(wb, stations, phase):
         "TWO-PHASE": "Homogeneous no-slip: ρns=1/(x/ρg+(1-x)/ρl), McAdams μ, "
                      "mass-flux G. f·(L/D)·G²/(2ρns) + K·G²/(2ρns) + ρns·gΔz.",
     }[phase]
-    ws.merge_cells("A1:K1")
-    _c(ws, 1, 1, f"COMPONENT DETAIL   |   Phase model: {phase}   |   {note}",
-       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
-    ws.row_dimensions[1].height = 30
+    title = f"COMPONENT DETAIL   |   Phase model: {phase}   |   {note}"
+    r0 = _write_doc_header_block(ws, meta, 11, title=title)
 
     headers = ["Seq", "Comp ID", "Fitting", _U.hdr("ID", "Lin"),
                _U.hdr("Length", "L"), _U.hdr("Velocity", "v"),
                "Reynolds", "Friction f", _U.hdr("Density", "rho"),
                _U.hdr("dP Total", "dP"), _U.hdr("P Out", "P")]
-    _hdr(ws, headers, row=2)
-    ws.freeze_panes = "A3"
+    _hdr(ws, headers, row=r0)
+    ws.freeze_panes = f"A{r0 + 1}"
     for i, s in enumerate(stations):
-        r = i + 3
+        r = i + r0 + 1
         bg = LGRAY if i % 2 else WHITE
         vals = [s.seq, s.comp_id, s.fitting,
                 _U.disp("Lin", s.id_in), _U.disp("L", s.length_ft),
@@ -1251,13 +1569,12 @@ def build_detail_sheet(wb, stations, phase):
         cw(ws, ci, w)
 
 
-def build_stream_sheet(wb, sp, phase):
+def build_stream_sheet(wb, sp, phase, meta=None):
     ws = wb.create_sheet("Stream_Props")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
-    ws.merge_cells("A1:C1")
-    _c(ws, 1, 1, f"HMB STREAM — {sp.stream}", bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    title = f"HMB STREAM — {sp.stream}"
+    r0 = _write_doc_header_block(ws, meta, 3, title=title)
 
     rows = [
         ("Phase (HMB)", sp.phase, ""),
@@ -1277,9 +1594,10 @@ def build_stream_sheet(wb, sp, phase):
         ("Source sheet", sp.source_sheet, ""),
         ("Unconverged warning", "YES" if sp.warned else "No", ""),
     ]
-    _hdr(ws, ["Property", "Value", "Unit / Note"], row=2)
+    _hdr(ws, ["Property", "Value", "Unit / Note"], row=r0)
+    ws.freeze_panes = f"A{r0 + 1}"
     for i, (k, v, u) in enumerate(rows):
-        r = i + 3
+        r = i + r0 + 1
         bg = LGRAY if i % 2 else WHITE
         _c(ws, r, 1, k, bg=bg, sz=9, bold=True)
         _c(ws, r, 2, "" if v is None else v, bg=LTBLUE, sz=9,
@@ -1300,9 +1618,20 @@ def build_stream_sheet(wb, sp, phase):
 
 
 def load_stream_props(hmb_path, sim_stream, case="Case 1") -> StreamProps | None:
-    """Read one stream as StreamProps from either the PRO/II export or a
-    legacy per-stream HMB workbook."""
-    if is_proii_export(hmb_path):
+    """Read one stream as StreamProps from a PRO/II export, a legacy
+    per-stream HMB workbook, or a live HYSYS/PRO-II COM connection."""
+    kind = _source_kind(hmb_path)
+    if kind in ("hysys", "proii_com"):
+        reader = HYSYS_COM if kind == "hysys" else PROII_COM
+        if reader is None:
+            return None
+        try:
+            hs = reader.get_stream(sim_stream, hmb_path, case)
+        except Exception as exc:
+            print(f"  (live {kind} connect failed for {sim_stream}@{case}: {exc})")
+            return None
+        return streamprops_from_hmb(hs) if hs else None
+    if kind == "proii_xlsx":
         if HMBPROII is None:
             return None
         hs = HMBPROII.get_stream(sim_stream, path=hmb_path, case=case)
@@ -1450,7 +1779,7 @@ def _fiv_support_color(arrangement: str) -> str:
 
 def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
                     gas_density_fn, limits=(0.15, 0.25, 0.35, 0.45), material="Steel",
-                    station_lines=None, line_colors=None):
+                    station_lines=None, line_colors=None, meta=None):
     ws = wb.create_sheet("FIV_EI_T2.2")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = ORANGE
@@ -1471,19 +1800,16 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
     headers = base_headers + lim_headers
     ncol = len(headers)
 
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
     lim_txt = ", ".join(str(l) for l in limits)
-    _c(ws, 1, 1,
-       f"FIV — EI T2.2   |   Line {line_no} <-> Stream {stream_name}   |   "
-       f"LOF limits = {lim_txt}   |   {material}   |   "
-       f"{datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"FIV — EI T2.2   |   Line {line_no} <-> Stream {stream_name}   |   "
+             f"LOF limits = {lim_txt}   |   {material}   |   "
+             f"{datetime.now():%d-%b-%Y %H:%M}")
+    r0 = _write_doc_header_block(ws, meta, max(ncol, 6), title=title)
 
-    _hdr(ws, headers, row=2)
+    _hdr(ws, headers, row=r0)
     for ci in range(n_base + 1, ncol + 1):   # tint the LOF blocks
-        ws.cell(2, ci).fill = _fill(GRNHDR)
-    ws.freeze_panes = "C3"
+        ws.cell(r0, ci).fill = _fill(GRNHDR)
+    ws.freeze_panes = f"C{r0 + 1}"
 
     def _span_pair(a):
         if a["arrangement"] == "Not achievable":
@@ -1493,7 +1819,7 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
         return round(a["span_m"], 3), round(a["span_m"] / FT_TO_M, 2)
 
     multi = bool(station_lines and line_colors and len(set(station_lines)) > 1)
-    r = 3
+    r = r0 + 1
     worst = None
     prev_line = None
     for idx, s in enumerate(stations):
@@ -1630,7 +1956,7 @@ def ei_risk(factor: float) -> str:
 
 
 def build_aiv_sheet(wb, stations, sp, line_no, stream_name, efficiency=1e-4,
-                    station_lines=None, line_colors=None):
+                    station_lines=None, line_colors=None, meta=None):
     ws = wb.create_sheet("AIV")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -1648,30 +1974,27 @@ def build_aiv_sheet(wb, stations, sp, line_no, stream_name, efficiency=1e-4,
         dp_src_pa = rho_src = W_ac = lw_src = 0.0
 
     ncol = 13
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
-       f"AIV — source attenuation   |   Line {line_no} <-> Stream {stream_name}   |   "
-       f"η={efficiency:g}   |   {datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"AIV — source attenuation   |   Line {line_no} <-> Stream {stream_name}   |   "
+             f"η={efficiency:g}   |   {datetime.now():%d-%b-%Y %H:%M}")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
 
-    _c(ws, 2, 1, "SOURCE", bg=GRNHDR, fg=WHITE, bold=True)
+    _c(ws, r0, 1, "SOURCE", bg=GRNHDR, fg=WHITE, bold=True)
     src_txt = (f"{src.comp_id} / {src.fitting}  |  "
                f"Δp={_U.disp('dP', src.dp_total_psi, 4)} {_U.label('dP')}  "
                f"|  W_acoustic={W_ac:.3g} W  |  PWL={lw_src:.1f} dB"
                if src else "no stations")
-    ws.merge_cells("B2:M2")
-    _c(ws, 2, 2, src_txt, bg=GREEN, bold=True)
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=13)
+    _c(ws, r0, 2, src_txt, bg=GREEN, bold=True)
 
     headers = ["Seq", "Comp ID", "Fitting", "OD (mm)", "Wall (mm)",
                "Dist from src (m)", "Cum. atten (dB)", "Local PWL (dB)",
                "C-M param", "C-M screen", "EI likelihood", "EI risk",
                "Dyn. stress idx (MPa)"]
-    _hdr(ws, headers, row=3)
-    ws.freeze_panes = "C4"
+    _hdr(ws, headers, row=r0 + 1)
+    ws.freeze_panes = f"C{r0 + 2}"
 
     multi = bool(station_lines and line_colors and len(set(station_lines)) > 1)
-    r = 4
+    r = r0 + 2
     cum_att = 0.0
     started = False
     prev_cum_ft = None
@@ -1786,8 +2109,17 @@ class TPInputs:
     gvf: float          # gas volume fraction (input, no-slip)
 
 
-def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
-    """Build SI two-phase inputs for a station, or None if geometry missing."""
+def station_tp_inputs(station, sp, gas_density_fn, flash_result=None) -> "TPInputs | None":
+    """Build SI two-phase inputs for a station, or None if geometry missing.
+
+    ``flash_result``, when given, is this station's own locally-flashed
+    FlashResult (same object the pressure-march / Flash_Profile sheet uses) —
+    its vap_mass/liq_mass (re-equilibrated at THIS station's local pressure)
+    drive the phase split, exactly as ``_dp_flashed`` already does for the
+    Δp calc.  Without it (e.g. the no-flash legacy ``run()`` path) the static
+    feed-level ``sp.vap_mass``/``sp.liq_mass`` is used as before — correct
+    only when the phase split truly does not change along the line.
+    """
     d_in = station.id_in
     if not d_in:
         return None
@@ -1800,8 +2132,14 @@ def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
     mu_l = (sp.liq_visc or 0.5) * CP_TO_PAS
     sigma = (sp.liq_surf_tens or 20.0) * DYNCM_TO_NM
 
-    mg = (sp.vap_mass or 0.0) * LBHR_TO_KGS      # kg/s
-    ml = (sp.liq_mass or 0.0) * LBHR_TO_KGS
+    if flash_result is not None:
+        vap_mass = flash_result.vap_mass or 0.0
+        liq_mass = flash_result.liq_mass or 0.0
+    else:
+        vap_mass = sp.vap_mass or 0.0
+        liq_mass = sp.liq_mass or 0.0
+    mg = vap_mass * LBHR_TO_KGS      # kg/s
+    ml = liq_mass * LBHR_TO_KGS
     qg = mg / rho_g if rho_g > 0 else 0.0
     ql = ml / rho_l if rho_l > 0 else 0.0
     vsg = qg / area
@@ -2045,29 +2383,38 @@ def _regime_cell(ws, r, ci, regime):
     _c(ws, r, ci, regime, bg=_REGIME_BG.get(regime, WHITE), ha="center")
 
 
-def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
-    """Two-phase flow-regime map across all stations + slug summary."""
+def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
+                        flashes=None, meta=None):
+    """Two-phase flow-regime map across all stations + slug summary.
+
+    ``flashes``, when given, is the per-station list of FlashResult objects
+    from the rigorous pressure march (same list Flash_Profile/Pressure_Profile
+    use) — station i's local vap_mass/liq_mass drive its GVF, instead of the
+    static feed-level ``sp`` used for every station.  Without it, the sheet
+    falls back to the old feed-level behaviour (correct only when ``sp`` is
+    known not to vary along the line, e.g. the no-flash legacy path).
+    """
     ws = wb.create_sheet("Two_Phase_Regime")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
 
     title = (f"Two-Phase Flow Regime Map   |   Line {line_no} <-> Stream "
              f"{stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}")
-    _c(ws, 1, 1, title, fg=NAVY, sz=11, bold=True)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(_TPR_HEADERS))
+    r0 = _write_doc_header_block(ws, meta, len(_TPR_HEADERS), title=title)
 
-    _hdr(ws, _TPR_HEADERS, row=2)
-    _c(ws, 2, 4, _U.hdr("ID", "Lin"), bg=NAVY, fg=WHITE, sz=9, bold=True,
+    _hdr(ws, _TPR_HEADERS, row=r0)
+    _c(ws, r0, 4, _U.hdr("ID", "Lin"), bg=NAVY, fg=WHITE, sz=9, bold=True,
        ha="center", wrap=True)
     for ci, w in enumerate(_TPR_WIDTHS, 1):
         cw(ws, ci, w)
 
-    r = 3
+    r = r0 + 1
     regime_counts: dict[str, int] = {}
     max_force = (0.0, None)
     single_phase_label = None
-    for s in stations:
-        t = station_tp_inputs(s, sp, gas_density_fn)
+    for i, s in enumerate(stations):
+        fr = flashes[i] if flashes is not None and i < len(flashes) else None
+        t = station_tp_inputs(s, sp, gas_density_fn, fr)
         _c(ws, r, 1, s.seq, ha="center")
         _c(ws, r, 2, s.comp_id or "", ha="center")
         _c(ws, r, 3, s.fitting or "", ha="center")
@@ -2171,7 +2518,170 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(_TPR_HEADERS))
         r += 1
 
-    ws.freeze_panes = "D3"
+    ws.freeze_panes = f"D{r0 + 1}"
+    return ws
+
+
+def build_cover_sheet(wb, meta, circuit_id, stream_name, sheet_titles=None):
+    """Branded title/cover sheet (first in the workbook): T.EN logo, the
+    project identity block (Project / Area / P&ID / Unit / Case / Stream /
+    Date) and a contents legend, in the corporate theme palette."""
+    ws = wb.create_sheet("Cover")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = TEN_NAVY
+    ncol = 6
+    for col, w in {"A": 3, "B": 26, "C": 34, "D": 6, "E": 26, "F": 34}.items():
+        ws.column_dimensions[col].width = w
+
+    m = meta or {}
+    r = _write_doc_header_block(ws, m, ncol, title="HYDRAULIC & CONTROL-VALVE CALCULATION")
+    r += 1
+
+    from datetime import datetime as _dt
+    date_s = m.get("date") or _dt.now().strftime("%Y-%m-%d %H:%M")
+    fields = [
+        ("Area", m.get("area") or "—", "Case", m.get("case") or "—"),
+        ("Circuit", circuit_id or "—", "Stream", stream_name or "—"),
+        ("P&ID No", m.get("pid") or m.get("pandid") or "—", "Date", date_s),
+        ("Units", m.get("units") or "FPS", "", ""),
+    ]
+    for l1, v1, l2, v2 in fields:
+        _c(ws, r, 2, l1, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
+        _c(ws, r, 3, v1, sz=10)
+        if l2:
+            _c(ws, r, 5, l2, bg=TEN_LGRAY, fg=DGRAY, sz=10, bold=True)
+            _c(ws, r, 6, v2, sz=10)
+        r += 1
+
+    # contents legend
+    r += 1
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+    _c(ws, r, 2, "CONTENTS", bg=TEN_BLUE, fg=WHITE, sz=11, bold=True)
+    r += 1
+    _CONTENTS = {
+        "Cover": "This page", "Line_List": "Line list (per line summary)",
+        "Pressure_Profile": "Pressure/velocity/dP march per component",
+        "Flash_Profile": "Rigorous flash split per station",
+        "Line_List ": "", "Two_Phase_Regime": "Flow-regime screening",
+        "FIV_EI_T2.2": "Flow-induced vibration (EI T2.2)", "AIV": "Acoustic-induced vibration",
+    }
+    for title in (sheet_titles or []):
+        desc = _CONTENTS.get(title)
+        if title.startswith("CV_"):
+            desc = "Control-valve datasheet (IEC 60534)"
+        if desc is None:
+            continue
+        _c(ws, r, 2, title, sz=9, bold=True)
+        _c(ws, r, 3, desc, sz=9, border=False)
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=6)
+        r += 1
+
+    ws.sheet_view.zoomScale = 100
+    return ws
+
+
+_LINELIST_HEADERS = [
+    "Line No", "P&ID No", "From", "To", "Fluid / Stream", "Phase",
+    "NPS / Size", "Schedule", "Piping Spec", "Flange Class",
+    "Length", "Elev Δ", "Inlet P", "Outlet P", "Total ΔP",
+    "Max Velocity", "Components",
+]
+
+
+def build_line_list_sheet(wb, stations, station_lines, line_colors,
+                          circuit_id, stream_name, circuit_rows,
+                          meta=None, phase=None):
+    """One row per Line No in the circuit, aggregated from that line's
+    consecutive stations (station_lines is 1:1 with stations by index).
+
+    Reducers within a line are shown as an NPS/schedule range.  P&ID number
+    comes from the input rows' per-line 'PID Number'.  Values pass through the
+    active unit system for display."""
+    u = _u()
+    ws = wb.create_sheet("Line_List")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = STEEL
+    ncol = len(_LINELIST_HEADERS)
+
+    # per-line P&ID from the input rows
+    pid_by_line: dict[str, str] = {}
+    for r in (circuit_rows or []):
+        ln, pid = r.get("Line No"), r.get("PID Number")
+        if ln and pid and ln not in pid_by_line:
+            pid_by_line[ln] = str(pid)
+
+    proj = (meta or {}).get("project")
+    area = (meta or {}).get("area")
+    sheet_title = f"LINE LIST   |   Circuit {circuit_id}   |   Stream {stream_name}"
+    if proj:
+        sheet_title += f"   |   Project: {proj}"
+    if area:
+        sheet_title += f"   |   Area: {area}"
+    r0 = _write_doc_header_block(ws, meta, ncol, title=sheet_title)
+
+    # header row (bare captions) + a dedicated units row
+    col_qty = {"Length": "L", "Elev Δ": "L", "Inlet P": "P", "Outlet P": "P",
+               "Total ΔP": "dP", "Max Velocity": "v"}
+    for c, h in enumerate(_LINELIST_HEADERS, 1):
+        _c(ws, r0, c, h, bg=STEEL, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        qty = col_qty.get(h)
+        _c(ws, r0 + 1, c, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY, sz=8,
+           italic=True, ha="center")
+
+    # group station indices by Line No in first-appearance order
+    order, groups = [], {}
+    for i, ln in enumerate(station_lines or []):
+        key = ln if ln is not None else ""
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(i)
+
+    def _rng(vals):
+        vals = [v for v in vals if v not in (None, "")]
+        if not vals:
+            return "—"
+        uniq = list(dict.fromkeys(str(v) for v in vals))
+        return uniq[0] if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
+
+    r = r0 + 2
+    for ln in order:
+        grp = [stations[i] for i in groups[ln]]
+        if not grp:
+            continue
+        # pipe components (exclude zero-length boundary/valve rows for size stats)
+        pipes = [s for s in grp if (s.length_ft or 0) > 0] or grp
+        nps    = _rng([s.nps for s in pipes])
+        sched  = _rng([s.schedule for s in pipes])
+        spec   = _rng([s.spec for s in pipes])
+        flange = next((flange_class_for(s.spec) for s in pipes
+                       if s.spec and flange_class_for(s.spec)), None)
+        tot_len = sum((s.length_ft or 0) for s in grp)
+        tot_dz  = sum((s.dz_ft or 0) for s in grp)
+        p_in    = grp[0].p_in_psia
+        p_out   = grp[-1].p_out_psia
+        dp_tot  = (p_in - p_out) if (p_in is not None and p_out is not None) else None
+        vmax    = max((s.v_fts or 0) for s in grp)
+        fill = (line_colors or {}).get(ln)
+        vals = [
+            ln or "—", pid_by_line.get(ln, "—"),
+            grp[0].comp_id or "—", grp[-1].comp_id or "—",
+            stream_name, (phase or "").title() or "—",
+            nps, sched, spec, (flange or "—"),
+            u.disp("L", tot_len), u.disp("L", tot_dz),
+            u.disp("P", p_in), u.disp("P", p_out), u.disp("dP", dp_tot),
+            u.disp("v", vmax), len(grp),
+        ]
+        for c, v in enumerate(vals, 1):
+            _c(ws, r, c, v, bg=fill, sz=9,
+               ha="center" if c > 4 else "left")
+        r += 1
+
+    for c, w in enumerate([14, 14, 12, 12, 16, 10, 12, 11, 12, 11,
+                           10, 9, 10, 10, 10, 12, 11], 1):
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.freeze_panes = f"C{r0 + 2}"
+    ws.auto_filter.ref = f"A{r0}:{get_column_letter(ncol)}{r0}"
     return ws
 
 
@@ -2579,6 +3089,7 @@ INPUT_HEADERS: list[str] = [
     "Circuit",                # hydraulic circuit ID (e.g. C1).  All rows with the same
     #                           Circuit ID are chained in series into ONE workbook.
     "Line No",                # line identifier (e.g. ER-162)
+    "PID Number",             # P&ID drawing number for this line (per-line metadata)
     "HMB File",               # per-row HMB workbook override; blank → CLI default
     "Case",                   # per-row HMB case override; blank → CLI default
     "Stream Lookup",          # HMB stream key; blank → use manual property cells below
@@ -2617,10 +3128,21 @@ INPUT_HEADERS: list[str] = [
     # ── Boundaries / control valves ─────────────────────────────────────────
     "Set P (psia)",           # boundary pressure for Source / Destination rows
     "Control Valve Type",     # P | T | F | L  (Control Valve rows only)
-    "Exch Max Allow dP (psi)",  # T-control floor: max allowable dP across exchanger
+    "Exch Max Allow dP (psi)",  # T-control floor / P & T min-dP floor
+    # ── Control-valve sizing / datasheet (Control Valve rows) ────────────────
+    "Valve Body Style",       # Globe | Angle | Ball | Butterfly | Eccentric
+    "Valve Characteristic",   # Linear | Equal% | Quick-Open  (F & L)
+    "Design Opening %",       # target max-flow % travel for auto rated-Cv pick
+    "Inlet Line Size (in)",   # inlet pipe ID for reducer/β/FP (blank ⇒ upstream bore)
+    "Outlet Line Size (in)",  # outlet pipe ID for reducer/β/FP (blank ⇒ downstream bore)
+    "Rated Cv",               # existing valve rated Cv100 (blank ⇒ engine sizes)
+    "Min Flow Mult",          # turndown: Min-flow multiple of normal (default 0.35)
+    "Max Flow Mult",          # turndown: Max-flow multiple of normal (default 1.20)
+    "Noise Limit dBA",        # project noise limit (default 85)
+    "Seat Leakage Class",     # II | III | IV | V | VI (default IV)
     "Notes",                  # free notes
 ]
-_NCOL = len(INPUT_HEADERS)   # 37
+_NCOL = len(INPUT_HEADERS)   # 45
 
 # Manual stream-property columns (styled yellow in the template; used when no stream)
 _MANUAL_PROP_COLS = [
@@ -2634,6 +3156,7 @@ _MANUAL_PROP_COLS = [
 # Quantity None ⇒ value passes through unchanged (IDs, text, NPS inches, K, Z…).
 _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Circuit": ("Circuit", None), "Line No": ("Line No", None),
+    "PID Number": ("PID Number", None),
     "HMB File": ("HMB File", None), "Case": ("Case", None),
     "Stream Lookup": ("Stream Lookup", None), "Run Type": ("Run Type", None),
     "Seq": ("Seq", None),
@@ -2663,6 +3186,16 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Set P (psia)": ("Set P", "P"),
     "Control Valve Type": ("Control Valve Type", None),
     "Exch Max Allow dP (psi)": ("Exch Max Allow dP", "dP"),
+    "Valve Body Style": ("Valve Body Style", None),
+    "Valve Characteristic": ("Valve Characteristic", None),
+    "Design Opening %": ("Design Opening %", None),
+    "Inlet Line Size (in)": ("Inlet Line Size (in)", None),
+    "Outlet Line Size (in)": ("Outlet Line Size (in)", None),
+    "Rated Cv": ("Rated Cv", None),
+    "Min Flow Mult": ("Min Flow Mult", None),
+    "Max Flow Mult": ("Max Flow Mult", None),
+    "Noise Limit dBA": ("Noise Limit dBA", None),
+    "Seat Leakage Class": ("Seat Leakage Class", None),
     "Notes": ("Notes", None),
 }
 # display base name → canonical key (for unit-suffix-tolerant header matching)
@@ -2739,7 +3272,8 @@ def _parse_hmb_filename(path: str | None) -> dict:
 #  Input-template creator
 # ════════════════════════════════════════════════════════════════════════
 def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
-                          unit_system: str = "FPS") -> str:
+                          unit_system: str = "FPS",
+                          meta: dict | None = None) -> str:
     """Write a blank, styled input workbook with Circuit-aware column layout.
 
     ``unit_system`` ("FPS" | "SI") drives the column-header unit labels and is
@@ -2752,20 +3286,19 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     ws.title = "Pipeline_Input"
     ws.sheet_view.showGridLines = False
 
-    ws.merge_cells(f"A1:{get_column_letter(_NCOL)}1")
-    _c(ws, 1, 1,
-       "NO-ISO PIPELINE INPUT  —  Group rows into hydraulic circuits using column A (Circuit).  "
-       "All rows with the same Circuit ID are processed in series → one workbook per circuit.  "
-       f"Units: {usys.system} (see UNITS sheet).",
-       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
-    ws.row_dimensions[1].height = 28
+    r0 = _write_doc_header_block(
+        ws, meta, _NCOL,
+        title=("NO-ISO PIPELINE INPUT  —  Group rows into hydraulic circuits using "
+              "column A (Circuit).  All rows with the same Circuit ID are processed "
+              f"in series → one workbook per circuit.  Units: {usys.system} "
+              "(see UNITS sheet)."))
 
-    _hdr(ws, [_display_header(h, usys) for h in INPUT_HEADERS], row=2)
-    ws.freeze_panes = "A3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(_NCOL)}2"
+    _hdr(ws, [_display_header(h, usys) for h in INPUT_HEADERS], row=r0)
+    ws.freeze_panes = f"A{r0 + 1}"
+    ws.auto_filter.ref = f"A{r0}:{get_column_letter(_NCOL)}{r0}"
 
     width_map = {
-        "Circuit": 9, "Line No": 12, "HMB File": 16, "Case": 10,
+        "Circuit": 9, "Line No": 12, "PID Number": 14, "HMB File": 16, "Case": 10,
         "Stream Lookup": 14, "Run Type": 10, "Seq": 6, "Start P (psia)": 12,
         "Upstream Line No": 14, "Upstream Seq": 11,
         "Flow Fraction from Main": 14, "Temp (degF)": 11, "Vapor Mass Flow": 14,
@@ -2776,7 +3309,12 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         "Elev Change (ft)": 13, "Direction": 10, "Fixed K": 9,
         "Fixed dP (psi)": 12, "Instr Type": 10, "Instr Tag": 12,
         "Instr dP (psi)": 12, "Set P (psia)": 12, "Control Valve Type": 14,
-        "Exch Max Allow dP (psi)": 16, "Notes": 30,
+        "Exch Max Allow dP (psi)": 16,
+        "Valve Body Style": 15, "Valve Characteristic": 16,
+        "Design Opening %": 13, "Inlet Line Size (in)": 15,
+        "Outlet Line Size (in)": 16, "Rated Cv": 10, "Min Flow Mult": 12,
+        "Max Flow Mult": 12, "Noise Limit dBA": 13, "Seat Leakage Class": 15,
+        "Notes": 30,
     }
     for ci, name in enumerate(INPUT_HEADERS, 1):
         cw(ws, ci, width_map.get(name, 12))
@@ -2785,7 +3323,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     rt_col = _hcol_letter("Run Type")
     dv_rt = DataValidation(type="list", formula1='"Main,Branch"', allow_blank=True)
     ws.add_data_validation(dv_rt)
-    dv_rt.add(f"{rt_col}3:{rt_col}2000")
+    dv_rt.add(f"{rt_col}{r0 + 1}:{rt_col}2000")
 
     # ── Drop-down: Control Valve Type (P/T/F/L) ───────────────────────
     cvt_col = _hcol_letter("Control Valve Type")
@@ -2795,7 +3333,22 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         error="F=flow, P=pressure, T=temperature, L=level control",
         errorTitle="Control Valve Type")
     ws.add_data_validation(dv_cvt)
-    dv_cvt.add(f"{cvt_col}3:{cvt_col}2000")
+    dv_cvt.add(f"{cvt_col}{r0 + 1}:{cvt_col}2000")
+
+    # ── Drop-downs: control-valve datasheet columns ───────────────────
+    for hdr, opts, err in [
+        ("Valve Body Style", "Globe,Angle,Ball,Butterfly,Eccentric",
+         "Valve body style"),
+        ("Valve Characteristic", "Linear,Equal%,Quick-Open",
+         "Inherent trim characteristic (F & L valves)"),
+        ("Seat Leakage Class", "II,III,IV,V,VI",
+         "FCI 70-2 / IEC 60534-4 seat leakage class"),
+    ]:
+        col = _hcol_letter(hdr)
+        dv = DataValidation(type="list", formula1=f'"{opts}"', allow_blank=True,
+                            showErrorMessage=True, error=err, errorTitle=hdr)
+        ws.add_data_validation(dv)
+        dv.add(f"{col}{r0 + 1}:{col}2000")
 
     # ── Drop-down: Fitting Name — hidden list sheet ───────────────────
     ws_fit = wb.create_sheet("_FittingList")
@@ -2813,7 +3366,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         errorTitle="Invalid Fitting",
     )
     ws.add_data_validation(dv_fit)
-    dv_fit.add(f"{fit_col}3:{fit_col}2000")
+    dv_fit.add(f"{fit_col}{r0 + 1}:{fit_col}2000")
 
     # ── Example rows (keyed by header so column order is robust) ───────
     _ex_dicts = [
@@ -2833,16 +3386,16 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         # ── Circuit C3 — Source → line → Control Valve (flow control) → Destination ──
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-01","Fitting Name":"Source","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":150.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Upstream source pressure"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":2,"Comp ID":"P-301","Fitting Name":"Straight Pipeline","Bore (in)":6,"Piping Spec":"G1A-5","Length (ft)":40,"Elev Change (ft)":0,"Notes":"Run to valve"},
-        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Length (ft)":0,"Elev Change (ft)":0,"Notes":"Flow control — ΔP floats to Destination P"},
+        {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":3,"Comp ID":"FCV-301","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Valve Body Style":"Globe","Valve Characteristic":"Equal%","Design Opening %":80,"Inlet Line Size (in)":6,"Outlet Line Size (in)":6,"Min Flow Mult":0.35,"Max Flow Mult":1.2,"Noise Limit dBA":85,"Seat Leakage Class":"IV","Length (ft)":0,"Elev Change (ft)":0,"Notes":"4in valve on 6in line; datasheet auto-sizes Rated Cv (leave Rated Cv blank)"},
         {"Circuit":"C3","Line No":"L-301","Run Type":"Main","Seq":4,"Comp ID":"DST-01","Fitting Name":"Destination","Bore (in)":6,"Piping Spec":"G1A-5","Set P (psia)":60.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Downstream destination pressure"},
         # ── Circuit C4 — two parallel control valves (Tee split, ratio control) ──
         {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":1,"Stream Lookup":"T801-OH","Comp ID":"SRC-02","Fitting Name":"Source","Bore (in)":8,"Piping Spec":"G1A-5","Set P (psia)":200.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Header source"},
         {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":2,"Comp ID":"TEE-40","Fitting Name":"Tee Split Branch Flow 1","Bore (in)":8,"Piping Spec":"G1A-5","Flow Fraction from Main":-0.5,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"50% splits to parallel branch"},
-        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":3,"Comp ID":"FCV-40A","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Main-leg valve (50% flow)"},
+        {"Circuit":"C4","Line No":"L-401","Run Type":"Main","Seq":3,"Comp ID":"FCV-40A","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Valve Body Style":"Globe","Valve Characteristic":"Equal%","Rated Cv":50,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Existing valve — Rated Cv 50 given → adequacy check"},
         {"Circuit":"C4","Line No":"L-401","Run Type":"Branch","Seq":1,"Start P (psia)":200.0,"Comp ID":"FCV-40B","Fitting Name":"Control Valve","Bore (in)":4,"Piping Spec":"G1A-5","Control Valve Type":"F","Fixed dP (psi)":25.0,"Length (ft)":0,"Elev Change (ft)":0,"Notes":"Parallel-leg valve (other 50% flow)"},
     ]
     manual_idx = {_hcol(n) for n in _MANUAL_PROP_COLS}
-    for ri, d in enumerate(_ex_dicts, 3):
+    for ri, d in enumerate(_ex_dicts, r0 + 1):
         for ci, name in enumerate(INPUT_HEADERS, 1):
             v = d.get(name, "")
             qty = _FIELD_META.get(name, (name, None))[1]
@@ -2915,10 +3468,30 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  F (flow): ΔP floats so the running pressure lands on the downstream Destination 'Set P'.", False),
         ("  P / L: fixed design ΔP — enter it in 'Fixed dP (psi)' (or a resistance in 'Fixed K').", False),
         ("  T (temperature): like a fixed ΔP, but floored at 'Exch Max Allow dP (psi)' (exchanger limit).", False),
+        ("  P & T both honour 'Exch Max Allow dP (psi)' as a MINIMUM ΔP floor across the valve.", False),
         ("  β ratio = valve Bore (in) ÷ upstream line bore is reported in the Notes column.", False),
         ("  SERIES valves: place several Control Valve rows in Seq order on the same run.", False),
         ("  PARALLEL valves: split flow at a Tee (negative 'Flow Fraction from Main'), put one Control", False),
         ("    Valve on the Main leg and one on a Branch (Run Type = Branch, with its own Start P).", False),
+        ("", False),
+        ("CONTROL VALVE DATASHEET  (one sheet per Control Valve, IEC 60534)", True),
+        ("  Each Control Valve row produces a 'CV_<tag>' datasheet: Min/Norm/Max sizing, cavitation,", False),
+        ("  seat leakage, β ratio and IEC 60534-8-3/-8-4 dB(A) noise vs the limit.", False),
+        ("  Valve Body Style : Globe / Angle / Ball / Butterfly / Eccentric (sets typical FL/xT/Fd).", False),
+        ("  Valve Characteristic : Linear / Equal% / Quick-Open (F & L valves) — drives % travel.", False),
+        ("  Rated Cv : enter the EXISTING valve's Cv100 → ADEQUACY CHECK mode (verifies that valve).", False),
+        ("             Leave BLANK → SIZING/SELECTION mode (engine picks a generic Rated Cv so the", False),
+        ("             required Cv, travel window and dB(A) limit are met where physically possible).", False),
+        ("  Design Opening % : target max-flow % travel used when the engine auto-selects Rated Cv.", False),
+        ("  Valve size = the row's Bore (in) (valve port / seat).  Inlet/Outlet Line Size (in) set the", False),
+        ("   reducer sizes for β and the IEC piping-geometry factor FP; blank ⇒ the real upstream and", False),
+        ("   downstream pipe bores from the march (e.g. a 4-in valve on an 8-in inlet / 10-in outlet).", False),
+        ("  Min/Max Flow Mult : inlet-flow multiples for the full Min/Max hydraulic re-marches", False),
+        ("   (defaults 0.35 / 1.20); the flow reaching the valve follows upstream Tee splits.", False),
+        ("  Noise Limit dBA : project sound limit (default 85).  Exceedance is flagged + mitigations", False),
+        ("             recommended (Rated-Cv choice cannot change service ΔP/noise — use low-noise /", False),
+        ("             multistage trim, a larger body, or split the ΔP across two valves).", False),
+        ("  Seat Leakage Class : II/III/IV/V/VI (FCI 70-2 / IEC 60534-4); default IV.", False),
         ("", False),
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
@@ -2955,6 +3528,46 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
                                      color=NAVY if bold else DGRAY)
 
     UN.add_units_sheet(wb, usys.system, position=len(wb.worksheets))
+    wb.save(out_path)
+    return out_path
+
+
+def write_input_workbook(rows: list[dict], out_path: str,
+                         unit_system: str = "FPS",
+                         unit_overrides: dict | None = None) -> str:
+    """Write a minimal Pipeline_Input workbook the engine can read back.
+
+    The GUI grid holds one row-dict per component keyed by the canonical
+    INPUT_HEADERS (values in internal FPS).  This writes the banner (row 1),
+    the display headers (row 2, via _display_header so read_pipeline_input's
+    unit-tolerant matching resolves them) and one data row each (row 3+),
+    converting quantity columns to the chosen display units, then appends the
+    UNITS sheet.  read_pipeline_input round-trips it back to internal FPS.
+
+    Kept deliberately lean (no drop-downs / styling — the engine reads values,
+    not formatting) so the autocalc temp-file write is fast."""
+    from openpyxl import Workbook
+    usys = UN.UnitSystem(unit_system, unit_overrides or None)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pipeline_Input"
+    ncol = len(INPUT_HEADERS)
+    ws.append([""] * ncol)                                   # row 1 banner
+    ws.cell(1, 1, "NO-ISO PIPELINE INPUT (generated by the app)")
+    ws.append([_display_header(h, usys) for h in INPUT_HEADERS])   # row 2
+
+    for r in rows:
+        out = []
+        for h in INPUT_HEADERS:
+            v = r.get(h)
+            qty = _FIELD_META.get(h, (h, None))[1]
+            if qty and isinstance(v, (int, float)):
+                v = usys.from_internal(qty, v)
+            out.append(v)
+        ws.append(out)
+
+    UN.add_units_sheet(wb, usys.system, position=len(wb.worksheets),
+                       overrides=unit_overrides or None)
     wb.save(out_path)
     return out_path
 
@@ -3009,6 +3622,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
     current_hmb:     str | None = None   # HMB File carried within circuit
     current_case:    str | None = None   # Case carried within circuit
     current_main_line: str | None = None # most recent Main Line No (default Upstream Line No)
+    line_pid: dict[str, str] = {}        # PID Number carried forward within a Line No
 
     for rv in ws.iter_rows(min_row=3, values_only=True):
         if not rv or all(v is None for v in rv):
@@ -3068,9 +3682,23 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
         if run_type == "Main":
             current_main_line = line_no
 
+        pid_raw = txt(g(rv, "PID Number"))
+        if pid_raw and line_no:
+            line_pid[line_no] = pid_raw
+
+        length_ft = gnum(rv, "Length (ft)") or 0.0
+        dz_ft = gnum(rv, "Elev Change (ft)") or 0.0
+        if abs(dz_ft) > length_ft:
+            raise SystemExit(
+                f"Elev Change ({dz_ft:g} ft) exceeds Length ({length_ft:g} ft) "
+                f"on Circuit {circuit} / Line {line_no} / Seq {seq}"
+                f"{' / ' + txt(g(rv, 'Comp ID')) if txt(g(rv, 'Comp ID')) else ''} "
+                "— a pipe segment cannot rise or fall more than its own length.")
+
         rows.append({
             "Circuit":          circuit,
             "Line No":          line_no,
+            "PID Number":       pid_raw or line_pid.get(line_no or ""),
             "HMB File":         current_hmb,
             "Case":             current_case,
             "Stream Lookup":    current_stream,
@@ -3105,8 +3733,8 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Fitting Name":     txt(g(rv, "Fitting Name")),
             "Bore (in)":        num(g(rv, "Bore (in)")),
             "Piping Spec":      txt(g(rv, "Piping Spec")),
-            "Length (ft)":      gnum(rv, "Length (ft)") or 0.0,
-            "Elev Change (ft)": gnum(rv, "Elev Change (ft)") or 0.0,
+            "Length (ft)":      length_ft,
+            "Elev Change (ft)": dz_ft,
             "Direction":        txt(g(rv, "Direction")),
             "Fixed K":          num(g(rv, "Fixed K")),
             "Fixed dP (psi)":   gnum(rv, "Fixed dP (psi)"),
@@ -3117,6 +3745,17 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Set P (psia)":     gnum(rv, "Set P (psia)"),
             "Control Valve Type": txt(g(rv, "Control Valve Type")),
             "Exch Max Allow dP (psi)": gnum(rv, "Exch Max Allow dP (psi)"),
+            # ── Control-valve sizing / datasheet ────────────────────────
+            "Valve Body Style":     txt(g(rv, "Valve Body Style")),
+            "Valve Characteristic": txt(g(rv, "Valve Characteristic")),
+            "Design Opening %":     num(g(rv, "Design Opening %")),
+            "Inlet Line Size (in)":  num(g(rv, "Inlet Line Size (in)")),
+            "Outlet Line Size (in)": num(g(rv, "Outlet Line Size (in)")),
+            "Rated Cv":             num(g(rv, "Rated Cv")),
+            "Min Flow Mult":        num(g(rv, "Min Flow Mult")),
+            "Max Flow Mult":        num(g(rv, "Max Flow Mult")),
+            "Noise Limit dBA":      num(g(rv, "Noise Limit dBA")),
+            "Seat Leakage Class":   txt(g(rv, "Seat Leakage Class")),
             "Notes":            txt(g(rv, "Notes")),
         })
     wb.close()
@@ -3859,6 +4498,7 @@ def build_profile_flash_noiso(
 
         phase_str = (_phase_of(fr.quality) if fr else (sp.phase if sp else ""))
         flash_tag = (f" (flash β={fr.beta:.3f})" if fr else "") + scale_tag
+        cv_raw = None                      # set only on Control Valve rows
 
         # ── Dispatch by special fitting type ────────────────────────────
         if _is_fix_pressure(fitting):
@@ -3927,11 +4567,12 @@ def build_profile_flash_noiso(
             else:
                 base_dp = 0.0
                 src_tag = "no ΔP basis (set Control Valve Type / Fixed dP / Fixed K)"
-            # Temperature control: ΔP floored at the exchanger max-allowable ΔP.
+            # P & T control: ΔP floored at the min-allowable ΔP in col AJ
+            # (exchanger max-allowable for T; specified min drop for P).
             floor_tag = ""
-            if ctype == "T" and exch_dp is not None and exch_dp > base_dp:
-                floor_tag = (f"; T-control floor → exchanger max-allow "
-                             f"ΔP {exch_dp:.3f} psi")
+            if ctype in ("P", "T") and exch_dp is not None and exch_dp > base_dp:
+                lbl = "exchanger max-allow" if ctype == "T" else "min-allow"
+                floor_tag = f"; {ctype}-control floor → {lbl} ΔP {exch_dp:.3f} psi"
                 base_dp = exch_dp
             # β ratio = valve port bore / upstream line bore
             v_bore = num(row.get("Bore (in)"))
@@ -3943,6 +4584,55 @@ def build_profile_flash_noiso(
             res   = dict(rho=0.0, v=0.0, Re=0.0, f=0.0, dp_f=0.0, dp_k=0.0, dp_z=0.0)
             note  = (f"Control Valve [{ctype}]: −{dp_t:.3f} psi "
                      f"({src_tag}{floor_tag}{beta_tag}){flash_tag}")
+            # capture everything the CV datasheet needs (sized later, outside
+            # the march, from the authoritative post-choke station pressures)
+            _cv_sp, _cv_fr = a_sp, fr
+            # downstream line bore = the next row that carries a pipe bore (the
+            # outlet reducer size); falls back to the inlet line bore.
+            _dn_bore = None
+            for _nr in block_rows[ridx + 1:]:
+                if _is_control_valve(_nr.get("Fitting Name")):
+                    continue
+                _b = num(_nr.get("Bore (in)"))
+                if _b:
+                    _dn_bore = _b
+                    break
+            cv_raw = {
+                "row": dict(row), "ctype": ctype, "dest_p": dest_p,
+                "dn_bore_in": _dn_bore,
+                "p_src": p_start, "line_bore_in": line_bore_before,
+                "bore_in": v_bore, "exch_dp": exch_dp, "fixed_dp": fixed_dp,
+                "feed": a_feed,
+                "temp_f": getattr(_cv_sp, "temp_f", None),
+                "phase": getattr(_cv_sp, "phase", None),
+                "pc_psia": getattr(_cv_sp, "pc_psia", None),
+                "mol_weight": getattr(_cv_sp, "mol_weight", None),
+                "vap_mw": getattr(_cv_fr, "vap_mw", None) if _cv_fr else None,
+                "liq_density": getattr(_cv_sp, "liq_density", None),
+                "vap_density": getattr(_cv_sp, "vap_density", None),
+                "liq_visc": getattr(_cv_sp, "liq_visc", None),
+                "vap_visc": getattr(_cv_sp, "vap_visc", None),
+                "vap_z": getattr(_cv_sp, "vap_z", None),
+                "gamma": (getattr(_cv_sp, "vap_cp_cv", None)
+                          or (_cv_sp.gamma_estimate() if _cv_sp else None)),
+                "quality": getattr(_cv_fr, "quality", None) if _cv_fr else None,
+                "vap_mass": (getattr(_cv_fr, "vap_mass", None) if _cv_fr
+                             else getattr(_cv_sp, "vap_mass", None)),
+                "liq_mass": (getattr(_cv_fr, "liq_mass", None) if _cv_fr
+                             else getattr(_cv_sp, "liq_mass", None)),
+                # extended property / composition capture (datasheet fluid block)
+                "liq_mw": getattr(_cv_fr, "liq_mw", None) if _cv_fr else None,
+                "tc_f": getattr(_cv_sp, "tc_f", None),
+                "total_density": getattr(_cv_sp, "total_density", None),
+                "comb_visc": (_cv_sp.total_viscosity_cp() if _cv_sp else None),
+                "vap_cp": getattr(_cv_sp, "vap_cp", None),
+                # composition for H2/H2S ppm & partial-pressure reporting
+                "comp_names": list(getattr(a_feed, "names", []) or []),
+                "comp_z": list(getattr(a_feed, "z", []) or []),
+                "comp_mw": list(getattr(a_feed, "mw", []) or []),
+                "comp_y": list(getattr(_cv_fr, "y", []) or []) if _cv_fr else [],
+                "comp_x": list(getattr(_cv_fr, "x", []) or []) if _cv_fr else [],
+            }
 
         else:
             # Standard Darcy-Weisbach  (includes Fix K)
@@ -4002,6 +4692,7 @@ def build_profile_flash_noiso(
             dp_elev_psi  = round(dp_z, 5),
             dp_total_psi = round(dp_t, 5),
             note         = note,
+            cv_raw       = cv_raw,
         ))
         flashes.append(fr)
         comps.append(comp_vec)
@@ -4097,19 +4788,30 @@ def build_profile_solved(
 # ════════════════════════════════════════════════════════════════════════
 #  Pressure_Profile sheet  (no-ISO version — same layout as flash engine)
 # ════════════════════════════════════════════════════════════════════════
-def _pp_headers(u: "UN.UnitSystem") -> list[str]:
+def _pp_headers(u: "UN.UnitSystem" = None) -> list[str]:
+    # bare captions; units go in their own row via _pp_units()
     return [
-        "Seq", "Comp ID", "Fitting", "NPS", "Sched", u.hdr("ID", "Lin"),
-        u.hdr("Length", "L"), u.hdr("Cum Length", "L"), u.hdr("Elev Δ", "L"),
-        "Phase (flash)", u.hdr("Velocity", "v"), "Reynolds", "Friction f",
-        u.hdr("Mix Density", "rho"), u.hdr("dP Fric", "dP"),
-        u.hdr("dP Fitting", "dP"), u.hdr("dP Elev", "dP"),
-        u.hdr("dP Total", "dP"), u.hdr("P In", "P"), u.hdr("P Out", "P"),
-        "β (molar vap)", "Quality (mass)", u.hdr("Vap Mass Flow", "mflow"),
-        u.hdr("Liq Mass Flow", "mflow"), "MW Vapor", "MW Liquid",
-        u.hdr("Vap Density", "rho"), u.hdr("Liq Density", "rho"),
-        "GVF (local, vol)", "Note",
+        "Seq", "Comp ID", "Fitting", "NPS", "Sched", "ID",
+        "Length", "Cum Length", "Elev Δ",
+        "Phase (flash)", "Velocity", "Reynolds", "Friction f",
+        "Mix Density", "dP Fric", "dP Fitting", "dP Elev", "dP Total",
+        "P In", "P Out",
+        "β (molar vap)", "Quality (mass)", "Vap Mass Flow",
+        "Liq Mass Flow", "MW Vapor", "MW Liquid",
+        "Vap Density", "Liq Density", "GVF (local, vol)", "Note",
     ]
+
+
+# quantity code per Pressure_Profile column (None = unitless), for the units row
+_PP_QTY = [
+    None, None, None, None, None, "Lin", "L", "L", "L", None, "v", None, None,
+    "rho", "dP", "dP", "dP", "dP", "P", "P", None, None, "mflow", "mflow",
+    None, None, "rho", "rho", None, None,
+]
+
+
+def _pp_units(u: "UN.UnitSystem") -> list[str]:
+    return [u.label(q) if q else "" for q in _PP_QTY]
 
 
 _PP_NCOL = 30
@@ -4126,6 +4828,7 @@ def _build_pressure_profile_sheet(
         flash_mode: str = "isothermal",
         station_lines: list[str] | None = None,   # parallel list: line_no per station
         line_colors: dict[str, str] | None = None, # line_no -> palette color
+        meta: dict | None = None,
 ) -> str:
     """Create a Pressure_Profile sheet.
 
@@ -4144,23 +4847,24 @@ def _build_pressure_profile_sheet(
 
     u = _u()
     ncol = _PP_NCOL
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
-       f"FLASH-COUPLED PRESSURE PROFILE  [{run_label}]   |   "
-       f"Circuit {circuit_id}  ·  Lines: {line_nos_str}   |   "
-       f"Stream: {stream_name}   |   {flash_mode}   |   units: {u.system}   |   "
-       f"{datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=10, bold=True)
-    ws.row_dimensions[1].height = 22
+    sheet_title_text = (
+        f"FLASH-COUPLED PRESSURE PROFILE  [{run_label}]   |   "
+        f"Circuit {circuit_id}  ·  Lines: {line_nos_str}   |   "
+        f"Stream: {stream_name}   |   {flash_mode}   |   units: {u.system}   |   "
+        f"{datetime.now():%d-%b-%Y %H:%M}")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=sheet_title_text)
 
-    _hdr(ws, _pp_headers(u), row=2)
+    _hdr(ws, _pp_headers(u), row=r0)
     for ci in range(21, ncol + 1):
-        ws.cell(2, ci).fill = PatternFill("solid", fgColor=GRNHDR)
-    ws.freeze_panes = "C3"
-    ws.auto_filter.ref = f"A2:{get_column_letter(ncol)}2"
+        ws.cell(r0, ci).fill = PatternFill("solid", fgColor=GRNHDR)
+    # dedicated units row — units split out of the header captions
+    for ci, ulab in enumerate(_pp_units(u), 1):
+        _c(ws, r0 + 1, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
+    ws.freeze_panes = f"C{r0 + 2}"
+    ws.auto_filter.ref = f"A{r0}:{get_column_letter(ncol)}{r0}"
 
     rho_l_lbft3  = sp.liq_density
-    data_row      = 3          # current Excel row for writing
+    data_row      = r0 + 2     # current Excel row for writing (units row precedes)
     prev_line     = None
     chart_data_rows: list[tuple[int, float, float]] = []   # (excel_row, cum_ft, p_out)
 
@@ -4242,13 +4946,20 @@ def _build_pressure_profile_sheet(
         chart.x_axis.title = f"Cumulative Length ({u.label('L')})"
         chart.y_axis.title = f"Pressure ({u.label('P')})"
         chart.height, chart.width = 9, 24
-        # Build the chart from column 20 (P Out) across only data rows
+        # Build the chart from column 20 (P Out) across only data rows.
+        # (Row 3 is now the units row, so reference data rows directly and name
+        #  the series explicitly instead of titles_from_data.)
         first_dr = chart_data_rows[0][0]
         last_dr  = chart_data_rows[-1][0]
-        data  = Reference(ws, min_col=20, min_row=first_dr - 1, max_row=last_dr)
-        cats  = Reference(ws, min_col=8,  min_row=first_dr,     max_row=last_dr)
-        chart.add_data(data, titles_from_data=True)
+        data  = Reference(ws, min_col=20, min_row=first_dr, max_row=last_dr)
+        cats  = Reference(ws, min_col=8,  min_row=first_dr, max_row=last_dr)
+        chart.add_data(data, titles_from_data=False)
         chart.set_categories(cats)
+        try:
+            from openpyxl.chart.series import SeriesLabel
+            chart.series[0].tx = SeriesLabel(v=f"P Out ({u.label('P')})")
+        except Exception:
+            pass
         ws.add_chart(chart, f"A{sr + 2}")
 
     return sheet_title
@@ -4264,18 +4975,19 @@ def _build_flash_detail_sheet(
         feed,
         sp: HE.StreamProps,
         run_label: str = "Main",
+        meta: dict | None = None,
 ) -> str:
     sheet_title = f"Flash_Profile_{run_label}" if run_label != "Main" else "Flash_Profile"
     ws = wb.create_sheet(sheet_title)
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
-    ws.merge_cells("A1:L1")
-    _c(ws, 1, 1, f"RIGOROUS FLASH PROFILE [{run_label}]  —  isothermal VLE vs pressure",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    ncol = 11
+    r0 = _write_doc_header_block(
+        ws, meta, ncol,
+        title=f"RIGOROUS FLASH PROFILE [{run_label}]  —  isothermal VLE vs pressure")
 
     if feed is None:
-        _c(ws, 3, 1, "No composition available — flash disabled.", sz=9, fg=ORANGE)
+        _c(ws, r0 + 1, 1, "No composition available — flash disabled.", sz=9, fg=ORANGE)
         return sheet_title
 
     u = _u()
@@ -4291,21 +5003,25 @@ def _build_flash_detail_sheet(
          u.disp("T", sp.temp_f, 2), f"{u.label('T')} (isothermal)"),
         ("Reference molar vap frac β₀", round(feed.beta_ref, 4),    "anchored to HMB"),
     ]
-    r = 3
+    r = r0
     for k, v, unit_note in info:
         _c(ws, r, 1, k, bg=LGRAY, sz=9, bold=True)
         _c(ws, r, 2, v, sz=9, ha="right")
-        _c(ws, r, 3, unit_note, sz=9, fg="808080")
+        _c(ws, r, 3, unit_note, sz=8, fg="808080", italic=True, ha="left")
         r += 1
     r += 1
 
-    hdr = ["Seq", "Comp ID", u.hdr("P In", "P"), "β (molar)", "Quality (mass)",
-           u.hdr("Vap Moles", "molflow"), u.hdr("Liq Moles", "molflow"),
-           u.hdr("Vap Mass", "mflow"), u.hdr("Liq Mass", "mflow"),
+    _PF_QTY = [None, None, "P", None, None, "molflow", "molflow",
+               "mflow", "mflow", None, None]
+    hdr = ["Seq", "Comp ID", "P In", "β (molar)", "Quality (mass)",
+           "Vap Moles", "Liq Moles", "Vap Mass", "Liq Mass",
            "MW Vapor", "MW Liquid"]
     _hdr(ws, hdr, row=r)
-    head = r
-    ws.freeze_panes = f"A{r + 1}"
+    for ci, qty in enumerate(_PF_QTY, 1):
+        _c(ws, r + 1, ci, (u.label(qty) if qty else ""), bg=LGRAY, fg=DGRAY,
+           sz=8, italic=True, ha="center")
+    head = r + 1
+    ws.freeze_panes = f"A{r + 2}"
     for i, (s, fr) in enumerate(zip(stations, flashes)):
         rr = head + 1 + i
         bg = LGRAY if i % 2 else WHITE
@@ -4338,9 +5054,11 @@ def _build_stream_props_detail_sheet(
         circuit_id: str,
         stream_name: str,
         run_label: str = "Main",
+        meta=None,
 ) -> str:
-    """One Property/Total/Vapor/Liquid block per fitting, plus a per-fitting
-    component vapor/liquid mole-fraction table.
+    """One Property/Total/Vapor/Liquid block per fitting.  (The per-fitting
+    component vapor/liquid mole-fraction table now lives in its own
+    "Composition Phase Splits" sheet.)
 
     Only properties that the engine actually re-evaluates at each fitting's
     (T, P) are shown (flow rates, density, viscosity, Z, mole/mass
@@ -4354,16 +5072,13 @@ def _build_stream_props_detail_sheet(
     ws = wb.create_sheet(sheet_title)
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = GRNHDR
-    ncol = 4
-    ws.merge_cells(f"A1:{get_column_letter(ncol)}1")
-    _c(ws, 1, 1,
-       f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
-       f"Stream: {stream_name}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 20
+    ncol = 5
+    title = (f"STREAM PROPERTIES BY FITTING  [{run_label}]   |   Circuit {circuit_id}   |   "
+             f"Stream: {stream_name}")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
 
     u = _u()
-    r = 3
+    r = r0 + 1
     for s, fr, fracs in zip(stations, flashes, comp_fracs):
         if fr is None:
             continue
@@ -4382,11 +5097,11 @@ def _build_stream_props_detail_sheet(
            f"({u.disp('P', s.p_in_psia)} {u.label('P')})",
            bg=STEEL, fg=WHITE, sz=10, bold=True)
         r += 1
-        _hdr(ws, ["Property", "Total", "Vapor", "Liquid"], row=r)
+        _hdr(ws, ["Property", "Unit", "Total", "Vapor", "Liquid"], row=r)
         head = r
         r += 1
 
-        def row(label, tot, vap, liq, bold=False, section=False):
+        def row(label, tot, vap, liq, bold=False, section=False, unit=""):
             nonlocal r
             if section:
                 ws.merge_cells(f"A{r}:{get_column_letter(ncol)}{r}")
@@ -4395,65 +5110,135 @@ def _build_stream_props_detail_sheet(
                 return
             bg = LGRAY if (r - head) % 2 else WHITE
             _c(ws, r, 1, label, bg=bg, sz=9, bold=bold)
-            for ci, v in ((2, tot), (3, vap), (4, liq)):
+            _c(ws, r, 2, unit or "", bg=bg, fg=DGRAY, sz=8, ha="center")
+            for ci, v in ((3, tot), (4, vap), (5, liq)):
                 _c(ws, r, ci, "" if v is None else v, bg=bg, sz=9,
                    ha="right" if isinstance(v, (int, float)) else "left", bold=bold)
             r += 1
 
         row("FLOW RATES", None, None, None, section=True)
-        row(f"Molar Rate ({u.label('molflow')})",
-            u.disp("molflow", tot_moles, 3) if tot_moles else 0,
-            u.disp("molflow", fr.vap_moles, 3), u.disp("molflow", fr.liq_moles, 3))
-        row(f"Mass Rate ({u.label('mflow')})",
+        row("Molar Rate", u.disp("molflow", tot_moles, 3) if tot_moles else 0,
+            u.disp("molflow", fr.vap_moles, 3), u.disp("molflow", fr.liq_moles, 3),
+            unit=u.label("molflow"))
+        row("Mass Rate",
             u.disp("mflow", tot_mass, 1), u.disp("mflow", fr.vap_mass, 1),
-            u.disp("mflow", fr.liq_mass, 1))
-        row("Actual Vol Rate (ft3/hr)",
+            u.disp("mflow", fr.liq_mass, 1), unit=u.label("mflow"))
+        row("Actual Vol Rate",
             round((q_vap or 0) + (q_liq or 0), 1),
             round(q_vap, 1) if q_vap is not None else None,
-            round(q_liq, 1) if q_liq is not None else None)
+            round(q_liq, 1) if q_liq is not None else None, unit="ft3/hr")
 
         row("CONDITIONS", None, None, None, section=True)
-        row(f"Temperature ({u.label('T')})", u.disp("T", sp.temp_f, 2), None, None)
-        row(f"Pressure ({u.label('P')})", u.disp("P", s.p_in_psia), None, None)
+        row("Temperature", u.disp("T", sp.temp_f, 2), None, None, unit=u.label("T"))
+        row("Pressure", u.disp("P", s.p_in_psia), None, None, unit=u.label("P"))
         row("Molecular Weight",
             round(tot_mw, 4) if tot_mw else None,
-            round(fr.vap_mw, 4), round(fr.liq_mw, 4))
-        row("Vapor Mole Fraction", round(fr.beta, 4), None, None)
-        row("Liquid Mole Fraction", round(1.0 - fr.beta, 4), None, None)
-        row("Liquid Mass Fraction (quality)", round(1.0 - fr.quality, 4), None, None)
+            round(fr.vap_mw, 4), round(fr.liq_mw, 4), unit="g/mol")
+        row("Vapor Mole Fraction", round(fr.beta, 4), None, None, unit="-")
+        row("Liquid Mole Fraction", round(1.0 - fr.beta, 4), None, None, unit="-")
+        row("Liquid Mass Fraction (quality)", round(1.0 - fr.quality, 4),
+            None, None, unit="-")
 
         row("VAPOR PHASE PROPERTIES", None, None, None, section=True)
-        row(f"Density ({u.label('rho')})", None,
-            u.disp("rho", vap_rho, 6) if vap_rho else None, None)
-        row("Viscosity (cP)", None, sp.vap_visc, None)
-        row("Z Factor", None, sp.vap_z, None)
+        row("Density", None,
+            u.disp("rho", vap_rho, 6) if vap_rho else None, None,
+            unit=u.label("rho"))
+        row("Viscosity", None, sp.vap_visc, None, unit="cP")
+        row("Z Factor", None, sp.vap_z, None, unit="-")
 
         row("LIQUID PHASE PROPERTIES", None, None, None, section=True)
-        row(f"Density ({u.label('rho')})", None, None,
-            u.disp("rho", liq_rho, 4) if liq_rho else None)
-        row("Viscosity (cP)", None, None, sp.liq_visc)
+        row("Density", None, None,
+            u.disp("rho", liq_rho, 4) if liq_rho else None, unit=u.label("rho"))
+        row("Viscosity", None, None, sp.liq_visc, unit="cP")
+        r += 2      # per-fitting composition now lives in "Composition Phase Splits"
+
+    cw(ws, 1, 28); cw(ws, 2, 10); cw(ws, 3, 16); cw(ws, 4, 16); cw(ws, 5, 16)
+    return sheet_title
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Composition Phase Splits sheet (vapor y / liquid x per component)
+# ════════════════════════════════════════════════════════════════════════
+def build_composition_phase_splits_sheet(
+        wb: Workbook,
+        stations: list,
+        flashes: list,
+        comp_fracs: list[dict],
+        sp,
+        circuit_id: str,
+        stream_name: str,
+        station_lines: list[str] | None = None,
+        line_colors: dict[str, str] | None = None,
+        run_label: str = "Main",
+        meta: dict | None = None,
+) -> str:
+    """Component phase split across the sequence: components DOWN the rows, and
+    for every fitting a Vapor (y) / Liquid (x) mole-fraction column pair grouped
+    under that fitting's header.  Data comes straight from ``comp_fracs`` (each
+    element ``{component: (y, x)}`` from ``_feed_comp_mole_fracs``)."""
+    name = ("Composition Phase Splits" if run_label == "Main"
+            else f"Comp Phase Splits {run_label}")[:31]
+    ws = wb.create_sheet(name)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = PURPLE
+
+    # stations that actually carry a composition
+    cols = [(j, s, comp_fracs[j]) for j, s in enumerate(stations)
+            if j < len(comp_fracs) and comp_fracs[j]]
+    ncol = 1 + 2 * len(cols)
+    last_col = get_column_letter(max(ncol, 2))
+    r0 = _write_doc_header_block(
+        ws, meta, ncol,
+        title=(f"COMPOSITION PHASE SPLITS (vapor y / liquid x)   |   Circuit {circuit_id}"
+              f"   |   Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}"))
+
+    if not cols:
+        _c(ws, r0 + 1, 1,
+           "No composition available — Stream Lookup blank (manual stream) or "
+           "no component data in the HMB.", sz=9, fg=ORANGE)
+        cw(ws, 1, 60)
+        return name
+
+    # header: two rows "Component"; per station a merged pair over (y, x)
+    hr1, hr2 = r0, r0 + 1
+    _c(ws, hr1, 1, "Component", bg=NAVY, fg=WHITE, sz=9, bold=True, ha="left")
+    _c(ws, hr2, 1, "", bg=NAVY)
+    ws.merge_cells(start_row=hr1, start_column=1, end_row=hr2, end_column=1)
+    for k, (j, s, _fr) in enumerate(cols):
+        c0 = 2 + 2 * k
+        ln = station_lines[j] if (station_lines and j < len(station_lines)) else None
+        bg = (line_colors or {}).get(ln, STEEL) if line_colors else STEEL
+        ws.merge_cells(start_row=hr1, start_column=c0, end_row=hr1, end_column=c0 + 1)
+        _c(ws, hr1, c0, f"{s.seq} · {s.comp_id or ''}".strip(),
+           bg=bg, fg=NAVY, sz=8, bold=True, ha="center", wrap=True)
+        _c(ws, hr2, c0, "Vapor (y)", bg=LGRAY, sz=8, bold=True, ha="center")
+        _c(ws, hr2, c0 + 1, "Liquid (x)", bg=LGRAY, sz=8, bold=True, ha="center")
+    ws.row_dimensions[hr1].height = 26
+
+    # ordered union of component names (first appearance = feed order)
+    names: list[str] = []
+    seen: set = set()
+    for _j, _s, fr in cols:
+        for nm in fr:
+            if nm not in seen:
+                seen.add(nm)
+                names.append(nm)
+
+    r = r0 + 2
+    for nm in names:
+        _c(ws, r, 1, nm, bg=LGRAY, sz=8, ha="left")
+        for k, (_j, _s, fr) in enumerate(cols):
+            c0 = 2 + 2 * k
+            y, x = fr.get(nm, (None, None))
+            _c(ws, r, c0, round(y, 6) if y else "", sz=8, ha="right")
+            _c(ws, r, c0 + 1, round(x, 6) if x else "", sz=8, ha="right")
         r += 1
 
-        # ── Component vapor/liquid mole-fraction table for this fitting ──
-        if fracs:
-            names = sorted(fracs.keys(), key=lambda n: -(fracs[n][0] + fracs[n][1]))
-            _c(ws, r, 1, "Component Mole Fraction", bg=DGRAY, fg=WHITE, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, name, bg=GRNHDR, fg=WHITE, sz=8, bold=True)
-            r += 1
-            _c(ws, r, 1, "Vapor (y)", bg=LGRAY, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, round(fracs[name][0], 6), sz=8, ha="right")
-            r += 1
-            _c(ws, r, 1, "Liquid (x)", bg=LGRAY, sz=9, bold=True)
-            for ci, name in enumerate(names, 2):
-                _c(ws, r, ci, round(fracs[name][1], 6), sz=8, ha="right")
-            r += 2
-        else:
-            r += 1
-
-    cw(ws, 1, 30); cw(ws, 2, 16); cw(ws, 3, 16); cw(ws, 4, 16)
-    return sheet_title
+    cw(ws, 1, 20)
+    for c in range(2, ncol + 1):
+        cw(ws, c, 11)
+    ws.freeze_panes = f"B{r0 + 2}"
+    return name
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -4468,6 +5253,7 @@ def _build_composition_splits_sheet(
         stream_name: str,
         station_lines: list[str] | None = None,
         line_colors: dict[str, str] | None = None,
+        meta: dict | None = None,
 ) -> str:
     """Per-component split across the marching sequence (columns left→right).
 
@@ -4482,12 +5268,10 @@ def _build_composition_splits_sheet(
 
     ncol = 1 + len(stations)
     last_col = get_column_letter(max(ncol, 2))
-    ws.merge_cells(f"A1:{last_col}1")
-    _c(ws, 1, 1,
-       f"COMPOSITION SPLITS (mass & molar)   |   Circuit {circuit_id}   |   "
-       f"Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}",
-       bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    r0 = _write_doc_header_block(
+        ws, meta, ncol,
+        title=(f"COMPOSITION SPLITS (mass & molar)   |   Circuit {circuit_id}   |   "
+              f"Stream {stream_name}   |   {datetime.now():%d-%b-%Y %H:%M}"))
 
     u = _u()
     # Convert each station's molar vector → mass (lb/hr) using mw_map.
@@ -4510,7 +5294,7 @@ def _build_composition_splits_sheet(
                 names.append(nm)
 
     if not names:
-        _c(ws, 3, 1,
+        _c(ws, r0 + 1, 1,
            "No composition available — Stream Lookup blank (manual stream) "
            "or no component data in the HMB.", sz=9, fg=ORANGE)
         cw(ws, 1, 60)
@@ -4530,7 +5314,7 @@ def _build_composition_splits_sheet(
     mole_tot = [sum(cv.values()) for cv in comps]       # molar totals per station
 
     # ── Block 1: mass flow ───────────────────────────────────────────────
-    r = 3
+    r = r0 + 1
     ws.merge_cells(f"A{r}:{last_col}{r}")
     _c(ws, r, 1, f"MASS FLOW  ({u.label('mflow')})",
        bg=GRNHDR, fg=WHITE, sz=9, bold=True)
@@ -4613,7 +5397,7 @@ def _build_composition_splits_sheet(
     cw(ws, 1, 26)
     for j in range(len(stations)):
         cw(ws, 2 + j, 12)
-    ws.freeze_panes = "B4"
+    ws.freeze_panes = f"B{r0 + 2}"
     return "Composition Splits"
 
 
@@ -4661,6 +5445,7 @@ def _build_input_sheet(
         flash_mode: str = "isothermal",
         line_colors: dict[str, str] | None = None,
         hmb_meta: dict | None = None,
+        meta: dict | None = None,
 ) -> str:
     """PCF-style pipeline component sheet for a whole circuit (all lines)."""
     ws = wb.create_sheet("Input_Pipeline")
@@ -4670,36 +5455,33 @@ def _build_input_sheet(
 
     line_nos = list(dict.fromkeys(r["Line No"] for r in circuit_rows))
 
-    # ── Row 1: title bar ─────────────────────────────────────────────────
-    ws.merge_cells(f"A1:{last_col}1")
-    title = (f"CIRCUIT:  {circuit_id}   |   ISO: (manual — no ISO)   |   "
-             f"Lines: {', '.join(line_nos)}   |   Stream: {stream_name or '—'}")
-    _c(ws, 1, 1, title, bg=NAVY, fg=WHITE, sz=10, bold=True)
-    ws.row_dimensions[1].height = 20
+    sheet_title = (f"CIRCUIT:  {circuit_id}   |   ISO: (manual — no ISO)   |   "
+                  f"Lines: {', '.join(line_nos)}   |   Stream: {stream_name or '—'}")
+    r0 = _write_doc_header_block(ws, meta, _PCF_NCOL, title=sheet_title)
 
-    # ── Row 2: subtitle ──────────────────────────────────────────────────
-    ws.merge_cells(f"A2:{last_col}2")
+    # ── Subtitle ─────────────────────────────────────────────────────────
+    ws.merge_cells(f"A{r0}:{last_col}{r0}")
     n_main   = sum(1 for r in circuit_rows if r.get("Run Type", "Main") == "Main")
     n_branch = sum(1 for r in circuit_rows if r.get("Run Type") == "Branch")
     subtitle = (f"Start P: {_u().disp('P', start_p)} {_u().label('P')}   |   "
                 f"Flash mode: {flash_mode}   |   "
                 f"Components: {n_main} Main  /  {n_branch} Branch  |  "
                 f"{len(line_nos)} line(s)")
-    _c(ws, 2, 1, subtitle, bg=STEEL, fg=WHITE, sz=9)
-    ws.row_dimensions[2].height = 16
+    _c(ws, r0, 1, subtitle, bg=STEEL, fg=WHITE, sz=9)
+    ws.row_dimensions[r0].height = 16
 
-    # ── Row 3: HMB provenance (parsed from the HMB filename) — Input only ──
-    hdr_row = 3
+    # ── HMB provenance (parsed from the HMB filename) — Input only ─────────
+    hdr_row = r0 + 1
     if hmb_meta and hmb_meta.get("file"):
-        ws.merge_cells(f"A3:{last_col}3")
-        meta = (f"HMB: {hmb_meta.get('file','')}"
-                f"   |   Unit: {hmb_meta.get('unit','') or '—'}"
-                f"   |   Case: {hmb_meta.get('case_no','') or '—'}"
-                f"   |   Desc: {hmb_meta.get('description','') or '—'}"
-                f"   |   Issued: {hmb_meta.get('date','') or '—'}")
-        _c(ws, 3, 1, meta, bg=AMBER, fg=DGRAY, sz=9, bold=True)
-        ws.row_dimensions[3].height = 16
-        hdr_row = 4
+        ws.merge_cells(f"A{hdr_row}:{last_col}{hdr_row}")
+        hmb_line = (f"HMB: {hmb_meta.get('file','')}"
+                    f"   |   Unit: {hmb_meta.get('unit','') or '—'}"
+                    f"   |   Case: {hmb_meta.get('case_no','') or '—'}"
+                    f"   |   Desc: {hmb_meta.get('description','') or '—'}"
+                    f"   |   Issued: {hmb_meta.get('date','') or '—'}")
+        _c(ws, hdr_row, 1, hmb_line, bg=AMBER, fg=DGRAY, sz=9, bold=True)
+        ws.row_dimensions[hdr_row].height = 16
+        hdr_row += 1
 
     # Redefine line_rows to use all circuit rows
     line_rows = circuit_rows
@@ -4799,7 +5581,8 @@ def _build_input_sheet(
 # ════════════════════════════════════════════════════════════════════════
 #  Orchestration — one workbook per CIRCUIT
 # ════════════════════════════════════════════════════════════════════════
-def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
+def _make_stream_resolver(default_hmb: str, default_case: str, map_path,
+                          seed_cache: dict | None = None):
     """Return a memoised ``resolver(row) -> (StreamProps|None, feed|None)``.
 
     Resolution order per row:
@@ -4807,8 +5590,14 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
          row Case | CLI default).  Composition feed loaded for real flash.
       2. ``Stream Lookup`` blank → build manual StreamProps from yellow cells
          (no feed → frozen synthetic flash downstream).
-    """
-    cache: dict[tuple, tuple] = {}
+
+    ``seed_cache`` (optional): a pre-resolved ``{(hmb, case, stream): (sp,
+    feed)}`` snapshot — e.g. restored from a portable ``.calc`` project file.
+    Pre-populating the cache with it means the existing ``if key in cache``
+    check below transparently serves those streams without ever touching
+    ``HE.load_stream_props``/``FV.read_feed`` (or the original HMB file on
+    disk), so a saved project can replay even if that file has moved."""
+    cache: dict[tuple, tuple] = dict(seed_cache) if seed_cache else {}
 
     def resolver(row):
         stream = row.get("Stream Lookup")
@@ -4835,6 +5624,43 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
     return resolver
 
 
+def _cv_scale_sp(sp, k: float):
+    """Copy a StreamProps with all flow-extensive quantities scaled by k
+    (intensive properties — densities, MW, viscosity, Z — unchanged)."""
+    if sp is None or k == 1.0:
+        return sp
+    from dataclasses import replace as _replace
+    def s(v):
+        return (v * k) if v is not None else None
+    return _replace(
+        sp, vap_mass=s(sp.vap_mass), liq_mass=s(sp.liq_mass),
+        total_mass=s(sp.total_mass),
+        total_std_liq=s(sp.total_std_liq), total_std_vap=s(sp.total_std_vap),
+        vap_act_vol=s(sp.vap_act_vol), liq_act_rate=s(sp.liq_act_rate))
+
+
+def _cv_scale_feed(feed, k: float):
+    """Copy a FlashFeed with total mass/moles scaled by k (composition and
+    K-values unchanged — flow scaling only)."""
+    if feed is None or k == 1.0:
+        return feed
+    from dataclasses import replace as _replace
+    return _replace(
+        feed,
+        total_mass_lbhr=(feed.total_mass_lbhr or 0.0) * k,
+        total_moles_lbmolhr=((feed.total_moles_lbmolhr or 0.0) * k))
+
+
+def _cv_scaled_resolver(resolver, k: float):
+    """Wrap a stream resolver so every (sp, feed) it returns is flow-scaled."""
+    if k == 1.0:
+        return resolver
+    def _r(row):
+        sp_, feed_ = resolver(row)
+        return _cv_scale_sp(sp_, k), _cv_scale_feed(feed_, k)
+    return _r
+
+
 def run_noiso(
         input_path: str,
         hmb_path: str,
@@ -4844,6 +5670,8 @@ def run_noiso(
         case: str = "Case 1",
         map_path: str | None = None,
         flash_mode: str = "isothermal",
+        meta: dict | None = None,
+        stream_snapshot: dict | None = None,
 ) -> list[tuple[str, list[HE.Station], list, HE.StreamProps]]:
     """
     Process hydraulic circuits from ``input_path``.
@@ -4851,6 +5679,12 @@ def run_noiso(
     Each circuit (col A) is a series chain of lines.  All Main-run rows across
     all lines are marched sequentially as ONE continuous pressure profile.
     Branch rows per line are marched independently, each from its own Start P.
+
+    ``stream_snapshot`` (optional): a pre-resolved ``{(hmb, case, stream):
+    (StreamProps, feed)}`` dict — e.g. restored from a portable ``.calc``
+    project file. Every stream it covers resolves entirely from the
+    snapshot, never touching ``hmb_path`` on disk, so a saved project can
+    replay even if the original HMB workbook has moved or been deleted.
 
     Returns list of (out_xlsx, main_stations, main_flashes, sp) — one per circuit.
     """
@@ -4886,26 +5720,32 @@ def run_noiso(
         # ── Per-row stream resolver (HMB File / Case / manual) ────────────
         def_hmb  = c["hmb_file"] or hmb_path
         def_case = c["case"] or case
-        resolver = _make_stream_resolver(def_hmb, def_case, map_path)
+        resolver = _make_stream_resolver(def_hmb, def_case, map_path,
+                                         seed_cache=stream_snapshot)
 
         # ── Circuit default StreamProps (drives the screening sheets) ─────
         feed = None
         if sk:
-            sp = HE.load_stream_props(def_hmb, sk, def_case)
-            if sp is None:
-                try:
-                    map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
-                    if map_row:
-                        sk = map_row.lookup_key
-                        sp = HE.load_stream_props(def_hmb, sk, def_case)
-                except Exception:
-                    pass
-            if sp is None:
-                print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
-                      f"(case '{def_case}') — circuit '{cid}' skipped.")
-                continue
-            is_case = HE.is_proii_export(def_hmb)
-            feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
+            snap_hit = (stream_snapshot.get((def_hmb, def_case, sk))
+                       if stream_snapshot else None)
+            if snap_hit is not None:
+                sp, feed = snap_hit
+            else:
+                sp = HE.load_stream_props(def_hmb, sk, def_case)
+                if sp is None:
+                    try:
+                        map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
+                        if map_row:
+                            sk = map_row.lookup_key
+                            sp = HE.load_stream_props(def_hmb, sk, def_case)
+                    except Exception:
+                        pass
+                if sp is None:
+                    print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
+                          f"(case '{def_case}') — circuit '{cid}' skipped.")
+                    continue
+                is_case = HE.is_proii_export(def_hmb)
+                feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
             if feed is None:
                 print("  WARNING: no composition for default stream — flash uses "
                       "frozen split where applicable.")
@@ -4940,97 +5780,100 @@ def run_noiso(
         branch_blocks = c["branch_blocks"]
         p_start = p0 or sp.pres_psia or 100.0
 
-        # ── Preliminary Main march (no branch injections) ────────────────
-        # Captures the flow/composition that leaves Main at every
-        # 'Tee Split Branch Flow N' row, so any Branch block that splits off
-        # of Main can be auto-seeded below (mirrors the Branch→Main join
-        # injection further down, but in the opposite direction).
-        splits_out: dict[tuple, dict] = {}
-        build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
-                              default_sp=sp, splits_out=splits_out)
+        # ── Whole-circuit solve at a given inlet flow scale ──────────────
+        # Runs the preliminary split-capture march, the branch sub-runs (with
+        # split-seeding + Main injections) and the final Main march — all at
+        # ``resolver_x`` / ``sp_x`` (flow-scaled for the Min/Max cases).  A
+        # full re-march, NOT interpolation: pressures, flash splits and the
+        # flow reaching each valve are all recomputed, so upstream Tee splits
+        # and carry-overs are honoured at the scaled flow.
+        def march_all(resolver_x, sp_x, quiet=False):
+            splits_out: dict[tuple, dict] = {}
+            build_profile_solved(main_rows, resolver_x, p_start,
+                                  flash_mode=flash_mode, default_sp=sp_x,
+                                  splits_out=splits_out)
+            branch_runs_l: list = []
+            injections_l: dict[int, dict] = {}
+            line_branch_count: dict[str, int] = {}
+            line_split_count: dict[str, int] = {}
+            for bi, block in enumerate(branch_blocks):
+                bp = _start_p_of_block(block) or p_start
+                b0 = block[0] if block else {}
+                up_line = b0.get("Upstream Line No")
+                up_seq  = b0.get("Upstream Seq")
+                split_cap = None
+                if up_line:
+                    if up_seq is not None:
+                        split_cap = splits_out.get((up_line, up_seq))
+                    else:
+                        line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
+                        split_n = line_split_count[up_line]
+                        split_row = next(
+                            (mr for mr in main_rows
+                             if mr.get("Line No") == up_line
+                             and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
+                            None)
+                        if split_row is not None:
+                            split_cap = splits_out.get((up_line, split_row.get("Seq")))
+                    if split_cap is None and not quiet:
+                        print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
+                              f"Upstream Line No '{up_line}' but no matching "
+                              f"'Tee Split Branch Flow N' output was found on Main.")
 
-        # ── March branch blocks FIRST (independent sub-runs) ─────────────
-        # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
-        # the same line is INJECTED into the Main at that row (its outlet flow +
-        # composition merge in); others stay standalone Branch sheets.
-        # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
-        # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
-        # captured split-off flow/composition instead of marching standalone.
-        branch_runs: list = []            # (label, sts, fls, cmps, b_lns, cfracs)
-        injections: dict[int, dict] = {}  # main_rows index → branch outlet
-        line_branch_count: dict[str, int] = {}
-        line_split_count: dict[str, int] = {}
-        for bi, block in enumerate(branch_blocks):
-            bp = _start_p_of_block(block) or p_start
-            b0 = block[0] if block else {}
-            up_line = b0.get("Upstream Line No")
-            up_seq  = b0.get("Upstream Seq")
-            split_cap = None
-            if up_line:
-                if up_seq is not None:
-                    split_cap = splits_out.get((up_line, up_seq))
-                else:
-                    line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
-                    split_n = line_split_count[up_line]
-                    split_row = next(
-                        (mr for mr in main_rows
-                         if mr.get("Line No") == up_line
-                         and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
-                        None)
-                    if split_row is not None:
-                        split_cap = splits_out.get((up_line, split_row.get("Seq")))
-                if split_cap is None:
-                    print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
-                          f"Upstream Line No '{up_line}' but no matching "
-                          f"'Tee Split Branch Flow N' output was found on Main.")
+                solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp_x)
+                if split_cap is not None:
+                    solve_kwargs.update(default_feed=split_cap["feed"],
+                                         default_vap_cf=split_cap["vap_cf"],
+                                         default_liq_cf=split_cap["liq_cf"])
+                    if split_cap.get("sp") is not None:
+                        solve_kwargs["default_sp"] = split_cap["sp"]
+                sts, fls, cmps, _bmw, cfracs = build_profile_solved(block, resolver_x, bp, **solve_kwargs)
+                b_lns = [r["Line No"] for r in block]
+                label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
+                branch_runs_l.append((label, sts, fls, cmps, b_lns, cfracs))
+                if split_cap is not None and not quiet:
+                    print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
+                          f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
 
-            solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp)
-            if split_cap is not None:
-                solve_kwargs.update(default_feed=split_cap["feed"],
-                                     default_vap_cf=split_cap["vap_cf"],
-                                     default_liq_cf=split_cap["liq_cf"])
-                if split_cap.get("sp") is not None:
-                    solve_kwargs["default_sp"] = split_cap["sp"]
-            sts, fls, cmps, _bmw, cfracs = build_profile_solved(block, resolver, bp, **solve_kwargs)
-            b_lns = [r["Line No"] for r in block]
-            label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
-            branch_runs.append((label, sts, fls, cmps, b_lns, cfracs))
-            if split_cap is not None:
-                print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
-                      f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
+                bline  = block[0].get("Line No") if block else None
+                line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
+                join_n = line_branch_count[bline]
+                join_idx = next(
+                    (mi for mi, mr in enumerate(main_rows)
+                     if mr.get("Line No") == bline
+                     and _is_tee_join(mr.get("Fitting Name")) == join_n),
+                    None)
+                if join_idx is not None and fls and fls[-1] is not None:
+                    out_fr = fls[-1]
+                    b_sp, b_feed = resolver_x(block[0]) if block else (None, None)
+                    injections_l[join_idx] = {
+                        "vap_mass": out_fr.vap_mass, "liq_mass": out_fr.liq_mass,
+                        "vmol": out_fr.vap_moles, "lmol": out_fr.liq_moles,
+                        "comp": cmps[-1] if cmps else {},
+                        "feed": b_feed, "sp": b_sp, "label": label,
+                    }
+                    if not quiet:
+                        print(f"  Branch '{label}' (line {bline}) joins Main at "
+                              f"Tee Join Branch Flow {join_n}.")
+            m_sts, m_fls, m_cmps, m_mw, m_cfracs = build_profile_solved(
+                main_rows, resolver_x, p_start, flash_mode=flash_mode,
+                default_sp=sp_x, injections=injections_l)
+            return m_sts, m_fls, m_cmps, m_mw, m_cfracs, branch_runs_l
 
-            bline  = block[0].get("Line No") if block else None
-            line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
-            join_n = line_branch_count[bline]
-            join_idx = next(
-                (mi for mi, mr in enumerate(main_rows)
-                 if mr.get("Line No") == bline
-                 and _is_tee_join(mr.get("Fitting Name")) == join_n),
-                None)
-            if join_idx is not None and fls and fls[-1] is not None:
-                out_fr = fls[-1]
-                b_sp, b_feed = resolver(block[0]) if block else (None, None)
-                injections[join_idx] = {
-                    "vap_mass": out_fr.vap_mass,
-                    "liq_mass": out_fr.liq_mass,
-                    "vmol":     out_fr.vap_moles,
-                    "lmol":     out_fr.liq_moles,
-                    "comp":     cmps[-1] if cmps else {},
-                    "feed":     b_feed,
-                    "sp":       b_sp,
-                    "label":    label,
-                }
-                print(f"  Branch '{label}' (line {bline}) joins Main at "
-                      f"Tee Join Branch Flow {join_n}.")
-
-        # ── March the Main with branch injections ────────────────────────
-        main_stations, main_flashes, main_comps, main_mw, main_cfracs = build_profile_solved(
-            main_rows, resolver, p_start, flash_mode=flash_mode,
-            default_sp=sp, injections=injections)
+        (main_stations, main_flashes, main_comps, main_mw, main_cfracs,
+         branch_runs) = march_all(resolver, sp)
 
         # station_lines: map each station back to its source Line No
         station_lines = [r["Line No"] for r in main_rows
                          if r["Run Type"] == "Main"]
+
+        # ── Document-header meta — built early so every sheet builder below
+        # (not just the cover sheet) can carry the shared header block ──────
+        circuit_rows = [r for r in all_rows if r["Circuit"] == cid]
+        hmb_meta = _parse_hmb_filename(def_hmb)
+        circuit_meta = dict(hmb_meta or {})
+        circuit_meta.update({k: v for k, v in (meta or {}).items() if v})
+        circuit_meta.setdefault("case", def_case)
 
         wb = Workbook()
         pp_sheets, fp_sheets = [], []
@@ -5039,82 +5882,184 @@ def run_noiso(
             wb, main_stations, main_flashes, sp,
             circuit_id=cid, stream_name=sk,
             run_label="Main", flash_mode=flash_mode,
-            station_lines=station_lines, line_colors=lc))
+            station_lines=station_lines, line_colors=lc, meta=circuit_meta))
         fp_sheets.append(_build_flash_detail_sheet(
-            wb, main_stations, main_flashes, feed, sp, run_label="Main"))
+            wb, main_stations, main_flashes, feed, sp, run_label="Main",
+            meta=circuit_meta))
 
         # ── Composition Splits (component MASS split across the sequence) ──
         _build_composition_splits_sheet(
             wb, main_stations, main_comps, main_mw, cid, sk,
-            station_lines=station_lines, line_colors=lc)
+            station_lines=station_lines, line_colors=lc, meta=circuit_meta)
+
+        # ── Composition Phase Splits (vapor y / liquid x per component) ────
+        ph_sheets = [build_composition_phase_splits_sheet(
+            wb, main_stations, main_flashes, main_cfracs, sp, cid, sk,
+            station_lines=station_lines, line_colors=lc, run_label="Main",
+            meta=circuit_meta)]
 
         # ── Branch sheets ────────────────────────────────────────────────
         sp_sheets = [_build_stream_props_detail_sheet(
             wb, main_stations, main_flashes, main_cfracs, sp,
-            circuit_id=cid, stream_name=sk, run_label="Main")]
+            circuit_id=cid, stream_name=sk, run_label="Main", meta=circuit_meta)]
 
         for (label, sts, fls, cmps, b_lns, cfracs) in branch_runs:
             pp_sheets.append(_build_pressure_profile_sheet(
                 wb, sts, fls, sp,
                 circuit_id=cid, stream_name=sk,
                 run_label=label, flash_mode=flash_mode,
-                station_lines=b_lns, line_colors=lc))
+                station_lines=b_lns, line_colors=lc, meta=circuit_meta))
             fp_sheets.append(_build_flash_detail_sheet(
-                wb, sts, fls, feed, sp, run_label=label))
+                wb, sts, fls, feed, sp, run_label=label, meta=circuit_meta))
             sp_sheets.append(_build_stream_props_detail_sheet(
                 wb, sts, fls, cfracs, sp,
-                circuit_id=cid, stream_name=sk, run_label=label))
+                circuit_id=cid, stream_name=sk, run_label=label, meta=circuit_meta))
+            ph_sheets.append(build_composition_phase_splits_sheet(
+                wb, sts, fls, cfracs, sp, cid, sk,
+                station_lines=b_lns, line_colors=lc, run_label=label,
+                meta=circuit_meta))
+
+        # ── Control-valve datasheets + full Min/Max hydraulic runs ─────────
+        # Datasheet Min/Norm/Max come from THREE full circuit re-marches at
+        # scaled inlet flow (not interpolation), so upstream Tee splits and
+        # carry-overs set the real flow reaching each valve.  The Min/Max
+        # marches also get their own Pressure_Profile / Flash_Profile sheets.
+        cv_sheets = []
+        scen_sheets = []
+        valve_sts_nor = _cv_valve_stations(main_stations, branch_runs)
+        if valve_sts_nor:
+            # circuit-level turndown: widest range requested across its valves
+            mins, maxs = [], []
+            for st in valve_sts_nor:
+                rw = st.cv_raw.get("row", {})
+                mins.append(num(rw.get("Min Flow Mult")) or 0.35)
+                maxs.append(num(rw.get("Max Flow Mult")) or 1.20)
+            k_min, k_max = min(mins), max(maxs)
+
+            valve_sts = {"NOR": valve_sts_nor}
+            for tag, k in (("Min", k_min), ("Max", k_max)):
+                code = "MIN" if tag == "Min" else "MAX"
+                try:
+                    (m_sts, m_fls, m_cmps, m_mw, m_cfracs, b_runs) = march_all(
+                        _cv_scaled_resolver(resolver, k),
+                        _cv_scale_sp(sp, k), quiet=True)
+                except Exception as exc:
+                    print(f"  ({tag}-flow march skipped: {exc})")
+                    valve_sts[code] = []
+                    continue
+                valve_sts[code] = _cv_valve_stations(m_sts, b_runs)
+                # full hydraulic run sheets for this flow scenario
+                scen_sheets.append(_build_pressure_profile_sheet(
+                    wb, m_sts, m_fls, sp, circuit_id=cid, stream_name=sk,
+                    run_label=tag, flash_mode=flash_mode,
+                    station_lines=station_lines, line_colors=lc, meta=circuit_meta))
+                scen_sheets.append(_build_flash_detail_sheet(
+                    wb, m_sts, m_fls, feed, sp, run_label=tag, meta=circuit_meta))
+                for (blabel, bsts, bfls, bcmps, b_lns, bcfracs) in b_runs:
+                    scen_sheets.append(_build_pressure_profile_sheet(
+                        wb, bsts, bfls, sp, circuit_id=cid, stream_name=sk,
+                        run_label=f"{blabel}_{tag}", flash_mode=flash_mode,
+                        station_lines=b_lns, line_colors=lc, meta=circuit_meta))
+                    scen_sheets.append(_build_flash_detail_sheet(
+                        wb, bsts, bfls, feed, sp, run_label=f"{blabel}_{tag}",
+                        meta=circuit_meta))
+                print(f"  {tag}-flow run (inlet ×{k:g}) marched for CV datasheet.")
+
+            cv_sheets = _build_cv_datasheets(
+                wb, valve_sts["NOR"], valve_sts.get("MIN"), valve_sts.get("MAX"),
+                stream_name=sk, run_label="Main", meta=circuit_meta)
+        if cv_sheets:
+            print(f"  Control-valve datasheets: {', '.join(cv_sheets)}")
 
         # ── Screening / analysis sheets (all main stations, whole circuit)
         circuit_label = f"Circuit {cid}  ({', '.join(lns)})"
         if main_stations:
-            HE.build_detail_sheet(wb, main_stations, phase)
-            HE.build_stream_sheet(wb, sp, phase)
+            HE.build_detail_sheet(wb, main_stations, phase, meta=circuit_meta)
+            HE.build_stream_sheet(wb, sp, phase, meta=circuit_meta)
             HE.build_fiv_sheet(wb, main_stations, sp,
                                 circuit_label, sk, gas_density_fn=gdf,
-                                station_lines=station_lines, line_colors=lc)
+                                station_lines=station_lines, line_colors=lc,
+                                meta=circuit_meta)
             HE.build_aiv_sheet(wb, main_stations, sp,
                                 circuit_label, sk,
-                                station_lines=station_lines, line_colors=lc)
+                                station_lines=station_lines, line_colors=lc,
+                                meta=circuit_meta)
             HE.build_regime_sheet(wb, main_stations, sp,
-                                   circuit_label, sk, gas_density_fn=gdf)
+                                   circuit_label, sk, gas_density_fn=gdf,
+                                   flashes=main_flashes, meta=circuit_meta)
         else:
             wb.create_sheet("Component_Detail")
-            HE.build_stream_sheet(wb, sp, phase)
+            HE.build_stream_sheet(wb, sp, phase, meta=circuit_meta)
 
         fp_map_sheets = []
         try:
             FPM = HE                      # flow-pattern maps merged into this file
             fp_map_sheets = FPM.build_flow_pattern_maps(
-                wb, main_stations, sp, circuit_label, sk, gas_density_fn=gdf)
+                wb, main_stations, sp, circuit_label, sk, gas_density_fn=gdf,
+                meta=circuit_meta)
         except Exception as exc:
             print(f"  (flow-pattern maps skipped: {exc})")
 
-        # ── Input_Pipeline and README ─────────────────────────────────────
-        circuit_rows = [r for r in all_rows if r["Circuit"] == cid]
-        hmb_meta = _parse_hmb_filename(def_hmb)
+        # ── Line List (one row per Line No in the circuit) ────────────────
+        if main_stations:
+            HE.build_line_list_sheet(wb, main_stations, station_lines, lc,
+                                     cid, sk, circuit_rows,
+                                     meta=circuit_meta, phase=phase)
         _build_input_sheet(wb, circuit_rows, cid,
                            stream_name=sk,
                            start_p=p_start,
                            flash_mode=flash_mode,
                            line_colors=lc,
-                           hmb_meta=hmb_meta)
+                           hmb_meta=hmb_meta,
+                           meta=circuit_meta)
         _build_readme_noiso(wb, circuit_label, sk, sp, phase,
-                            input_path, hmb_path, flash_mode)
+                            input_path, hmb_path, flash_mode, meta=circuit_meta)
+
+        # ── Branded cover sheet (built last so it can list the contents) ──
+        cover_meta = dict(circuit_meta)
+        cover_meta.setdefault("units", _u().system)
+        _pids = list(dict.fromkeys(
+            str(r.get("PID Number")) for r in circuit_rows
+            if r.get("PID Number")))
+        if _pids:
+            cover_meta["pid"] = ", ".join(_pids)
+        HE.build_cover_sheet(wb, cover_meta, cid, sk,
+                             sheet_titles=[s.title for s in wb.worksheets])
 
         # ── Sheet order ──────────────────────────────────────────────────
-        order = (pp_sheets + fp_sheets +
-                 ["Composition Splits",
-                  "Component_Detail", "Stream_Props"]
-                 + sp_sheets +
+        order = (["Cover", "Line_List"] + pp_sheets + fp_sheets + scen_sheets +
+                 ["Composition Splits"] + ph_sheets +
+                 ["Component_Detail", "Stream_Props"]
+                 + sp_sheets + cv_sheets +
                  ["FIV_EI_T2.2", "AIV", "Two_Phase_Regime"]
                  + fp_map_sheets
                  + ["Input_Pipeline", "README"])
-        for name in reversed(order):
-            if name in [s.title for s in wb.worksheets]:
-                wb.move_sheet(name, offset=-len(wb.worksheets))
         if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
             del wb["Sheet"]
+        # deterministic reorder: sheets named in `order` first (in that order),
+        # then any leftover sheets in their existing order.  (Replaces the old
+        # move_sheet loop, whose negative offsets wrapped for late-created
+        # sheets like Line_List.)
+        present = {s.title: s for s in wb.worksheets}
+        seen = set()
+        ordered = []
+        for name in order:
+            s = present.get(name)
+            if s is not None and name not in seen:
+                ordered.append(s)
+                seen.add(name)
+        ordered += [s for s in wb.worksheets if s.title not in seen]
+        wb._sheets = ordered
+
+        # uniform 15-wide/wrap columns on the sheets carrying the shared
+        # document header block, then native Excel print setup (paper
+        # size/orientation, fit-to-width, repeated header rows) on every
+        # sheet, so the workbook prints/exports to PDF straight from Excel
+        # without the user configuring anything
+        for _ws in wb.worksheets:
+            if any(_ws.title.startswith(p) for p in _HEADER_BLOCK_SHEET_PREFIXES):
+                _apply_uniform_columns(_ws)
+            _apply_print_setup(_ws)
 
         if out_path is None:
             safe_c = re.sub(r"[^A-Za-z0-9_-]", "_", str(cid))
@@ -5144,13 +6089,13 @@ def run_noiso(
 #  README sheet
 # ════════════════════════════════════════════════════════════════════════
 def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
-                         input_path, hmb_path, flash_mode):
+                         input_path, hmb_path, flash_mode, meta=None):
     ws = wb.create_sheet("README")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = MGRAY
+    title = f"HyCalign Hydraulics — NO-ISO Flash Mode — Line {line_no}"
+    r0 = _write_doc_header_block(ws, meta, 6, title=title)
     cw(ws, 1, 120)
-    ws["A1"] = f"HyCalign Hydraulics — NO-ISO Flash Mode — Line {line_no}"
-    ws["A1"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
 
     lines = [
         "",
@@ -5186,7 +6131,7 @@ def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
         "",
         "VERIFY: schedule/wall from asme_data.py — confirm before design use.",
     ]
-    for i, t in enumerate(lines, 2):
+    for i, t in enumerate(lines, r0):
         ws.cell(i, 1).value = t
         ws.cell(i, 1).font = Font(
             name="Calibri", size=9,
@@ -7197,16 +8142,88 @@ def _read_comp_constants(hmb_path) -> dict:
 _PF_NAME_RE = re.compile(r"^PF(\d+)A(\d+)D(?:_\d+)?$")
 
 
-def _decode_pf_pseudo(name_upper: str) -> dict | None:
+# Direct Tb/SG/MW curve fit for Tc/Pc, Watson K 6.76-32.42 — same unified
+# regression as comp_constants.py's estimate_pseudo_props (ln(Tc_R)/ln(Pc_psia)
+# by OLS against Tb(R), SG, MW; fit once against 220 PRO/II ground-truth
+# pseudo-fractions spanning that whole K range; max error 0.23%/1.55%).
+# Inlined here (not imported from comp_constants) so this decode path keeps
+# its no-pandas-dependency property — comp_constants imports pandas/openpyxl
+# at module level for spreadsheet I/O, which isn't needed for the bare
+# correlation.
+_CF_K_MIN = 6.7607782905215785
+_CF_K_MAX = 32.42
+_CF_TC_COEF = (5.007883101013148, 0.003450517505203951,
+               -5.350561845008301e-08, -1.074024144669105e-09,
+               1.6490962015029442, -0.5550533538284068,
+               -0.0015136220956506788, 6.726083603733643e-07,
+               -0.01062975296484001, -1.8505676528363376e-06,
+               1.1442752460598282e-05, -0.002262849729260199,
+               -1.5958487089281692e-09, 0.0015542330963586107)
+_CF_PC_COEF = (5.701626621482552, -0.0073214380294048045,
+               2.2394905038568905e-05, -1.4116473210398495e-08,
+               9.73621911814537, -3.3041596315868413,
+               -0.00870625333062654, 3.7745792200831124e-06,
+               -0.055143811415915074, -1.7498645134846417e-05,
+               4.5674217570408565e-05, -0.011989311917111075,
+               4.171268477379032e-09, 0.008258835869442238)
+
+
+def _cf_ln_poly(tb_r, sg, mw, c):
+    return (c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
+            + c[4]*sg + c[5]*sg**2 + c[6]*tb_r*sg + c[7]*tb_r**2*sg
+            + c[8]*mw + c[9]*mw**2 + c[10]*tb_r*mw + c[11]*sg*mw
+            + c[12]*tb_r**2*mw + c[13]*sg**2*mw)
+
+
+# PRO/II SIMSCI/TWU acentric factor (generalized Frost-Kalkwarf-Thodos vapor
+# pressure correlation), back-solved at the NBP boundary condition — same
+# omega companion comp_constants.py pairs with the curve fit above.
+_FK_A = (10.2005, -10.6317, -5.58058, 2.09167, -2.09167, -1.70214, 0.4312)
+
+
+def _fk_omega(tb_r, tc_r, pc_psia):
+    if tc_r <= tb_r or pc_psia <= 0:
+        return None
+    a7 = _FK_A[6]
+    tr_b, pr_b = tb_r / tc_r, 14.696 / pc_psia
+    f0_b = _FK_A[0] + _FK_A[1] / tr_b + _FK_A[2] * math.log(tr_b)
+    f1_b = _FK_A[3] + _FK_A[4] / tr_b + _FK_A[5] * math.log(tr_b)
+    if f1_b == 0:
+        return None
+    omega_cap = (math.log(pr_b) - a7 * pr_b / tr_b ** 2 - f0_b) / f1_b
+
+    tr = 0.7
+    f0 = _FK_A[0] + _FK_A[1] / tr + _FK_A[2] * math.log(tr)
+    f1 = _FK_A[3] + _FK_A[4] / tr + _FK_A[5] * math.log(tr)
+    rhs = f0 + omega_cap * f1
+    pr = math.exp(rhs)
+    for _ in range(50):
+        g = math.log(pr) - a7 * pr / tr ** 2 - rhs
+        dg = 1.0 / pr - a7 / tr ** 2
+        step = g / dg
+        pr -= step
+        if abs(step) < 1e-12:
+            break
+    if pr <= 0:
+        return None
+    return -math.log10(pr) - 1.0
+
+
+def _decode_pf_pseudo(name_upper: str, mw: float | None = None) -> dict | None:
     """Petroleum-fraction pseudo-component names emitted by the source PRO/II
     model encode their own normal boiling point and API gravity directly,
     e.g. 'PF736A30D_6' = NBP 736°F, API 30 (the trailing '_<n>' is just a
     cut-set index and varies by stream/column, which is why most of these
     don't have an exact-name match in the COMP_CONSTANTS sheet — that sheet
-    only enumerates one arbitrarily-chosen cut set per NBP/API pair).  Since
-    the Lee-Kesler/Edmister correlation underlying COMP_CONSTANTS only needs
-    NBP and SG (API), decode them straight from the name instead of relying
-    on an exact lookup match."""
+    only enumerates one arbitrarily-chosen cut set per NBP/API pair). Decode
+    NBP/SG straight from the name instead of relying on an exact lookup match.
+
+    When the caller has a per-component MW (from the stream's mass/mole flow
+    ratio) and the decoded Watson K falls inside the curve fit's verified
+    range, Tc/Pc come from the direct Tb/SG/MW curve fit above. Otherwise —
+    MW unavailable, or K outside 6.76-32.42 — falls back to the Lee-Kesler
+    (1975) Tc/Pc + Edmister (1958) omega correlation, which only needs
+    NBP/SG and has no fitted-range restriction."""
     m = _PF_NAME_RE.match(name_upper)
     if not m:
         return None
@@ -7215,10 +8232,20 @@ def _decode_pf_pseudo(name_upper: str) -> dict | None:
     tb_r = nbp_f + 459.67
     if tb_r <= 0 or sg <= 0:
         return None
+
+    if mw:
+        k_w = tb_r ** (1 / 3) / sg
+        if _CF_K_MIN <= k_w <= _CF_K_MAX:
+            tc_r = math.exp(_cf_ln_poly(tb_r, sg, mw, _CF_TC_COEF))
+            pc_psia = math.exp(_cf_ln_poly(tb_r, sg, mw, _CF_PC_COEF))
+            omega = _fk_omega(tb_r, tc_r, pc_psia)
+            return {"tc_f": tc_r - 459.67, "pc_psia": pc_psia, "omega": omega}
+
     # Lee-Kesler (1975) Tc/Pc + Edmister (1958) omega — same correlation
-    # comp_constants.py uses for pseudo-fractions, inlined here so this
-    # decode path has no dependency on pandas (comp_constants imports it
-    # for spreadsheet I/O, which isn't needed for the bare correlation).
+    # comp_constants.py falls back to (via raw Twu) outside the curve fit's
+    # verified range, inlined here so this decode path has no dependency on
+    # pandas (comp_constants imports it for spreadsheet I/O, which isn't
+    # needed for the bare correlation).
     tc_r = (341.7 + 811.1 * sg
             + (0.4244 + 0.1174 * sg) * tb_r
             + (0.4669 - 3.2623 * sg) * 1e5 / tb_r)
@@ -7311,8 +8338,9 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         mw.append(mwi)
         # criticals — real PRO/II library values take priority for named
         # (non-pseudo) components; the PF<nbp>A<api>D cut-set pseudos keep
-        # the predicted Lee-Kesler/Edmister path (no exact library match is
-        # meaningful for those — see _decode_pf_pseudo's docstring).
+        # the predicted direct-curve-fit/Lee-Kesler-Edmister path (no exact
+        # library match is meaningful for those — see _decode_pf_pseudo's
+        # docstring).
         n_up = str(n).strip().upper()
         cm = None
         if not _PF_NAME_RE.match(n_up):
@@ -7320,7 +8348,7 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         if cm is None:
             cm = (const_map or {}).get(n_up)
         if cm is None or cm.get("tc_f") is None:
-            cm = _decode_pf_pseudo(n_up)
+            cm = _decode_pf_pseudo(n_up, mwi)
         if cm and cm.get("tc_f") is not None:
             tc_r.append(cm["tc_f"] + F_TO_R)
             omega.append(cm.get("omega"))
@@ -7486,20 +8514,7 @@ def _from_td_dump(hmb_path, stream, sp) -> FlashFeed | None:
         wb.close()
         return None
 
-    buckets: dict[str, dict[str, float]] = {}
-    cur = None
-    for row in target.iter_rows(min_row=2, values_only=True):
-        if not row or len(row) < 2 or row[1] is None:
-            continue
-        label = str(row[1]).strip()
-        if re.match(r"^\d+\.\s", label):          # section header
-            cur = _section_key(label.upper())
-            continue
-        if cur is None or label.lower() == "component":
-            continue
-        val = row[3] if len(row) > 3 else None     # column D = Value
-        if isinstance(val, (int, float)):
-            buckets.setdefault(cur, {})[label] = float(val)
+    buckets = _composition_buckets_from_sheet(target)
     wb.close()
     if "z" not in buckets:
         return None
@@ -7509,9 +8524,32 @@ def _from_td_dump(hmb_path, stream, sp) -> FlashFeed | None:
                        y_d=buckets.get("y", {}), const_map=const_map)
 
 
+def _from_live_source(hmb_path, stream, case, sp, kind) -> FlashFeed | None:
+    """Build a FlashFeed from a live HYSYS/PRO-II COM connector's already-
+    fetched composition.  Re-invokes get_stream() rather than threading the
+    HMBStream through from load_stream_props() — cheap, since each
+    connector caches its session/parse internally, and keeps this function
+    symmetric with _from_casesheet/_from_td_dump (hmb_path+stream+case in,
+    FlashFeed out)."""
+    reader = HYSYS_COM if kind == "hysys" else PROII_COM
+    if reader is None:
+        return None
+    hs = reader.get_stream(stream, hmb_path, case)
+    if hs is None or not hs.composition:
+        return None
+    const_map = _read_comp_constants(hmb_path)
+    x_d = getattr(hs, "composition_x", None) or {}
+    y_d = getattr(hs, "composition_y", None) or None
+    return _build_feed(hs.composition, x_d, {}, {}, sp, y_d=y_d,
+                       const_map=const_map)
+
+
 def read_feed(hmb_path, stream, case, sp, is_casesheet: bool) -> FlashFeed | None:
     """Build a FlashFeed for `stream` from whichever HMB layout is supplied."""
     try:
+        kind = _source_kind(hmb_path)
+        if kind in ("hysys", "proii_com"):
+            return _from_live_source(hmb_path, stream, case, sp, kind)
         if is_casesheet:
             return _from_casesheet(hmb_path, stream, case, sp)
         return _from_td_dump(hmb_path, stream, sp)
@@ -7591,12 +8629,12 @@ AMBER, GREEN = "FFF2CC", "E2EFDA"
 
 
 
-def _cell(ws, r, c, v=None, bg=None, fg=DGRAY, sz=9, bold=False,
+def _cell(ws, r, c, v=None, bg=None, fg=DGRAY, sz=9, bold=False, italic=False,
           ha="left", wrap=False, border=True):
     cl = ws.cell(r, c)
     if v is not None:
         cl.value = v
-    cl.font = Font(name="Calibri", size=sz, bold=bold, color=fg)
+    cl.font = Font(name="Calibri", size=sz, bold=bold, italic=italic, color=fg)
     if bg:
         cl.fill = _fill(bg)
     cl.alignment = Alignment(horizontal=ha, vertical="center", wrap_text=wrap)
@@ -7833,17 +8871,25 @@ MAPS = [
 # ════════════════════════════════════════════════════════════════════════
 #  3.  PARAMETER TABLE SHEET  ("Froude number and corresponding data")
 # ════════════════════════════════════════════════════════════════════════
+#  (caption, key, fixed unit-string or None).  "ID"/"P" (keys "id_in"/"p")
+#  route through the per-project units layer instead — see _TABLE_DYN_QTY —
+#  so their unit is resolved at render time via _u.hdr/_u.label, not fixed
+#  here; everything else is a fixed SI-basis Taitel-Dukler/flow-pattern
+#  correlation parameter, not user-selectable.
+_TABLE_DYN_QTY = {"id_in": "Lin", "p": "P"}
 _TABLE_COLS = [
-    ("Seq", "seq"), ("Comp ID", "comp_id"), ("Fitting", "fitting"),
-    ("ID (in)", "id_in"), ("P (psia)", "p"),
-    ("Vsg (m/s)", "Vsg"), ("Vsl (m/s)", "Vsl"),
-    ("Fr Gas", "FrG"), ("Fr Liq", "FrL"), ("Liquid load Fi", "Fi"),
-    ("X (L-M)", "Xtt"), ("1/X", "invX"), ("K (T-D)", "K"), ("T (T-D)", "T"),
-    ("Gt (kg/s·m²)", "Gt"), ("Vap frac y", "y"),
-    ("R (homog)", "R"), ("C gt", "Cgt"),
-    ("ρl·vl²", "rlvl2"), ("ρg·vg²", "rgvg2"),
-    ("λb", "lb"), ("Fb", "Fb"), ("Qg/λb", "Qg_lb"), ("Ql·Fb", "Ql_Fb"),
-    ("(Qg/Ql)^0.5", "QgQl"), ("Frtp/√L", "Frtp"),
+    ("Seq", "seq", None), ("Comp ID", "comp_id", None), ("Fitting", "fitting", None),
+    ("ID", "id_in", None), ("P", "p", None),
+    ("Vsg", "Vsg", "m/s"), ("Vsl", "Vsl", "m/s"),
+    ("Fr Gas", "FrG", None), ("Fr Liq", "FrL", None), ("Liquid load Fi", "Fi", None),
+    ("X (L-M)", "Xtt", None), ("1/X", "invX", None), ("K (T-D)", "K", None),
+    ("T (T-D)", "T", None),
+    ("Gt", "Gt", "kg/s·m²"), ("Vap frac y", "y", None),
+    ("R (homog)", "R", None), ("C gt", "Cgt", None),
+    ("ρl·vl²", "rlvl2", None), ("ρg·vg²", "rgvg2", None),
+    ("λb", "lb", None), ("Fb", "Fb", None), ("Qg/λb", "Qg_lb", None),
+    ("Ql·Fb", "Ql_Fb", None),
+    ("(Qg/Ql)^0.5", "QgQl", None), ("Frtp/√L", "Frtp", None),
 ]
 
 
@@ -7860,32 +8906,30 @@ def _fmt(v):
     return v
 
 
-def build_param_table(wb, rows, line_no, stream_name, ctrl_seq):
+def build_param_table(wb, rows, line_no, stream_name, ctrl_seq, meta=None):
     ws = wb.create_sheet("Flow_Pattern_Data")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = STEEL
     ncol = len(_TABLE_COLS)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-    _cell(ws, 1, 1,
-          f"FLOW-PATTERN PARAMETERS  |  Line {line_no} <-> Stream {stream_name}"
-          "   |   per-station, local pressure  (replica of Slug-flow Calculation)",
-          bg=NAVY, fg=WHITE, sz=11, bold=True)
-    ws.row_dimensions[1].height = 22
+    title = (f"FLOW-PATTERN PARAMETERS  |  Line {line_no} <-> Stream {stream_name}"
+             "   |   per-station, local pressure  (replica of Slug-flow Calculation)")
+    r0 = _write_doc_header_block(ws, meta, ncol, title=title)
     _u = _U
-    for ci, (h, _) in enumerate(_TABLE_COLS, 1):
-        if _u is not None:
-            if h == "ID (in)":
-                h = _u.hdr("ID", "Lin")
-            elif h == "P (psia)":
-                h = _u.hdr("P", "P")
-        _cell(ws, 2, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
-    ws.row_dimensions[2].height = 30
-    ws.freeze_panes = "C3"
+    for ci, (h, key, _unit) in enumerate(_TABLE_COLS, 1):
+        _cell(ws, r0, ci, h, bg=NAVY, fg=WHITE, sz=9, bold=True, ha="center", wrap=True)
+        dyn_qty = _TABLE_DYN_QTY.get(key)
+        if dyn_qty and _u is not None:
+            ulab = _u.label(dyn_qty)
+        else:
+            ulab = _unit or ""
+        _cell(ws, r0 + 1, ci, ulab, bg=LGRAY, fg=DGRAY, sz=8, italic=True, ha="center")
+    ws.row_dimensions[r0].height = 30
+    ws.freeze_panes = f"C{r0 + 2}"
     for i, (st, pr) in enumerate(rows):
-        r = i + 3
+        r = i + r0 + 2
         is_ctrl = (st.seq == ctrl_seq)
         bg = AMBER if is_ctrl else (LGRAY if i % 2 else WHITE)
-        for ci, (_, key) in enumerate(_TABLE_COLS, 1):
+        for ci, (_, key, _unit) in enumerate(_TABLE_COLS, 1):
             if key == "id_in":
                 v = getattr(st, key, None)
                 if _u is not None:
@@ -7899,7 +8943,7 @@ def build_param_table(wb, rows, line_no, stream_name, ctrl_seq):
                 v = pr.get(key)
             _cell(ws, r, ci, _fmt(v), bg=bg, sz=9,
                   bold=is_ctrl, ha="right" if ci > 3 else "left")
-    for ci, (h, _) in enumerate(_TABLE_COLS, 1):
+    for ci, (h, key, _unit) in enumerate(_TABLE_COLS, 1):
         ws.column_dimensions[get_column_letter(ci)].width = max(9, min(15, len(h) + 1))
     return ws
 
@@ -7977,7 +9021,7 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
     return chart, col
 
 
-def build_map_sheets(wb, rows, ctrl_seq):
+def build_map_sheets(wb, rows, ctrl_seq, meta=None):
     """rows = [(station, FPParams)]; build one sheet per map-group with charts."""
     # group maps by output sheet (T&D has three charts on one sheet)
     by_sheet: dict[str, list[MapDef]] = {}
@@ -7991,13 +9035,14 @@ def build_map_sheets(wb, rows, ctrl_seq):
         ws = wb.create_sheet(sheet[:31])
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = GRNHDR
+        start_row = _write_doc_header_block(ws, meta, 6, title=sheet)
         data_col = 30                       # data lives far to the right
         for j, mp in enumerate(maps):
             op_points = [(pr.get(mp.xkey), pr.get(mp.ykey)) for _, pr in rows]
             ctrl_pr = next((pr for st, pr in rows if st.seq == ctrl_seq), None)
             ctrl_point = (ctrl_pr.get(mp.xkey), ctrl_pr.get(mp.ykey)) if ctrl_pr else None
             chart, data_col = _add_scatter(ws, mp, data_col, op_points, ctrl_point)
-            anchor = f"A{2 + j * 23}"
+            anchor = f"A{start_row + j * 23}"
             ws.add_chart(chart, anchor)
     return list(by_sheet)
 
@@ -8005,7 +9050,8 @@ def build_map_sheets(wb, rows, ctrl_seq):
 # ════════════════════════════════════════════════════════════════════════
 #  5.  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════════
-def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_fn):
+def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_fn,
+                             meta=None):
     """Add the parameter table + all flow-pattern map sheets to workbook wb."""
     rows = [(st, params_from_station(sp, st, gas_density_fn)) for st in stations]
     if not rows:
@@ -8013,9 +9059,1100 @@ def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_
     # controlling station = max ρg·vg² (gas momentum flux), like the FIV sheet
     ctrl_seq = max(
         rows, key=lambda rp: (rp[1].rgvg2 or 0.0))[0].seq
-    build_param_table(wb, rows, line_no, stream_name, ctrl_seq)
-    sheets = build_map_sheets(wb, rows, ctrl_seq)
+    build_param_table(wb, rows, line_no, stream_name, ctrl_seq, meta=meta)
+    sheets = build_map_sheets(wb, rows, ctrl_seq, meta=meta)
     return ["Flow_Pattern_Data"] + sheets
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ║  SECTION: CONTROL VALVE SIZING & DATASHEET  (IEC 60534)
+# ══════════════════════════════════════════════════════════════════════════
+# Sizing (IEC 60534-2-1 liquid/gas/two-phase), cavitation (ISA RP75.23),
+# seat leakage (FCI 70-2 / IEC 60534-4) and % travel are ported from the
+# companion CV/cv.py tool so the two stay numerically identical.  Extended
+# here with (a) IEC 60534-8-3 (aerodynamic) and 60534-8-4 (hydrodynamic)
+# sound-pressure-level (dB(A)) prediction, (b) a generic Rated-Cv selection
+# library, and (c) a Min/Norm/Max vendor-style datasheet — all driven
+# directly from the control-valve stations of the hydraulic march.
+#
+# Two operating modes, auto-detected per valve:
+#   * Adequacy check   — a Rated Cv is supplied (existing valve): the tool
+#                        reports required Cv / % travel / cavitation / noise
+#                        and PASS/FAIL verdicts against that valve; on a noise
+#                        exceedance it flags and recommends (never silently
+#                        re-sizes the user's real valve).
+#   * Sizing/selection — no Rated Cv supplied (new valve): the tool selects a
+#                        Rated Cv from the generic library so that required Cv,
+#                        the travel window AND the dB(A) limit are all met
+#                        where physically possible.
+#
+# US-customary Cv basis (gpm·√SG/√psi liquid; lb/h, psia, lb/ft³ gas) per
+# datasheet convention, independent of the workbook's unit system.
+
+_CV_PSI_TO_PA  = 6894.757293
+_CV_R_KMOL     = 8314.462618          # J/(kmol*K)  (module R_UNIV is per-mol)
+_CV_KGS_TO_LBH = 7936.6414            # kg/s -> lb/h
+_CV_M3S_TO_GPM = 15850.323            # m3/s -> US gpm
+_CV_ATM_PA     = 101_325.0
+_CV_PREF_PA    = 2e-5                 # reference sound pressure (20 uPa)
+
+# Class II/III/IV seat leakage as % of rated Cv (FCI 70-2 / IEC 60534-4)
+_CV_CLASS_PCT_CV = {"II": 0.5, "III": 0.1, "IV": 0.01}
+# Class VI — max bubbles/min of air at standard test dP, by port dia (in)
+_CV_CLASS_VI_TABLE = [
+    (1.0, 0.15), (1.5, 0.30), (2.0, 0.45), (2.5, 0.60),
+    (3.0, 0.90), (4.0, 1.70), (6.0, 4.00), (8.0, 6.75),
+]
+
+# Typical body-style factors (IEC 60534-2-1 Table 2 "typical values"):
+#   fl  = liquid pressure-recovery factor FL (flow-to-open, mid-travel)
+#   xt  = terminal pressure-drop ratio xT (gas choke)
+#   fd  = valve-style modifier Fd (jet diameter, for -8-3/-8-4 noise)
+#   cd  = generic full-open rated-Cv coefficient  Cv100 ~= cd * NPS**2
+# These are indicative; a real selection confirms them against vendor data.
+_CV_BODY = {
+    "GLOBE":     dict(label="Globe",              fl=0.90, xt=0.72, fd=0.46, cd=16.0),
+    "ANGLE":     dict(label="Angle",              fl=0.85, xt=0.72, fd=0.44, cd=16.0),
+    "BALL":      dict(label="Ball (segmented)",   fl=0.66, xt=0.30, fd=0.98, cd=32.0),
+    "BUTTERFLY": dict(label="Butterfly (60 deg)", fl=0.68, xt=0.38, fd=0.57, cd=28.0),
+    "ECCENTRIC": dict(label="Eccentric rotary",   fl=0.85, xt=0.61, fd=0.42, cd=20.0),
+}
+_CV_BODY_ALIASES = {
+    "GLOBE": "GLOBE", "ANGLE": "ANGLE", "BALL": "BALL",
+    "SEGMENTED BALL": "BALL", "V-BALL": "BALL", "VBALL": "BALL",
+    "BUTTERFLY": "BUTTERFLY", "BFLY": "BUTTERFLY",
+    "ECCENTRIC": "ECCENTRIC", "ECCENTRIC ROTARY": "ECCENTRIC",
+    "ROTARY": "ECCENTRIC", "CAMFLEX": "ECCENTRIC",
+}
+# Standard reduced-trim rated-Cv ladder (indicative ISA-style steps).  The
+# selection picks the smallest rung that satisfies capacity/travel/noise,
+# capped by the body-style full-open maximum for the valve NPS.
+_CV_RATED_LADDER = [
+    0.5, 0.8, 1.2, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0,
+    22.0, 28.0, 36.0, 46.0, 60.0, 75.0, 95.0, 120.0, 150.0, 195.0, 250.0,
+    320.0, 400.0, 520.0, 650.0, 850.0, 1100.0,
+]
+
+_CV_TRIM_CHARS = {
+    "LINEAR": "Linear", "EQUAL%": "Equal Percentage",
+    "EQUAL PERCENTAGE": "Equal Percentage", "EQ%": "Equal Percentage",
+    "EQUALPCT": "Equal Percentage", "QUICK": "Quick Opening",
+    "QUICK-OPEN": "Quick Opening", "QUICK OPENING": "Quick Opening",
+    "QO": "Quick Opening",
+}
+
+
+def _cv_body_key(name: str | None) -> str:
+    k = (name or "GLOBE").strip().upper()
+    return _CV_BODY_ALIASES.get(k, "GLOBE")
+
+
+def _cv_trim_name(name: str | None) -> str:
+    return _CV_TRIM_CHARS.get((name or "").strip().upper(), "Linear")
+
+
+# ── Core IEC 60534-2-1 sizing (ported verbatim from CV/cv.py) ──────────────
+def _cv_ff_factor(pv_pa, pc_pa) -> float:
+    """Liquid critical-pressure-ratio factor FF = 0.96 − 0.28·√(Pv/Pc)."""
+    if not pv_pa or not pc_pa or pc_pa <= 0:
+        return 0.96
+    return max(0.0, min(1.0, 0.96 - 0.28 * math.sqrt(max(0.0, pv_pa) / pc_pa)))
+
+
+def _cv_sigma_index(p1_pa, p2_pa, pv_pa):
+    """Service cavitation index σ = (P1 − Pv)/(P1 − P2)  (ISA RP75.23)."""
+    dp = p1_pa - p2_pa
+    if dp <= 0:
+        return None
+    return (p1_pa - (pv_pa or 0.0)) / dp
+
+
+def _cv_liquid_dp_choked(fl, p1_pa, pv_pa, ff) -> float:
+    """Choked ΔP for liquids: FL²·(P1 − FF·Pv)."""
+    fl = fl or 0.9
+    return (fl ** 2) * (p1_pa - ff * (pv_pa or 0.0))
+
+
+def _cv_required_liquid(w_kgs, rho, dp_eff_pa) -> float:
+    """Required Cv (US basis) — liquid, IEC 60534-2-1: Cv = Q[gpm]·√(SG/ΔP[psi])."""
+    if w_kgs <= 0 or rho <= 0 or dp_eff_pa <= 0:
+        return 0.0
+    q_gpm = (w_kgs / rho) * _CV_M3S_TO_GPM
+    sg = rho / 999.0
+    dp_psi = dp_eff_pa / _CV_PSI_TO_PA
+    return q_gpm * math.sqrt(sg / dp_psi)
+
+
+def _cv_gas_xy(p1_pa, p2_pa, k, xt):
+    """Gas ratio x, choked limit xT_eff = Fk·xT, effective x, expansion Y,
+    and choked flag — IEC 60534-2-1 §5.5/5.6."""
+    if p1_pa <= 0:
+        return 0.0, 0.0, 0.0, 1.0, False
+    fk = max(0.1, (k or 1.4) / 1.4)
+    x = max(0.0, (p1_pa - p2_pa) / p1_pa)
+    x_choked = max(1e-6, fk * (xt or 0.7))
+    x_eff = min(x, x_choked)
+    y = max(2.0 / 3.0, 1.0 - x_eff / (3.0 * x_choked))
+    return x, x_choked, x_eff, y, (x >= x_choked)
+
+
+def _cv_required_gas(w_kgs, p1_pa, rho1, x_eff, y) -> float:
+    """Required Cv (US basis) — gas/vapor, mass-flow form:
+    Cv = W[lb/h] / (63.3·Y·√(x_eff·P1[psia]·ρ1[lb/ft³]))."""
+    if w_kgs <= 0 or p1_pa <= 0 or rho1 <= 0 or x_eff <= 0 or y <= 0:
+        return 0.0
+    w_lbh = w_kgs * _CV_KGS_TO_LBH
+    p1_psia = p1_pa / _CV_PSI_TO_PA
+    rho1_lbft3 = rho1 / 16.018463
+    return w_lbh / (63.3 * y * math.sqrt(x_eff * p1_psia * rho1_lbft3))
+
+
+def _cv_required_two_phase(w_kgs, x_quality, rho_l, rho_v, dp_eff_pa):
+    """Required Cv — flashing/two-phase, homogeneous-mixture estimate (mixes
+    liquid+vapor densities at the mass quality, then the liquid equation).
+    For severe flashing/cavitating service confirm with a vendor method."""
+    if w_kgs <= 0 or dp_eff_pa <= 0:
+        return 0.0, None
+    rho_l = rho_l or 999.0
+    rho_v = rho_v or 1.2
+    x_quality = max(0.0, min(1.0, x_quality or 0.0))
+    rho_mix = 1.0 / (x_quality / rho_v + (1.0 - x_quality) / rho_l)
+    return _cv_required_liquid(w_kgs, rho_mix, dp_eff_pa), rho_mix
+
+
+def _cv_travel_pct(cv_req, cv100, char, rangeability=50.0):
+    """Estimated % travel from required Cv, rated Cv100 & inherent trim
+    characteristic (Linear / Equal Percentage / Quick Opening)."""
+    if not cv100 or cv100 <= 0 or cv_req is None:
+        return None
+    ratio = cv_req / cv100
+    c = (char or "Linear").strip().lower()
+    if c.startswith("equal"):
+        if ratio <= 0:
+            return 0.0
+        r = max(rangeability or 50.0, 2.0)
+        travel = 100.0 * (1.0 + math.log(ratio) / math.log(r))
+    elif c.startswith("quick"):
+        travel = 100.0 * math.sqrt(max(0.0, ratio))
+    else:
+        travel = 100.0 * ratio
+    return max(0.0, min(100.0, travel))
+
+
+def _cv_beta_ratio(bore_m, pipe_m):
+    if not bore_m or not pipe_m or pipe_m <= 0:
+        return None
+    return bore_m / pipe_m
+
+
+def _cv_seat_leakage(klass, cv100, dp_pa, seat_dia_mm) -> dict:
+    """Seat leakage estimate by class (FCI 70-2 / IEC 60534-4)."""
+    k = (klass or "IV").strip().upper()
+    if k in _CV_CLASS_PCT_CV:
+        pct = _CV_CLASS_PCT_CV[k]
+        leak_cv = cv100 * pct / 100.0 if cv100 else None
+        return {"class": k, "pct_cv": pct, "leak_cv": leak_cv,
+                "desc": f"Class {k}: <= {pct}% of rated Cv (FCI 70-2 / IEC 60534-4)"}
+    if k == "V":
+        dp_bar = max(0.0, dp_pa) / 1e5
+        leak = 0.18 * (seat_dia_mm or 0.0) * math.sqrt(dp_bar)
+        return {"class": "V", "leak_ml_min": leak,
+                "desc": "Class V: indicative liquid leakage (order-of-magnitude) "
+                        "- confirm against FCI 70-2 / certified test data"}
+    if k == "VI":
+        seat_in = (seat_dia_mm or 0.0) / 25.4
+        bubbles = _CV_CLASS_VI_TABLE[-1][1]
+        for dia, b in _CV_CLASS_VI_TABLE:
+            if seat_in <= dia:
+                bubbles = b
+                break
+        return {"class": "VI", "bubbles_per_min": bubbles,
+                "desc": "Class VI: max bubbles/min of air by port size "
+                        "(FCI 70-2 Table 2 - indicative)"}
+    return {"class": k, "desc": "Unrecognized leakage class - see IEC 60534-4"}
+
+
+def _cv_sonic_velocity_gas(k, z, t_k, mw):
+    if not t_k or not mw:
+        return None
+    return math.sqrt((k or 1.4) * (z or 1.0) * _CV_R_KMOL * t_k / mw)
+
+
+def _cv_piping_factor(cv, d_in, d1_in, d2_in) -> float:
+    """Piping-geometry factor FP for inlet/outlet reducers (IEC 60534-2-1 /
+    ISA 75.01.01, N2=890 with d in inches and Cv in US units):
+
+        FP = [ 1 + (ΣK / 890)·(Cv/d²)² ]^(-1/2)
+        ΣK = K1 + K2 + KB1 − KB2,
+        K1 = 0.5(1−(d/D1)²)²,  K2 = 1.0(1−(d/D2)²)²   (reducer resistances)
+        KB1 = 1−(d/D1)⁴,       KB2 = 1−(d/D2)⁴         (Bernoulli terms)
+
+    d = valve port size, D1 = inlet line ID, D2 = outlet line ID (all inches).
+    Returns 1.0 when both lines equal the valve size (no reducers)."""
+    if not cv or cv <= 0 or not d_in or not d1_in or not d2_in:
+        return 1.0
+    if abs(d1_in - d_in) < 1e-6 and abs(d2_in - d_in) < 1e-6:
+        return 1.0
+    r1 = (d_in / d1_in) ** 2
+    r2 = (d_in / d2_in) ** 2
+    k1 = 0.5 * (1.0 - r1) ** 2
+    k2 = 1.0 * (1.0 - r2) ** 2
+    kb1 = 1.0 - r1 ** 2
+    kb2 = 1.0 - r2 ** 2
+    sumk = k1 + k2 + kb1 - kb2
+    fp = 1.0 / math.sqrt(1.0 + (sumk / 890.0) * (cv / (d_in ** 2)) ** 2)
+    return max(0.3, min(1.0, fp))
+
+
+# ── IEC 60534-8-3 / -8-4  external dB(A) noise prediction ──────────────────
+# Engineering implementation of the standards' method chain.  Aerodynamic
+# (-8-3): mechanical stream power -> acoustic power via a regime-dependent
+# acoustical efficiency (η) -> internal sound pressure at the pipe wall ->
+# external SPL at 1 m through the pipe-wall transmission loss (TL).
+# Hydrodynamic (-8-4): turbulent baseline SPL from valve ΔP and style, with a
+# cavitation increment once the service σ falls below the incipient value.
+# Coefficient tables are simplified relative to the full standards; results
+# are screening-grade dB(A) for adequacy against a project limit (e.g. 85
+# dB(A)), not a substitute for a vendor's certified acoustic prediction.
+_CV_SPEED_SOUND_PIPE = 5000.0    # m/s, longitudinal wave speed in steel wall
+_CV_RHO_STEEL        = 7800.0    # kg/m³
+
+def _cv_pipe_wall_thk_m(pipe_id_m):
+    """Approximate carbon-steel (Sch-40) wall thickness from ID, m."""
+    if not pipe_id_m or pipe_id_m <= 0:
+        return 0.005
+    d_in = pipe_id_m / 0.0254
+    # Sch-40 wall grows ~ with NPS; bounded to a sane 3–15 mm band.
+    return max(0.003, min(0.015, 0.0033 + 0.0015 * d_in))
+
+
+def _cv_pipe_tl_db(pipe_id_m, fp_hz, c2):
+    """Pipe-wall transmission loss TL [dB, negative] — simplified IEC 60534-8-3
+    Annex form: coincidence-limited mass-law loss, referenced to the ring
+    frequency fr of the pipe.  Screening-grade."""
+    di = max(0.01, pipe_id_m)
+    tp = _cv_pipe_wall_thk_m(pipe_id_m)
+    fr = _CV_SPEED_SOUND_PIPE / (math.pi * di)                 # ring frequency
+    fo = 0.25 * fr                                             # first coincidence
+    # mass-law surface density term, normalised
+    gy = (_CV_RHO_STEEL * tp) * fp_hz / ((c2 or 340.0) * 1.2 * 101325.0 / 1e5)
+    tl = -(10.0 + 10.0 * math.log10(max(1e-6, gy))
+           - 10.0 * math.log10(1.0 + (fo / max(1.0, fp_hz)) ** 1.5))
+    return max(-75.0, min(-25.0, tl))                          # bounded band
+
+
+def _cv_noise_aero(w_kgs, p1_pa, p2_pa, t1_k, mw, z, k, xt, fl, fd,
+                    pipe_id_m, rho2, c2):
+    """IEC 60534-8-3-style external A-weighted SPL at 1 m for a gas/vapor
+    valve.  Returns (Lpe_dBA, detail_dict).
+
+    Chain: mechanical stream power Wm=½·ṁ·Uvc² → acoustic power Wa=η·Wm →
+    sound-power level Lw → internal pipe-wall SPL Lpi (IEC 8-3 relation, pipe
+    ID in mm) → external SPL at 1 m through the wall transmission loss TL."""
+    if (not w_kgs or w_kgs <= 0 or not p1_pa or p1_pa <= 0 or not pipe_id_m
+            or pipe_id_m <= 0 or not rho2 or rho2 <= 0):
+        return None, {}
+    k = max(1.001, k or 1.4)
+    x = max(1e-6, (p1_pa - p2_pa) / p1_pa)
+    fk = k / 1.4
+    x_choked = max(1e-6, fk * (xt or 0.7))
+    c1 = c2 or _cv_sonic_velocity_gas(k, z, t1_k, mw) or 340.0
+    if x < x_choked:                                   # subsonic
+        uvc = min(c1, c1 * math.sqrt(max(0.0, x / x_choked)))
+        regime = "subsonic"
+    else:                                              # choked
+        uvc = c1
+        regime = "choked"
+    wm = 0.5 * w_kgs * uvc ** 2                         # mechanical power, W
+    mach_vc = uvc / c1 if c1 else 0.0
+    # acoustical efficiency η (IEC 8-3 regime form): ~1e-4·M³ subsonic,
+    # saturating near ~1e-3 when choked; Fd nudges the jet efficiency.
+    eta = 1.0e-4 * (mach_vc ** 3)
+    if regime == "choked":
+        eta = max(eta, 3.0e-4 * (fd or 0.5) / 0.5)
+    eta = min(eta, 3.0e-3)
+    wa = max(1e-30, eta * wm)                           # acoustic power, W
+    lw = 10.0 * math.log10(wa / 1e-12)                 # sound-power level, dB
+    di_mm = pipe_id_m * 1000.0
+    # internal pipe SPL — IEC 60534-8-3 relation (di in mm, Wa in W):
+    #   Lpi = 10·log10( 3.2e9 · Wa · ρ2 · c2 / di² )   [dB re 2e-5 Pa]
+    lpi = 10.0 * math.log10(
+        max(1e-30, 3.2e9 * wa * rho2 * (c2 or c1) / (di_mm ** 2)))
+    fp = max(1.0, 0.2 * uvc / max(1e-3, pipe_id_m))    # peak frequency, Hz
+    tl = _cv_pipe_tl_db(pipe_id_m, fp, c2 or c1)
+    lpe = lpi + tl - 1.0                               # external at 1 m, dB(A)
+    lpe = max(20.0, lpe)
+    return lpe, {"regime": regime, "uvc": uvc, "mach_vc": mach_vc,
+                 "eta": eta, "wa": wa, "lw": lw, "lpi": lpi, "tl": tl, "fp": fp}
+
+
+def _cv_noise_hydro(w_kgs, p1_pa, p2_pa, pv_pa, fl, rho_l, pipe_id_m, sigma):
+    """IEC 60534-8-4-style external A-weighted SPL at 1 m for liquid / flashing
+    service, with a cavitation increment once σ drops below the incipient
+    value.  Returns (Lpe_dBA, detail_dict).  Screening-grade."""
+    if (not w_kgs or w_kgs <= 0 or not p1_pa or not pipe_id_m
+            or pipe_id_m <= 0 or not rho_l or rho_l <= 0):
+        return None, {}
+    dp = max(1.0, p1_pa - p2_pa)
+    area = math.pi / 4.0 * pipe_id_m ** 2
+    u = (w_kgs / rho_l) / area                          # downstream velocity
+    # turbulent (non-cavitating) internal SPL baseline: grows with ΔP & U.
+    lpi = 85.0 + 10.0 * math.log10(dp / 1e5) + 18.0 * math.log10(max(0.3, u))
+    sigma_i = 1.0 / max(1e-6, (fl or 0.9) ** 2)         # incipient index proxy
+    cav = ""
+    if sigma is not None and sigma < sigma_i:
+        inc = min(25.0, 18.0 * math.log10(max(1.0, sigma_i / max(1e-6, sigma))))
+        lpi += inc
+        cav = f"cavitating (σ {sigma:.2f} < σi {sigma_i:.2f}); +{inc:.0f} dB"
+    fp = max(1.0, u / max(1e-3, pipe_id_m))
+    tl = _cv_pipe_tl_db(pipe_id_m, fp, 1400.0)          # c ~ water sound speed
+    lpe = max(20.0, lpi + tl)
+    return lpe, {"u": u, "sigma_i": sigma_i, "cav": cav, "tl": tl, "lpi": lpi}
+
+
+# ── Valve inputs, per-case sizing, rated-Cv selection, two-mode evaluation ──
+@dataclass
+class CvInputs:
+    """Normalised per-valve inputs for datasheet sizing (SI internally)."""
+    tag: str | None = None
+    service: str | None = None
+    line_no: str | None = None
+    fluid: str | None = None
+    temp_f: float | None = None
+    nps: float | None = None
+    body_key: str = "GLOBE"
+    char: str = "Equal Percentage"
+    rangeability: float = 50.0
+    leak_class: str = "IV"
+    action: str = "F"                      # F | P | T | L
+    design_dp_pa: float | None = None      # fixed design ΔP (P/L; T floor base)
+    exch_floor_pa: float | None = None     # AJ min-ΔP floor (P & T)
+    cv100: float | None = None             # None -> selection mode
+    design_open_pct: float = 80.0          # target max-flow % travel
+    noise_limit_dba: float = 85.0
+    min_mult: float = 0.35
+    max_mult: float = 1.20
+    bore_m: float | None = None
+    line_in_m: float | None = None
+    line_out_m: float | None = None
+    fl: float = 0.90
+    xt: float = 0.72
+    fd: float = 0.46
+    # normal-flow hydraulic state (from the march)
+    p_src_pa: float | None = None
+    p_dest_pa: float | None = None
+    p1_norm_pa: float | None = None
+    p2_norm_pa: float | None = None
+    w_norm_kgs: float | None = None
+    # fluid properties at the valve
+    phase: str | None = None
+    quality: float | None = None
+    rho_l: float | None = None
+    rho_v: float | None = None
+    mu_l_cp: float | None = None
+    mu_v_cp: float | None = None
+    mw: float | None = None
+    z: float | None = None
+    k: float | None = None
+    pv_pa: float | None = None
+    pc_pa: float | None = None
+    sg: float | None = None
+
+
+def _cv_regime2(phase, quality, rho_l, rho_v):
+    ph = (phase or "").strip().lower()
+    if "two" in ph or "mixed" in ph:
+        return "two-phase", (quality if quality is not None else 0.5)
+    if "liq" in ph:
+        if quality is not None and quality > 0.01:
+            return "two-phase", quality
+        return "liquid", 0.0
+    if "vap" in ph or "gas" in ph:
+        return "gas", 1.0
+    if rho_l and not rho_v:
+        return "liquid", 0.0
+    return "gas", (quality if quality is not None else 1.0)
+
+
+def _cv_size_state(state: dict, inp: "CvInputs", cv100):
+    """Full IEC 60534 sizing + noise for ONE measured flow case.
+
+    ``state`` carries the marched conditions & fluid properties at the valve
+    (P1, P2, W and phase split come straight from that flow scenario's full
+    hydraulic re-march — not an interpolation).  Returns a result dict that
+    also carries the per-case fluid properties for the datasheet."""
+    r = dict(state)                         # copy props through for display
+    p1, p2 = state.get("p1"), state.get("p2")
+    if not p1 or not p2 or p2 >= p1:
+        r["valid"] = False
+        return r
+    w = state.get("w") or 0.0
+    rho_l, rho_v = state.get("rho_l"), state.get("rho_v")
+    pv, pc = state.get("pv"), state.get("pc")
+    r.update(valid=True, p1=p1, p2=p2, dp=p1 - p2, w=w)
+    regime, x_q = _cv_regime2(state.get("phase"), state.get("quality"),
+                              rho_l, rho_v)
+    r["regime"] = regime
+    ff = _cv_ff_factor(pv, pc)
+    sigma = _cv_sigma_index(p1, p2, pv)
+    r["ff"], r["sigma"] = ff, sigma
+
+    if regime == "gas":
+        x, x_ch, x_eff, y, choked = _cv_gas_xy(p1, p2, state.get("k"), inp.xt)
+        cv_req = _cv_required_gas(w, p1, rho_v or 0.0, x_eff, y)
+        r.update(x=x, x_choked=x_ch, y=y, choked=choked)
+    else:
+        dp_choked = _cv_liquid_dp_choked(inp.fl, p1, pv, ff)
+        dp = p1 - p2
+        choked = dp_choked > 0 and dp >= dp_choked
+        dp_eff = min(dp, dp_choked) if dp_choked > 0 else dp
+        r.update(dp_choked=dp_choked, choked=choked, dp_eff=dp_eff)
+        if regime == "liquid":
+            cv_req = _cv_required_liquid(w, rho_l or 999.0, dp_eff)
+        else:
+            cv_req, _rm = _cv_required_two_phase(w, x_q, rho_l, rho_v, dp_eff)
+
+    # ── piping-geometry (reducer) factor FP: required installed Cv = Cv/FP ──
+    d_in = (inp.bore_m / 0.0254) if inp.bore_m else None
+    d1_in = (inp.line_in_m / 0.0254) if inp.line_in_m else None
+    d2_in = (inp.line_out_m / 0.0254) if inp.line_out_m else None
+    fp = 1.0
+    if d_in and d1_in and d2_in and cv_req > 0:
+        # FP uses the valve flow coefficient; iterate from the rated (if given)
+        # or the turbulent required Cv.
+        seed = cv100 or cv_req
+        fp = _cv_piping_factor(seed, d_in, d1_in, d2_in)
+        fp = _cv_piping_factor(cv100 or (cv_req / max(fp, 1e-3)),
+                               d_in, d1_in, d2_in)
+        cv_req = cv_req / max(fp, 1e-3)
+    r["fp"] = fp
+    r["d_in"], r["d1_in"], r["d2_in"] = d_in, d1_in, d2_in
+    r["beta_in"] = (d_in / d1_in) if (d_in and d1_in) else None
+    r["beta_out"] = (d_in / d2_in) if (d_in and d2_in) else None
+    r["cv_req"] = cv_req
+
+    if cv100:
+        r["travel"] = _cv_travel_pct(r.get("cv_req"), cv100, inp.char,
+                                     inp.rangeability)
+        r["pct_cv"] = 100.0 * (r.get("cv_req") or 0.0) / cv100
+
+    # downstream velocity + noise
+    line_m = inp.line_out_m or inp.line_in_m
+    if line_m:
+        area = math.pi / 4.0 * line_m ** 2
+        if regime == "gas":
+            rho2 = rho_v
+        elif regime == "liquid":
+            rho2 = rho_l
+        elif rho_v and rho_l and x_q is not None:
+            rho2 = 1.0 / (x_q / rho_v + (1.0 - x_q) / rho_l)
+        else:
+            rho2 = rho_l or rho_v
+        if rho2 and rho2 > 0:
+            r["v2"] = (w / rho2) / area
+        if regime == "gas":
+            c2 = _cv_sonic_velocity_gas(state.get("k"), state.get("z"),
+                                        None, state.get("mw"))
+            lpe, det = _cv_noise_aero(w, p1, p2, None, state.get("mw"),
+                                      state.get("z"), state.get("k"), inp.xt,
+                                      inp.fl, inp.fd, line_m, rho2, c2)
+        else:
+            lpe, det = _cv_noise_hydro(w, p1, p2, pv, inp.fl,
+                                       rho_l or rho2, line_m, sigma)
+        r["noise_dba"], r["noise_detail"] = lpe, det
+    return r
+
+
+def _cv_select_rated(inp: CvInputs, cases):
+    """Selection mode: pick the smallest ladder Rated Cv (≤ body full-open max)
+    that puts MAX-flow travel at/under the design opening and keeps MIN-flow
+    travel controllable.  Returns (cv100, note)."""
+    body = _CV_BODY[inp.body_key]
+    cv_max_body = body["cd"] * (inp.nps or 2.0) ** 2
+    cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
+    if cv_req_max <= 0:
+        return None, ("no positive required Cv - cannot size (valve has no "
+                       "ΔP basis: set Control Valve Type=F with a "
+                       "downstream Destination row's Set P, or fill in "
+                       "\"Fixed dP (psi)\", or \"Fixed K\")")
+    target = inp.design_open_pct or 80.0
+    ladder = [c for c in _CV_RATED_LADDER if c <= cv_max_body * 1.001]
+    if not ladder:
+        ladder = [round(cv_max_body, 1)]
+    for rung in ladder:
+        tmax = _cv_travel_pct(cv_req_max, rung, inp.char, inp.rangeability)
+        cv_req_min = min((c.get("cv_req") or 0.0) for c in cases.values()
+                         if c.get("cv_req"))
+        tmin = _cv_travel_pct(cv_req_min, rung, inp.char, inp.rangeability)
+        if tmax is not None and tmax <= target and (tmin is None or tmin >= 8.0):
+            return rung, (f"selected {rung:g} from generic {body['label']} "
+                          f"ladder (max-flow travel {tmax:.0f}% <= target "
+                          f"{target:.0f}%; body full-open max ~{cv_max_body:.0f})")
+    # nothing satisfied the window: take the largest rung <= body max
+    rung = ladder[-1]
+    return rung, (f"selected {rung:g} (largest generic {body['label']} rung "
+                  f"<= body max ~{cv_max_body:.0f}); travel window not fully met "
+                  "- verify size/trim with vendor")
+
+
+def _cv_evaluate_valve(inp: CvInputs, states: dict) -> dict:
+    """Given measured Min/Norm/Max case-states (each from a full hydraulic
+    re-march at that flow), select or check the Rated Cv, apply the dB(A)
+    limit, and assemble verdicts + recommendations."""
+    mode = "adequacy" if inp.cv100 else "selection"
+    cv100 = inp.cv100
+    sel_note = None
+    if mode == "selection":
+        prelim = {code: _cv_size_state(st, inp, None)
+                  for code, st in states.items()}
+        cv100, sel_note = _cv_select_rated(inp, prelim)
+    cases = {code: _cv_size_state(st, inp, cv100)
+             for code, st in states.items()}
+
+    # verdicts
+    cv_req_max = max((c.get("cv_req") or 0.0) for c in cases.values())
+    cap_ok = bool(cv100) and cv100 >= cv_req_max
+    travels = [c.get("travel") for c in cases.values() if c.get("travel") is not None]
+    travel_ok = bool(travels) and all(5.0 <= t <= 95.0 for t in travels)
+    noises = [c.get("noise_dba") for c in cases.values() if c.get("noise_dba")]
+    noise_max = max(noises) if noises else None
+    noise_ok = (noise_max is None) or (noise_max <= inp.noise_limit_dba)
+    choked_any = any(c.get("choked") for c in cases.values())
+
+    recs = []
+    if not noise_ok:
+        recs.append(
+            f"Predicted noise {noise_max:.0f} dB(A) exceeds the "
+            f"{inp.noise_limit_dba:.0f} dB(A) limit at max flow. Rated-Cv "
+            "choice does not change service ΔP/noise - mitigate with low-noise "
+            "/ multistage trim, a larger body (lower outlet velocity), or split "
+            "the ΔP across two valves in series.")
+    if choked_any:
+        recs.append("Choked / cavitating flow present - confirm trim and "
+                    "material against the manufacturer's σ curves (ISA RP75.23) "
+                    "and consider anti-cavitation trim.")
+    if travels and (min(travels) < 10.0):
+        recs.append("Low % travel near closed at min flow - controllability "
+                    "may suffer; consider reduced trim.")
+    if travels and (max(travels) > 90.0):
+        recs.append("High % travel near max flow - little rangeability margin; "
+                    "verify Rated Cv / body size.")
+
+    return {
+        "inp": inp, "mode": mode, "cv100": cv100, "sel_note": sel_note,
+        "cases": cases, "verdicts": {
+            "capacity": cap_ok, "travel": travel_ok, "noise": noise_ok,
+            "noise_max": noise_max, "cv_req_max": cv_req_max,
+        },
+        "recommendations": recs,
+    }
+
+
+# ── Datasheet sheet (Min/Norm/Max vendor-style layout) ─────────────────────
+_CVDS_HDR   = PatternFill("solid", fgColor="1F4E79")   # dark blue band
+_CVDS_SEC   = PatternFill("solid", fgColor="D6E4F0")   # light blue section
+_CVDS_LBL   = PatternFill("solid", fgColor="F2F2F2")   # label tint
+_CVDS_PASS  = PatternFill("solid", fgColor="C6EFCE")
+_CVDS_FAIL  = PatternFill("solid", fgColor="FFC7CE")
+_CVDS_NORM  = PatternFill("solid", fgColor="FFF2CC")   # highlight Normal col
+_cvds_thin  = Side(style="thin", color="BFBFBF")
+_CVDS_BORD  = Border(left=_cvds_thin, right=_cvds_thin,
+                     top=_cvds_thin, bottom=_cvds_thin)
+
+
+def _cvc(ws, r, c, v=None, *, bold=False, italic=False, fill=None, align="left",
+         color="262626", size=10, border=True, wrap=False):
+    cell = ws.cell(row=r, column=c, value=v)
+    cell.font = Font(bold=bold, italic=italic, color=color, size=size)
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+    if fill:
+        cell.fill = fill
+    if border:
+        cell.border = _CVDS_BORD
+    return cell
+
+
+def _cv_disp(res, key, conv, nd=3, default="—"):
+    v = res.get(key)
+    if v is None or not res.get("valid", True):
+        return default
+    try:
+        return round(conv(v), nd)
+    except Exception:
+        return default
+
+
+def _build_cv_datasheet_sheet(wb, payload: dict, run_label: str = "Main",
+                              meta: dict | None = None):
+    """One control-valve datasheet sheet mirroring the vendor layout:
+    header block -> Min/Norm/Max service conditions -> flowing/sizing/noise
+    results -> verdicts + recommendations."""
+    inp: CvInputs = payload["inp"]
+    cases = payload["cases"]
+    v = payload["verdicts"]
+    body = _CV_BODY[inp.body_key]
+    tag = inp.tag or "CV"
+    title = re.sub(r"[^A-Za-z0-9_-]", "_", f"CV_{tag}")[:31]
+    ws = wb.create_sheet(title)
+    ws.sheet_view.showGridLines = False
+    for col, w in {"A": 30, "B": 15, "C": 15, "D": 15, "E": 28, "F": 16}.items():
+        ws.column_dimensions[col].width = w
+
+    P = lambda pa: pa / _CV_PSI_TO_PA
+    W = lambda kg: kg * _CV_KGS_TO_LBH
+    LB = lambda kgm3: kgm3 / 16.018463
+
+    r0 = _write_doc_header_block(ws, meta, 6,
+                                 title=f"CONTROL VALVE DATASHEET  —  {tag}")
+
+    # ── Header block ──
+    act_lbl = {"F": "Flow", "P": "Pressure", "T": "Temperature",
+               "L": "Level"}.get((inp.action or "F").upper()[:1], "Flow")
+    mode_lbl = ("Sizing / selection (new valve)" if payload["mode"] == "selection"
+                else "Adequacy check (existing valve)")
+    hdr = [
+        ("Valve Tag", tag, "Service", inp.service or "—"),
+        ("Line No", inp.line_no or "—", "Fluid", inp.fluid or "—"),
+        ("Body style", body["label"], "Characteristic", inp.char),
+        ("Valve size (NPS)", inp.nps or "—", "Control action", act_lbl),
+        ("Rated Cv (Cv100)", round(inp.cv100 or payload["cv100"] or 0, 2),
+         "Leakage class", inp.leak_class),
+        ("Seat / port bore (in)", round(inp.bore_m / 0.0254, 3) if inp.bore_m else "—",
+         "Rangeability R", inp.rangeability),
+        ("Inlet line size (in)",
+         round(inp.line_in_m / 0.0254, 3) if inp.line_in_m else "—",
+         "Outlet line size (in)",
+         round(inp.line_out_m / 0.0254, 3) if inp.line_out_m else "—"),
+        ("Mode", mode_lbl, "Noise limit dB(A)", inp.noise_limit_dba),
+    ]
+    r = r0
+    for l1, v1, l2, v2 in hdr:
+        _cvc(ws, r, 1, l1, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, v1)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+        _cvc(ws, r, 4, l2, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 5, v2)
+        ws.merge_cells(start_row=r, start_column=5, end_row=r, end_column=6)
+        r += 1
+    if payload.get("sel_note"):
+        _cvc(ws, r, 1, "Selection basis", bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, payload["sel_note"], wrap=True)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = 28
+        r += 1
+
+    # ── Service-conditions / results grid ──
+    def sec(label):
+        nonlocal r
+        _cvc(ws, r, 1, label, bold=True, fill=_CVDS_SEC)
+        for c in range(2, 7):
+            _cvc(ws, r, c, "", fill=_CVDS_SEC)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        r += 1
+
+    def row(label, unit, mn, no, mx, note=""):
+        nonlocal r
+        _cvc(ws, r, 1, label, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, unit, align="center", italic=True, size=8, color="808080")
+        _cvc(ws, r, 3, mn, align="center")
+        _cvc(ws, r, 4, no, align="center", fill=_CVDS_NORM, bold=True)
+        _cvc(ws, r, 5, mx, align="center")
+        _cvc(ws, r, 6, note, wrap=True)
+        r += 1
+
+    cMIN, cNOR, cMAX = cases["MIN"], cases["NOR"], cases["MAX"]
+    # column header
+    _cvc(ws, r, 1, "SERVICE CONDITIONS", bold=True, fill=_CVDS_HDR, color="FFFFFF")
+    _cvc(ws, r, 2, "Units", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 3, "Minimum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 4, "Normal", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 5, "Maximum", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    _cvc(ws, r, 6, "Notes", bold=True, fill=_CVDS_HDR, color="FFFFFF", align="center")
+    r += 1
+
+    row("Flow Rate", "lb/h",
+        _cv_disp(cMIN, "w", W, 1), _cv_disp(cNOR, "w", W, 1),
+        _cv_disp(cMAX, "w", W, 1),
+        f"full re-march at inlet ×{inp.min_mult:g} / ×{inp.max_mult:g}")
+    row("Inlet Pressure P1", "psia",
+        _cv_disp(cMIN, "p1", P, 2), _cv_disp(cNOR, "p1", P, 2),
+        _cv_disp(cMAX, "p1", P, 2))
+    row("Outlet Pressure P2", "psia",
+        _cv_disp(cMIN, "p2", P, 2), _cv_disp(cNOR, "p2", P, 2),
+        _cv_disp(cMAX, "p2", P, 2))
+    row("Pressure Drop ΔP", "psi",
+        _cv_disp(cMIN, "dp", P, 2), _cv_disp(cNOR, "dp", P, 2),
+        _cv_disp(cMAX, "dp", P, 2))
+    def prow(label, unit, key, conv=lambda x: x, nd=3, note=""):
+        row(label, unit, _cv_disp(cMIN, key, conv, nd),
+            _cv_disp(cNOR, key, conv, nd), _cv_disp(cMAX, key, conv, nd), note)
+    prow("Temperature", "°F", "temp_f", nd=1)
+
+    # ── Fluid properties (per case, from each scenario's flash) ──
+    sec("FLUID PROPERTIES — VAPOR")
+    prow("Vapor mol wt", "g/mol", "vap_mw", nd=2)
+    prow("Vapor density (upstream)", "lb/ft³", "rho_v", LB, nd=4)
+    prow("Vapor viscosity", "cP", "mu_v", nd=4)
+    prow("Vapor Cp/Cv", "—", "vap_cp_cv", nd=3)
+    prow("Vapor Z factor", "—", "z", nd=4)
+
+    sec("FLUID PROPERTIES — LIQUID")
+    prow("Liquid density", "lb/ft³", "rho_l", LB, nd=3)
+    prow("Liquid viscosity", "cP", "mu_l", nd=4)
+    prow("Liquid mol wt", "g/mol", "liq_mw", nd=2)
+    prow("Vapor pressure @ T", "psia", "pv", P, nd=3)
+    prow("Critical temperature", "°F", "tc_f", nd=1)
+    prow("Critical pressure", "psia", "pc", P, nd=2)
+    prow("Liquid Gf / SG", "—", "sg", nd=4)
+
+    sec("FLUID PROPERTIES — MIXTURE")
+    prow("Mixture density", "lb/ft³", "mix_density", LB, nd=4)
+    prow("Combined viscosity", "cP", "comb_visc", nd=4)
+    prow("Flashing fraction (vapour)", "wt%", "flashing_wt", nd=2)
+
+    sec("CONTAMINANTS  (H2 / H2S)")
+    def hrow(label, comp, field, unit, nd, note=""):
+        def g(c):
+            d = c.get(comp)
+            if d and d.get(field) is not None and c.get("valid", True):
+                return round(d[field], nd)
+            return "—"
+        row(label, unit, g(cMIN), g(cNOR), g(cMAX), note)
+    hrow("H2  content", "h2", "ppmmol", "ppm-mol", 1)
+    hrow("H2  content", "h2", "ppmw", "ppm-wt", 1)
+    hrow("H2  partial pressure", "h2", "pp_psia", "psia", 3, "y·P1 (vapour)")
+    hrow("H2S content", "h2s", "ppmmol", "ppm-mol", 1)
+    hrow("H2S content", "h2s", "ppmw", "ppm-wt", 1)
+    hrow("H2S partial pressure", "h2s", "pp_psia", "psia", 3, "y·P1 (vapour)")
+
+    sec("FLOWING CONDITIONS / SIZING")
+    row("Flow regime", "",
+        cMIN.get("regime", "—"), cNOR.get("regime", "—"), cMAX.get("regime", "—"))
+    row("Choked / cavitating?", "",
+        "Y" if cMIN.get("choked") else "N", "Y" if cNOR.get("choked") else "N",
+        "Y" if cMAX.get("choked") else "N")
+    row("Required Cv", "",
+        _cv_disp(cMIN, "cv_req", lambda x: x, 4),
+        _cv_disp(cNOR, "cv_req", lambda x: x, 4),
+        _cv_disp(cMAX, "cv_req", lambda x: x, 4),
+        "IEC 60534-2-1 (US Cv basis)")
+    row("Oversized Req. Cv (×1.25)", "",
+        _cv_disp(cMIN, "cv_req", lambda x: x * 1.25, 4),
+        _cv_disp(cNOR, "cv_req", lambda x: x * 1.25, 4),
+        _cv_disp(cMAX, "cv_req", lambda x: x * 1.25, 4))
+    row("% of Rated Cv", "%",
+        _cv_disp(cMIN, "pct_cv", lambda x: x, 2),
+        _cv_disp(cNOR, "pct_cv", lambda x: x, 2),
+        _cv_disp(cMAX, "pct_cv", lambda x: x, 2))
+    row("% Travel", "%",
+        _cv_disp(cMIN, "travel", lambda x: x, 1),
+        _cv_disp(cNOR, "travel", lambda x: x, 1),
+        _cv_disp(cMAX, "travel", lambda x: x, 1),
+        f"trim: {inp.char}")
+    row("FL / xT", "",
+        round(inp.fl, 3), round(inp.fl, 3), round(inp.fl, 3),
+        f"body typical (xT={inp.xt:g})")
+    row("Piping factor FP (reducers)", "",
+        _cv_disp(cMIN, "fp", lambda x: x, 3), _cv_disp(cNOR, "fp", lambda x: x, 3),
+        _cv_disp(cMAX, "fp", lambda x: x, 3),
+        "IEC 60534-2-1; req. Cv already ÷FP")
+    # sizing var: liquid ΔP_choked or gas Y
+    if cNOR.get("regime") == "gas":
+        row("Expansion factor Y", "",
+            _cv_disp(cMIN, "y", lambda x: x, 3), _cv_disp(cNOR, "y", lambda x: x, 3),
+            _cv_disp(cMAX, "y", lambda x: x, 3))
+    else:
+        row("ΔP choked = FL²(P1−FF·Pv)", "psia",
+            _cv_disp(cMIN, "dp_choked", P, 2), _cv_disp(cNOR, "dp_choked", P, 2),
+            _cv_disp(cMAX, "dp_choked", P, 2))
+    row("Cavitation index σ", "",
+        _cv_disp(cMIN, "sigma", lambda x: x, 2), _cv_disp(cNOR, "sigma", lambda x: x, 2),
+        _cv_disp(cMAX, "sigma", lambda x: x, 2), "ISA RP75.23")
+    row("Valve/outlet velocity", "m/s",
+        _cv_disp(cMIN, "v2", lambda x: x, 2), _cv_disp(cNOR, "v2", lambda x: x, 2),
+        _cv_disp(cMAX, "v2", lambda x: x, 2))
+    row("Sound Level", "dB(A)",
+        _cv_disp(cMIN, "noise_dba", lambda x: x, 0),
+        _cv_disp(cNOR, "noise_dba", lambda x: x, 0),
+        _cv_disp(cMAX, "noise_dba", lambda x: x, 0),
+        "IEC 60534-8-3/-8-4 (screening)")
+
+    # ── Verdicts ──
+    sec("ADEQUACY VERDICTS")
+    def verdict(label, ok, detail=""):
+        nonlocal r
+        _cvc(ws, r, 1, label, bold=True, fill=_CVDS_LBL)
+        _cvc(ws, r, 2, "PASS" if ok else "FAIL", align="center", bold=True,
+             fill=_CVDS_PASS if ok else _CVDS_FAIL)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+        _cvc(ws, r, 4, detail, wrap=True)
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=6)
+        r += 1
+    rated_cv = inp.cv100 or payload["cv100"]
+    cap_detail = (payload.get("sel_note") or "no Rated Cv") if not rated_cv else (
+        f"Rated {rated_cv:.2f} vs max req {v['cv_req_max']:.3f}")
+    verdict("Capacity (Cv100 ≥ Cv req)", v["capacity"], cap_detail)
+    verdict("Travel window (5–95%)", v["travel"])
+    nmax = v["noise_max"]
+    verdict(f"Noise ≤ {inp.noise_limit_dba:.0f} dB(A)", v["noise"],
+            f"max predicted {nmax:.0f} dB(A)" if nmax else "not evaluated")
+    # beta ratio
+    b_in = _cv_beta_ratio(inp.bore_m, inp.line_in_m)
+    b_out = _cv_beta_ratio(inp.bore_m, inp.line_out_m)
+    _cvc(ws, r, 1, "β ratio (in / out)", bold=True, fill=_CVDS_LBL)
+    _cvc(ws, r, 2, f"{b_in:.3f}" if b_in else "—", align="center")
+    _cvc(ws, r, 3, f"{b_out:.3f}" if b_out else "—", align="center")
+    _cvc(ws, r, 4, "bore ÷ line ID", wrap=True)
+    ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=6)
+    r += 1
+    # seat leakage
+    leak = _cv_seat_leakage(inp.leak_class, inp.cv100 or payload["cv100"],
+                            (cNOR.get("dp") or 0.0),
+                            (inp.bore_m / 0.0254 * 25.4) if inp.bore_m else None)
+    _cvc(ws, r, 1, f"Seat leakage (Class {leak.get('class', '—')})",
+         bold=True, fill=_CVDS_LBL)
+    _cvc(ws, r, 2, leak.get("desc", ""), wrap=True)
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+    ws.row_dimensions[r].height = 26
+    r += 1
+
+    # ── Recommendations ──
+    if payload["recommendations"]:
+        sec("RECOMMENDATIONS")
+        for rec in payload["recommendations"]:
+            _cvc(ws, r, 1, "•", align="center", fill=_CVDS_LBL)
+            _cvc(ws, r, 2, rec, wrap=True)
+            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=6)
+            ws.row_dimensions[r].height = max(26, 13 * (1 + len(rec) // 60))
+            r += 1
+
+    # ── Method footer ──
+    sec("METHOD")
+    for line in [
+        "Sizing: IEC 60534-2-1 / ISA 75.01.01 (liquid FF/FL choked; gas x/xT/Y; "
+        "two-phase homogeneous).  US Cv basis (gpm·√SG/√psi liquid; lb/h,psia,"
+        "lb/ft³ gas).",
+        "Cavitation: ISA RP75.23 σ.  Seat leakage: FCI 70-2 / IEC 60534-4.",
+        "Noise: IEC 60534-8-3 (aerodynamic) / -8-4 (hydrodynamic) — screening-"
+        "grade dB(A); confirm severe/critical service with vendor acoustic data.",
+        "Min/Norm/Max each come from a full circuit hydraulic re-march at the "
+        "scaled inlet flow (see Pressure_Profile_Min/_Max) — the flow reaching "
+        "the valve follows upstream Tee splits/carry-overs, not a fixed ratio. "
+        "FL/xT/Fd are body-style typicals — confirm against the selected valve.",
+    ]:
+        _cvc(ws, r, 1, line, wrap=True, size=9, color="595959")
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        ws.row_dimensions[r].height = max(24, 12 * (1 + len(line) // 90))
+        r += 1
+    return title
+
+
+def _cv_bubble_point_psia(feed, temp_f, p_hi_psia):
+    """Bubble-point pressure [psia] at temp_f: the P where the first vapour
+    appears (β≈0).  Bisection between a low bound and P1.  None on failure."""
+    if feed is None or not p_hi_psia or p_hi_psia <= 0:
+        return None
+    def beta_at(pp):
+        try:
+            fr = flash(feed, pp, temp_f=temp_f)
+            return (fr.beta if fr and fr.beta is not None else 0.0)
+        except Exception:
+            return None
+    b_hi = beta_at(p_hi_psia)
+    if b_hi is None:
+        return None
+    if b_hi > 1e-3:
+        return None                    # already flashing at P1 (no subcooling)
+    lo, hi = max(1e-3, p_hi_psia * 1e-4), p_hi_psia
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        b = beta_at(mid)
+        if b is None:
+            return None
+        if b > 1e-3:
+            lo = mid
+        else:
+            hi = mid
+        if hi / lo < 1.0001:
+            break
+    return 0.5 * (lo + hi)
+
+
+def _cv_inputs_from_station(station, stream_name=None) -> "CvInputs | None":
+    """Build a CvInputs from a control-valve Station's captured cv_raw."""
+    raw = getattr(station, "cv_raw", None)
+    if not raw:
+        return None
+    row = raw.get("row", {})
+    PA = _CV_PSI_TO_PA
+    to_pa = lambda psia: (psia * PA) if psia is not None else None
+    lbft3 = 16.018463
+    w_lbhr = (raw.get("vap_mass") or 0.0) + (raw.get("liq_mass") or 0.0)
+    rho_l = (raw["liq_density"] * lbft3) if raw.get("liq_density") else None
+    rho_v = (raw["vap_density"] * lbft3) if raw.get("vap_density") else None
+    p1 = station.p_in_psia
+    pv = _cv_bubble_point_psia(raw.get("feed"), raw.get("temp_f"), p1)
+    nps = raw.get("bore_in")
+    body_key = _cv_body_key(row.get("Valve Body Style"))
+    body = _CV_BODY[body_key]
+    cv_over = row.get("Rated Cv")
+    # inlet / outlet line sizes for reducers & FP: explicit override, else the
+    # real upstream (inlet) and downstream (outlet) pipe bores from the march.
+    _line_in_in = row.get("Inlet Line Size (in)") or raw.get("line_bore_in")
+    _line_out_in = (row.get("Outlet Line Size (in)") or raw.get("dn_bore_in")
+                    or raw.get("line_bore_in"))
+    return CvInputs(
+        tag=row.get("Comp ID") or station.comp_id,
+        service=row.get("Notes"),
+        line_no=row.get("Line No"),
+        fluid=stream_name,
+        temp_f=raw.get("temp_f"),
+        nps=nps,
+        body_key=body_key,
+        char=_cv_trim_name(row.get("Valve Characteristic")),
+        rangeability=50.0,
+        leak_class=(row.get("Seat Leakage Class") or "IV"),
+        action=raw.get("ctype") or "F",
+        design_dp_pa=to_pa(raw.get("fixed_dp") or None),
+        exch_floor_pa=to_pa(raw.get("exch_dp")),
+        cv100=(float(cv_over) if cv_over else None),
+        design_open_pct=(row.get("Design Opening %") or 80.0),
+        noise_limit_dba=(row.get("Noise Limit dBA") or 85.0),
+        min_mult=(row.get("Min Flow Mult") or 0.35),
+        max_mult=(row.get("Max Flow Mult") or 1.20),
+        bore_m=(nps * 0.0254) if nps else None,
+        line_in_m=(_line_in_in * 0.0254) if _line_in_in else None,
+        line_out_m=(_line_out_in * 0.0254) if _line_out_in else None,
+        fl=body["fl"], xt=body["xt"], fd=body["fd"],
+        p_src_pa=to_pa(raw.get("p_src")),
+        p_dest_pa=to_pa(raw.get("dest_p")),
+        p1_norm_pa=to_pa(station.p_in_psia),
+        p2_norm_pa=to_pa(station.p_out_psia),
+        w_norm_kgs=(w_lbhr / _CV_KGS_TO_LBH) if w_lbhr else None,
+        phase=raw.get("phase"),
+        quality=raw.get("quality"),
+        rho_l=rho_l, rho_v=rho_v,
+        mu_l_cp=raw.get("liq_visc"), mu_v_cp=raw.get("vap_visc"),
+        mw=(raw.get("vap_mw") or raw.get("mol_weight")),
+        z=raw.get("vap_z"), k=raw.get("gamma"),
+        pv_pa=to_pa(pv), pc_pa=to_pa(raw.get("pc_psia")),
+        sg=((rho_l / 999.0) if rho_l else None),
+    )
+
+
+_CV_PPM_TARGETS = {
+    "H2":  ("H2", "HYDROGEN"),
+    "H2S": ("H2S", "HYDROGEN SULFIDE", "HYDROGEN SULPHIDE"),
+}
+
+
+def _cv_comp_metrics(names, z, mw, y, p1_psia):
+    """H2 / H2S composition metrics: ppmw & ppm-mol (total-stream basis) and
+    partial pressure (vapour mole fraction × P1, or feed fraction × P1 if no
+    vapour present).  Returns {'H2': {...}, 'H2S': {...}}."""
+    idx = {str(n).strip().upper(): i for i, n in enumerate(names or [])}
+    sum_zmw = sum((z[i] or 0.0) * (mw[i] or 0.0) for i in range(len(z or []))) or 1.0
+    out = {}
+    for key, aliases in _CV_PPM_TARGETS.items():
+        i = next((idx[a] for a in aliases if a in idx), None)
+        if i is None:
+            out[key] = None
+            continue
+        zi = (z[i] if i < len(z) else 0.0) or 0.0
+        yi = (y[i] if (y and i < len(y)) else 0.0) or 0.0
+        out[key] = {
+            "ppmmol": zi * 1e6,
+            "ppmw": zi * (mw[i] or 0.0) / sum_zmw * 1e6,
+            "pp_psia": (yi if yi > 0 else zi) * (p1_psia or 0.0),
+        }
+    return out
+
+
+def _cv_state_from_station(st):
+    """Measured case-state (SI) + fluid-property block from a valve Station."""
+    raw = getattr(st, "cv_raw", None)
+    if not raw:
+        return None
+    PA = _CV_PSI_TO_PA
+    lbft3 = 16.018463
+    to_pa = lambda x: (x * PA) if x is not None else None
+    w_lbhr = (raw.get("vap_mass") or 0.0) + (raw.get("liq_mass") or 0.0)
+    rho_l = (raw["liq_density"] * lbft3) if raw.get("liq_density") else None
+    rho_v = (raw["vap_density"] * lbft3) if raw.get("vap_density") else None
+    q = raw.get("quality")
+    p1 = st.p_in_psia
+    # vapour density fallback: ideal-gas P·MW/(Z·R·T) when the HMB stream (e.g.
+    # a liquid-reported feed that flashes across the valve) carries no vap ρ.
+    if (not rho_v) and raw.get("vap_mw") and raw.get("temp_f") is not None:
+        try:
+            rho_v = _gas_rho_kgm3(raw["vap_mw"], raw.get("vap_z"),
+                                  raw["temp_f"], p1) or None
+        except Exception:
+            rho_v = None
+    pv = _cv_bubble_point_psia(raw.get("feed"), raw.get("temp_f"), p1)
+    comps = _cv_comp_metrics(raw.get("comp_names"), raw.get("comp_z"),
+                             raw.get("comp_mw"), raw.get("comp_y"), p1)
+    if raw.get("total_density"):
+        mix_rho = raw["total_density"] * lbft3
+    elif rho_v and rho_l and q is not None:
+        mix_rho = 1.0 / (q / rho_v + (1.0 - q) / rho_l)
+    else:
+        mix_rho = rho_l or rho_v
+    return {
+        "p1": to_pa(st.p_in_psia), "p2": to_pa(st.p_out_psia),
+        "w": (w_lbhr / _CV_KGS_TO_LBH) if w_lbhr else 0.0,
+        "phase": raw.get("phase"), "quality": q,
+        "rho_l": rho_l, "rho_v": rho_v,
+        "mw": (raw.get("vap_mw") or raw.get("mol_weight")),
+        "z": raw.get("vap_z"), "k": raw.get("gamma"),
+        "pv": to_pa(pv), "pc": to_pa(raw.get("pc_psia")),
+        "sg": ((rho_l / 999.0) if rho_l else None),
+        # ── display / property block (per case) ──
+        "temp_f": raw.get("temp_f"),
+        "mu_l": raw.get("liq_visc"), "mu_v": raw.get("vap_visc"),
+        "comb_visc": raw.get("comb_visc"),
+        "vap_mw": raw.get("vap_mw"), "liq_mw": raw.get("liq_mw"),
+        "vap_cp_cv": raw.get("gamma"),
+        "tc_f": raw.get("tc_f"),
+        "mix_density": mix_rho,
+        "flashing_wt": ((q or 0.0) * 100.0),
+        "h2": comps.get("H2"), "h2s": comps.get("H2S"),
+    }
+
+
+def _cv_valve_stations(main_sts, branch_runs_x):
+    """Ordered list of Stations that carry a control-valve capture (Main first,
+    then each branch), used to align the Min/Norm/Max scenarios by index."""
+    out = [st for st in main_sts if getattr(st, "cv_raw", None)]
+    for tup in (branch_runs_x or []):
+        for st in tup[1]:
+            if getattr(st, "cv_raw", None):
+                out.append(st)
+    return out
+
+
+def _build_cv_datasheets(wb, sts_nor, sts_min, sts_max,
+                         stream_name=None, run_label="Main", meta=None):
+    """Build one datasheet per control valve, drawing Min/Norm/Max from three
+    independently-marched flow scenarios (aligned by valve order)."""
+    titles = []
+    for i, st in enumerate(sts_nor):
+        try:
+            inp = _cv_inputs_from_station(st, stream_name=stream_name)
+            if inp is None:
+                continue
+            s_nor = _cv_state_from_station(st)
+            s_min = (_cv_state_from_station(sts_min[i])
+                     if sts_min and i < len(sts_min) else None)
+            s_max = (_cv_state_from_station(sts_max[i])
+                     if sts_max and i < len(sts_max) else None)
+            states = {"MIN": s_min or s_nor, "NOR": s_nor, "MAX": s_max or s_nor}
+            payload = _cv_evaluate_valve(inp, states)
+            titles.append(_build_cv_datasheet_sheet(wb, payload, run_label, meta=meta))
+        except Exception as exc:
+            print(f"  (CV datasheet for {getattr(st, 'comp_id', '?')} "
+                  f"skipped: {exc})")
+    return titles
 
 
 if __name__ == "__main__":

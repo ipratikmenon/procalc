@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """HyCalign Hydraulics — unified engine (single file to run).
 
+XOMa variant: forked from hydraulics_XOM.py to add a case-anchored K-value
+correction for PROPANE in the light-ends flash (see _CASE_K_CALIBRATION near
+_RIAZI_VERA_GASES). Kept as a separate file rather than folding into
+hydraulics_XOM.py because the correction is an empirical, case-specific bias
+fit — not a verified general physical correlation — see that section's
+docstring for the full rationale and the real long-term fix.
+
 This file merges the former  asme_data.py + hydraulics_engine.py +
 hydraulics_engine_flash_noiso.py + flash_vle.py + flow_pattern_data.py +
 flow_pattern_maps.py  into ONE engine.  Companion modules:
@@ -1786,8 +1793,17 @@ class TPInputs:
     gvf: float          # gas volume fraction (input, no-slip)
 
 
-def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
-    """Build SI two-phase inputs for a station, or None if geometry missing."""
+def station_tp_inputs(station, sp, gas_density_fn, flash_result=None) -> "TPInputs | None":
+    """Build SI two-phase inputs for a station, or None if geometry missing.
+
+    ``flash_result``, when given, is this station's own locally-flashed
+    FlashResult (same object the pressure-march / Flash_Profile sheet uses) —
+    its vap_mass/liq_mass (re-equilibrated at THIS station's local pressure)
+    drive the phase split, exactly as ``_dp_flashed`` already does for the
+    Δp calc.  Without it (e.g. the no-flash legacy ``run()`` path) the static
+    feed-level ``sp.vap_mass``/``sp.liq_mass`` is used as before — correct
+    only when the phase split truly does not change along the line.
+    """
     d_in = station.id_in
     if not d_in:
         return None
@@ -1800,8 +1816,14 @@ def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
     mu_l = (sp.liq_visc or 0.5) * CP_TO_PAS
     sigma = (sp.liq_surf_tens or 20.0) * DYNCM_TO_NM
 
-    mg = (sp.vap_mass or 0.0) * LBHR_TO_KGS      # kg/s
-    ml = (sp.liq_mass or 0.0) * LBHR_TO_KGS
+    if flash_result is not None:
+        vap_mass = flash_result.vap_mass or 0.0
+        liq_mass = flash_result.liq_mass or 0.0
+    else:
+        vap_mass = sp.vap_mass or 0.0
+        liq_mass = sp.liq_mass or 0.0
+    mg = vap_mass * LBHR_TO_KGS      # kg/s
+    ml = liq_mass * LBHR_TO_KGS
     qg = mg / rho_g if rho_g > 0 else 0.0
     ql = ml / rho_l if rho_l > 0 else 0.0
     vsg = qg / area
@@ -2045,8 +2067,17 @@ def _regime_cell(ws, r, ci, regime):
     _c(ws, r, ci, regime, bg=_REGIME_BG.get(regime, WHITE), ha="center")
 
 
-def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
-    """Two-phase flow-regime map across all stations + slug summary."""
+def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn,
+                        flashes=None):
+    """Two-phase flow-regime map across all stations + slug summary.
+
+    ``flashes``, when given, is the per-station list of FlashResult objects
+    from the rigorous pressure march (same list Flash_Profile/Pressure_Profile
+    use) — station i's local vap_mass/liq_mass drive its GVF, instead of the
+    static feed-level ``sp`` used for every station.  Without it, the sheet
+    falls back to the old feed-level behaviour (correct only when ``sp`` is
+    known not to vary along the line, e.g. the no-flash legacy path).
+    """
     ws = wb.create_sheet("Two_Phase_Regime")
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.tabColor = PURPLE
@@ -2066,8 +2097,9 @@ def build_regime_sheet(wb, stations, sp, line_no, stream_name, gas_density_fn):
     regime_counts: dict[str, int] = {}
     max_force = (0.0, None)
     single_phase_label = None
-    for s in stations:
-        t = station_tp_inputs(s, sp, gas_density_fn)
+    for i, s in enumerate(stations):
+        fr = flashes[i] if flashes is not None and i < len(flashes) else None
+        t = station_tp_inputs(s, sp, gas_density_fn, fr)
         _c(ws, r, 1, s.seq, ha="center")
         _c(ws, r, 2, s.comp_id or "", ha="center")
         _c(ws, r, 3, s.fitting or "", ha="center")
@@ -5077,7 +5109,8 @@ def run_noiso(
                                 circuit_label, sk,
                                 station_lines=station_lines, line_colors=lc)
             HE.build_regime_sheet(wb, main_stations, sp,
-                                   circuit_label, sk, gas_density_fn=gdf)
+                                   circuit_label, sk, gas_density_fn=gdf,
+                                   flashes=main_flashes)
         else:
             wb.create_sheet("Component_Detail")
             HE.build_stream_sheet(wb, sp, phase)
@@ -6939,6 +6972,40 @@ _RIAZI_VERA_GASES = {
 }
 
 
+# ── XOMa addendum: propane/butane case calibration ──────────────────────────
+# Attempted to extend the Riazi & Vera (2005) regular-solution K-value (the
+# block above) to PROPANE the same way it already covers METHANE/ETHANE/CO2.
+# That extension was checked against this case's real PRO/II split (HMB.xlsx,
+# DXX5-BTM -> DXX6-IN, T=473.621598 F, P=230.695943 psia, solvent MW~=239.7)
+# and found to be mathematically impossible: eq 2's regular-solution gamma1
+# is exp[v1L*(delta1-delta2)^2/(R*298.15)], a square term, so gamma1 >= 1 for
+# *any* delta1 -- it can only ever push K *up* from the gamma1=1 baseline.
+# At this case's conditions that baseline (gamma1=1) already gives K~=10.4,
+# while PRO/II's real K is 4.89 -- propane shows *negative* deviation from
+# Hildebrand-regular-solution ideality here (gamma1~=0.47 would be needed),
+# which this correlation's functional form structurally cannot reproduce.
+# (Confirms the same model's existing +43% ETHANE over-prediction at this
+# point is likely the identical failure mode, not a bad delta1 choice.)
+#
+# n-Butane/isobutane were checked the same way and did NOT need correction:
+# the existing generic Wilson(+global lambda) path already lands within ~2-3%
+# of PRO/II's real K_NC4/K_IC4 at this point, so they are deliberately left
+# alone below.
+#
+# Pragmatic fallback used instead of a (provably unworkable) physical
+# correlation: a flat multiplicative bias correction, anchored to this one
+# verified real-plant data point, layered on top of whatever K the existing
+# Wilson-shape pipeline already produces. This is explicitly NOT a general
+# physical K-value correlation -- it is a case-specific empirical correction
+# valid only within this HMB.xlsx case's P/T/composition envelope, kept
+# separate from hydraulics_XOM.py for exactly that reason. See _build_feed's
+# use of it below, and the "How to actually fix this" note near
+# _RIAZI_VERA_GASES/_ags_k_h2 for the real long-term fix (a cubic-EOS flash).
+_CASE_K_CALIBRATION = {
+    "PROPANE": 0.6948,   # K_real/K_engine = 4.891/7.04 at the anchor point above
+}
+
+
 def _rk_vapor_z(a: float, b: float) -> float:
     """Largest real (vapour) root of the Redlich-Kwong compressibility cubic
     Z**3 - Z**2 + (A - B - B**2)*Z - A*B = 0, by Newton-Raphson from the
@@ -7197,16 +7264,88 @@ def _read_comp_constants(hmb_path) -> dict:
 _PF_NAME_RE = re.compile(r"^PF(\d+)A(\d+)D(?:_\d+)?$")
 
 
-def _decode_pf_pseudo(name_upper: str) -> dict | None:
+# Direct Tb/SG/MW curve fit for Tc/Pc, Watson K 6.76-32.42 — same unified
+# regression as comp_constants.py's estimate_pseudo_props (ln(Tc_R)/ln(Pc_psia)
+# by OLS against Tb(R), SG, MW; fit once against 220 PRO/II ground-truth
+# pseudo-fractions spanning that whole K range; max error 0.23%/1.55%).
+# Inlined here (not imported from comp_constants) so this decode path keeps
+# its no-pandas-dependency property — comp_constants imports pandas/openpyxl
+# at module level for spreadsheet I/O, which isn't needed for the bare
+# correlation.
+_CF_K_MIN = 6.7607782905215785
+_CF_K_MAX = 32.42
+_CF_TC_COEF = (5.007883101013148, 0.003450517505203951,
+               -5.350561845008301e-08, -1.074024144669105e-09,
+               1.6490962015029442, -0.5550533538284068,
+               -0.0015136220956506788, 6.726083603733643e-07,
+               -0.01062975296484001, -1.8505676528363376e-06,
+               1.1442752460598282e-05, -0.002262849729260199,
+               -1.5958487089281692e-09, 0.0015542330963586107)
+_CF_PC_COEF = (5.701626621482552, -0.0073214380294048045,
+               2.2394905038568905e-05, -1.4116473210398495e-08,
+               9.73621911814537, -3.3041596315868413,
+               -0.00870625333062654, 3.7745792200831124e-06,
+               -0.055143811415915074, -1.7498645134846417e-05,
+               4.5674217570408565e-05, -0.011989311917111075,
+               4.171268477379032e-09, 0.008258835869442238)
+
+
+def _cf_ln_poly(tb_r, sg, mw, c):
+    return (c[0] + c[1]*tb_r + c[2]*tb_r**2 + c[3]*tb_r**3
+            + c[4]*sg + c[5]*sg**2 + c[6]*tb_r*sg + c[7]*tb_r**2*sg
+            + c[8]*mw + c[9]*mw**2 + c[10]*tb_r*mw + c[11]*sg*mw
+            + c[12]*tb_r**2*mw + c[13]*sg**2*mw)
+
+
+# PRO/II SIMSCI/TWU acentric factor (generalized Frost-Kalkwarf-Thodos vapor
+# pressure correlation), back-solved at the NBP boundary condition — same
+# omega companion comp_constants.py pairs with the curve fit above.
+_FK_A = (10.2005, -10.6317, -5.58058, 2.09167, -2.09167, -1.70214, 0.4312)
+
+
+def _fk_omega(tb_r, tc_r, pc_psia):
+    if tc_r <= tb_r or pc_psia <= 0:
+        return None
+    a7 = _FK_A[6]
+    tr_b, pr_b = tb_r / tc_r, 14.696 / pc_psia
+    f0_b = _FK_A[0] + _FK_A[1] / tr_b + _FK_A[2] * math.log(tr_b)
+    f1_b = _FK_A[3] + _FK_A[4] / tr_b + _FK_A[5] * math.log(tr_b)
+    if f1_b == 0:
+        return None
+    omega_cap = (math.log(pr_b) - a7 * pr_b / tr_b ** 2 - f0_b) / f1_b
+
+    tr = 0.7
+    f0 = _FK_A[0] + _FK_A[1] / tr + _FK_A[2] * math.log(tr)
+    f1 = _FK_A[3] + _FK_A[4] / tr + _FK_A[5] * math.log(tr)
+    rhs = f0 + omega_cap * f1
+    pr = math.exp(rhs)
+    for _ in range(50):
+        g = math.log(pr) - a7 * pr / tr ** 2 - rhs
+        dg = 1.0 / pr - a7 / tr ** 2
+        step = g / dg
+        pr -= step
+        if abs(step) < 1e-12:
+            break
+    if pr <= 0:
+        return None
+    return -math.log10(pr) - 1.0
+
+
+def _decode_pf_pseudo(name_upper: str, mw: float | None = None) -> dict | None:
     """Petroleum-fraction pseudo-component names emitted by the source PRO/II
     model encode their own normal boiling point and API gravity directly,
     e.g. 'PF736A30D_6' = NBP 736°F, API 30 (the trailing '_<n>' is just a
     cut-set index and varies by stream/column, which is why most of these
     don't have an exact-name match in the COMP_CONSTANTS sheet — that sheet
-    only enumerates one arbitrarily-chosen cut set per NBP/API pair).  Since
-    the Lee-Kesler/Edmister correlation underlying COMP_CONSTANTS only needs
-    NBP and SG (API), decode them straight from the name instead of relying
-    on an exact lookup match."""
+    only enumerates one arbitrarily-chosen cut set per NBP/API pair). Decode
+    NBP/SG straight from the name instead of relying on an exact lookup match.
+
+    When the caller has a per-component MW (from the stream's mass/mole flow
+    ratio) and the decoded Watson K falls inside the curve fit's verified
+    range, Tc/Pc come from the direct Tb/SG/MW curve fit above. Otherwise —
+    MW unavailable, or K outside 6.76-32.42 — falls back to the Lee-Kesler
+    (1975) Tc/Pc + Edmister (1958) omega correlation, which only needs
+    NBP/SG and has no fitted-range restriction."""
     m = _PF_NAME_RE.match(name_upper)
     if not m:
         return None
@@ -7215,10 +7354,20 @@ def _decode_pf_pseudo(name_upper: str) -> dict | None:
     tb_r = nbp_f + 459.67
     if tb_r <= 0 or sg <= 0:
         return None
+
+    if mw:
+        k_w = tb_r ** (1 / 3) / sg
+        if _CF_K_MIN <= k_w <= _CF_K_MAX:
+            tc_r = math.exp(_cf_ln_poly(tb_r, sg, mw, _CF_TC_COEF))
+            pc_psia = math.exp(_cf_ln_poly(tb_r, sg, mw, _CF_PC_COEF))
+            omega = _fk_omega(tb_r, tc_r, pc_psia)
+            return {"tc_f": tc_r - 459.67, "pc_psia": pc_psia, "omega": omega}
+
     # Lee-Kesler (1975) Tc/Pc + Edmister (1958) omega — same correlation
-    # comp_constants.py uses for pseudo-fractions, inlined here so this
-    # decode path has no dependency on pandas (comp_constants imports it
-    # for spreadsheet I/O, which isn't needed for the bare correlation).
+    # comp_constants.py falls back to (via raw Twu) outside the curve fit's
+    # verified range, inlined here so this decode path has no dependency on
+    # pandas (comp_constants imports it for spreadsheet I/O, which isn't
+    # needed for the bare correlation).
     tc_r = (341.7 + 811.1 * sg
             + (0.4244 + 0.1174 * sg) * tb_r
             + (0.4669 - 3.2623 * sg) * 1e5 / tb_r)
@@ -7311,8 +7460,9 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         mw.append(mwi)
         # criticals — real PRO/II library values take priority for named
         # (non-pseudo) components; the PF<nbp>A<api>D cut-set pseudos keep
-        # the predicted Lee-Kesler/Edmister path (no exact library match is
-        # meaningful for those — see _decode_pf_pseudo's docstring).
+        # the predicted direct-curve-fit/Lee-Kesler-Edmister path (no exact
+        # library match is meaningful for those — see _decode_pf_pseudo's
+        # docstring).
         n_up = str(n).strip().upper()
         cm = None
         if not _PF_NAME_RE.match(n_up):
@@ -7320,7 +7470,7 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         if cm is None:
             cm = (const_map or {}).get(n_up)
         if cm is None or cm.get("tc_f") is None:
-            cm = _decode_pf_pseudo(n_up)
+            cm = _decode_pf_pseudo(n_up, mwi)
         if cm and cm.get("tc_f") is not None:
             tc_r.append(cm["tc_f"] + F_TO_R)
             omega.append(cm.get("omega"))
@@ -7363,6 +7513,14 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         used_wilson = any(wk is not None for wk in wilson_k)
         if used_wilson:
             k_raw = [wk if wk is not None else kr for wk, kr in zip(wilson_k, k_raw)]
+
+        # Case-anchored bias correction (see _CASE_K_CALIBRATION above) for
+        # components where the generic Wilson shape was checked against this
+        # case's real PRO/II split and found off by more than rounding.
+        for idx, nm in enumerate(names):
+            kappa = _CASE_K_CALIBRATION.get(str(nm).strip().upper())
+            if kappa is not None and k_raw[idx] is not None:
+                k_raw[idx] *= kappa
 
         # For the specific light gases Riazi & Vera (2005) / the Augmented
         # Grayson-Streed model (Torres et al., 2013) target (H2, CH4, C2H6,
