@@ -12,6 +12,7 @@ layer on top of the existing dataclasses, not a second source of truth.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from openpyxl import Workbook, load_workbook
@@ -39,9 +40,19 @@ def nps_to_string(value) -> str:
     if value is None or value == "":
         return ""
     if isinstance(value, str):
-        # already a string (e.g. hand-typed "1-1/2") -- pass through as-is,
-        # trusting the sheet author over any further reformatting.
-        return value.strip()
+        s = value.strip()
+        # Real HURL sheets sometimes annotate a size with a parenthetical
+        # note about it ("6 (Alt.)", "0.5 (Alt. 2)") -- strip the note (the
+        # "alternate" distinction has no home in PipeRule's schema today,
+        # a known simplification, not silently invented data) and parse
+        # the leading token as the actual NPS value.
+        s = re.split(r"\s*\(", s, 1)[0].strip()
+        try:
+            value = float(s)
+        except ValueError:
+            # not a bare number -- e.g. a hand-typed "1-1/2": pass through
+            # as-is, trusting the sheet author over any further reformatting.
+            return s
     f = float(value)
     if f in _FRACTIONS:
         return _FRACTIONS[f]
@@ -102,6 +113,44 @@ def _yn(v) -> bool:
     return str(v or "").strip().upper() == "YES"
 
 
+_BLANK_PLACEHOLDERS = {"-", "—", "–", "N/A", "NA"}
+
+
+def _is_blank(v) -> bool:
+    """True for a genuinely empty cell OR a text placeholder real HURL
+    sheets use for "not applicable" instead of leaving the cell empty
+    (a bare "-"/"—", or a cached Excel formula-error literal like
+    "#VALUE!"/"#N/A" from a since-broken source formula) -- checked
+    WITHOUT coercing to float, so callers that still want the raw value
+    (e.g. nps_to_string's hand-typed-fraction string pass-through) aren't
+    forced through a numeric conversion."""
+    if v is None:
+        return True
+    if isinstance(v, str):
+        s = v.strip()
+        if not s or s.upper() in _BLANK_PLACEHOLDERS or s.startswith("#"):
+            return True
+    return False
+
+
+def _num(v) -> float | None:
+    """A spreadsheet cell -> float, or None for a blank/placeholder cell
+    (see _is_blank)."""
+    if _is_blank(v):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    try:
+        return float(s)
+    except ValueError:
+        if s.endswith(".") and s.count(".") == 2:
+            # a stray trailing decimal-point typo in the source data
+            # ("11.91." instead of "11.91") -- unambiguous to strip.
+            return float(s[:-1])
+        raise   # a genuinely malformed, non-placeholder value -- surface it
+
+
 def flat_sheet_to_classes(xlsx_path: str, sheet_name: str = "PMS") -> list[PMS.PipingClass]:
     """Read the flat sheet -> list[PipingClass]. Raises ValueError with a
     row-numbered message list on anything malformed (never silently drops
@@ -141,28 +190,37 @@ def flat_sheet_to_classes(xlsx_path: str, sheet_name: str = "PMS") -> list[PMS.P
     classes = []
     for spec in order:
         rows = groups[spec]
-        con_rows = [r for r in rows if str(cell(r, "ITEM") or "").strip().upper() == "CON"]
-        if len(con_rows) != 1:
-            errors.append(f"{spec}: expected exactly 1 CON row, found {len(con_rows)}")
+        con_labeled = [r for r in rows if str(cell(r, "ITEM") or "").strip().upper() == "CON"]
+        # A genuine CON (condition) row carries the P/T curve and has no
+        # NPS range; a row labeled "CON" that DOES have DMIN/DMAX is a
+        # source-data mislabel (seen in real HURL sheets: a pipe-schedule
+        # row where someone typed "CON" instead of an item code) -- treat
+        # it as an ordinary pipe_rule row below rather than hard-failing
+        # the whole spec over one bad label, since which row is the real
+        # CON is still mechanically unambiguous (DMIN/DMAX presence).
+        real_con = [r for r in con_labeled
+                   if _is_blank(cell(r, "DMIN")) and _is_blank(cell(r, "DMAX"))]
+        if len(real_con) != 1:
+            errors.append(f"{spec}: expected exactly 1 CON row (no NPS range), "
+                          f"found {len(real_con)} among {len(con_labeled)} row(s) labeled CON")
             continue
-        con = con_rows[0]
+        con = real_con[0]
+        mislabeled_con = [r for r in con_labeled if r != con]
 
-        ca_in = cell(con, "CAIN")
+        ca_in = _num(cell(con, "CAIN"))
         if ca_in is None:
-            ca_mm = cell(con, "CAMM")
+            ca_mm = _num(cell(con, "CAMM"))
             ca_in = round(ca_mm * IN_PER_MM, 4) if ca_mm is not None else 0.0
 
         pt_curve = []
         for i in range(1, N_PT_POINTS + 1):
-            t_c = cell(con, f"DT{i}S"); p_kg = cell(con, f"DP{i}S")
-            t_f = cell(con, f"DT{i}F"); p_psig = cell(con, f"DP{i}F")
+            t_c = _num(cell(con, f"DT{i}S")); p_kg = _num(cell(con, f"DP{i}S"))
+            t_f = _num(cell(con, f"DT{i}F")); p_psig = _num(cell(con, f"DP{i}F"))
             if t_c is None and p_kg is None and t_f is None and p_psig is None:
                 continue
             pt_curve.append(PMS.PTPoint(
-                temp_c=float(t_c) if t_c is not None else None,
-                pressure_kgcm2g=float(p_kg) if p_kg is not None else None,
-                temp_f=float(t_f) if t_f is not None else None,
-                pressure_psig=float(p_psig) if p_psig is not None else None,
+                temp_c=t_c, pressure_kgcm2g=p_kg,
+                temp_f=t_f, pressure_psig=p_psig,
             ))
 
         pipe_rules = []
@@ -171,18 +229,21 @@ def flat_sheet_to_classes(xlsx_path: str, sheet_name: str = "PMS") -> list[PMS.P
                 continue
             item = cell(r, "ITEM")
             dmin, dmax = cell(r, "DMIN"), cell(r, "DMAX")
-            if not item or dmin is None or dmax is None:
+            if not item or _is_blank(dmin) or _is_blank(dmax):
                 errors.append(f"{spec} row {r}: item row missing ITEM/DMIN/DMAX")
                 continue
             sched = normalize_schedule(cell(r, "SCHD") or "STD")
-            thin = cell(r, "THIN")
+            thin = _num(cell(r, "THIN"))
             if thin is None:
-                thmm = cell(r, "THMM")
+                thmm = _num(cell(r, "THMM"))
                 thin = round(thmm * IN_PER_MM, 4) if thmm is not None else None
+            desc = str(item).strip()
+            if r in mislabeled_con:
+                desc = f"{desc} (mislabeled CON in source row {r})"
             pipe_rules.append(PMS.PipeRule(
                 nps_low=nps_to_string(dmin), nps_high=nps_to_string(dmax),
-                schedule=sched, ends="", description=str(item).strip(),
-                special_thickness_in=float(thin) if thin is not None else None,
+                schedule=sched, ends="", description=desc,
+                special_thickness_in=thin,
             ))
 
         design_p = pt_curve[0].pressure_psig if pt_curve else None
