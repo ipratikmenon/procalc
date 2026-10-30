@@ -4155,6 +4155,14 @@ def _est_props(cmap, names, y, x, nv, nl, T_F, P_psia, only=None):
         out["k_vap"] = (eta * 1e-7 / (Mv * 1e-3)) * (1.32 * cv + 1.77 * _RJ) * 0.577789
         out["h_vap"] = (sum(yv[i] * _dh_ig(cd[i], T) for i in range(n)) / Mv
                         * 0.429923)                                 # J/g → BTU/lb
+    # PR-package override for the vapour when every component is covered
+    # (Z, Cp, Cp/Cv, h, µ, k calibrated to the HMB; formation enthalpy basis)
+    pr_ok = _pr_ready(names)
+    if pr_ok and nv > 0 and sy > 0:
+        try:
+            out.update(_pr_vapor_props(names, y, T_F, P_psia))
+        except Exception:
+            pass
     # ── liquid ────────────────────────────────────────────────────────────
     sx = sum(x) if x else 0.0
     if nl > 0 and sx > 0:
@@ -4204,6 +4212,13 @@ def _est_props(cmap, names, y, x, nv, nl, T_F, P_psia, only=None):
         out["sigma"] = sg
         out["h_liq"] = (sum(xl[i] * (_dh_ig(cd[i], T) - _dhvap(cd[i], T))
                             for i in range(n)) / Ml * 0.429923)
+        if pr_ok:                      # PR liquid root: enthalpy on the HMB basis
+            try:
+                pl = _PRMix(names, xl).props((T_F + 459.67) / 1.8, P_psia * 0.0689476,
+                                             liquid=True)
+                out["h_liq"], out["cp_liq"] = pl["h"], pl["cp"]
+            except Exception:
+                pass
         # Generalised correlations are poor for water: dedicated correlations
         # when the liquid is (almost) pure water.
         iw = [i for i, c in enumerate(cd) if c["name"] in ("H2O", "WATER")]
@@ -4216,6 +4231,337 @@ def _est_props(cmap, names, y, x, nv, nl, T_F, P_psia, only=None):
             out["k_liq"] = 0.3466 + 0.00038 * (T - 273.15) - 1.0e-6 * (T - 273.15) ** 2 * 3.0
             out["sigma"] = 235.8 * tr ** 1.256 * (1 - 0.625 * tr)      # dyn/cm
     return out
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Peng-Robinson (+Peneloux) component data  — PR package of the HMB simulator
+# ════════════════════════════════════════════════════════════════════════
+# name: (MW, Tc K, Pc bar, ω, Vc cm3/mol, H offset kJ/kmol, Hf kJ/kmol,
+#        ideal-gas H(T) polynomial a..f [kJ/kg, T in K], Peneloux c cm3/mol)
+# Ideal enthalpy H_i(T) [kJ/kmol] = MW·poly(T) + H offset  (includes heat of formation).
+_PR_DATA = {
+    'H2O': (18.0153, 647.299, 221.19996, 0.344, 57.1, -251712.491, -241814,
+        (-5.7296, 1.9145, -0.00039574, 8.76206e-07, -4.95055e-10, 1.03846e-13), 0.1639),
+    'H2S': (34.0819, 373.6, 90.07788, 0.081, 98.0, -30140.461, -20179,
+        (-1.435, 0.9985, -0.0001843, 5.57076e-07, -3.17706e-10, 6.36625e-14), -3.1259),
+    'NH3': (17.0306, 405.549, 112.76898, 0.254999, 80.4, -55757.69, -45710,
+        (-1.8514, 1.9937, -0.00053266, 2.0615e-06, -1.33856e-09, 3.05326e-13), -0.8656),
+    'H2': (2.0159, 33.44, 13.155, -0.12009, 51.5, -8287.947, 0,
+        (-49.68312, 13.83761, 0.0002999806, 3.458931e-07, -9.712927e-11, 7.731201e-15), -4.4166),
+    'NITROGEN': (28.0135, 126.194, 33.9437, 0.04, 90.0, -8529.704, 0,
+        (2.888634, 0.9827466, 9.714241e-05, -4.157947e-10, -3.655484e-12, 4.050133e-16), -3.4576),
+    'METHANE': (16.0428, 190.699, 46.40679, 0.011498, 99.0, -84928.625, -74900,
+        (-12.98, 2.36459, -0.00213247, 5.6618e-06, -3.72476e-09, 8.60896e-13), -4.2086),
+    'ETHANE': (30.0696, 305.428, 48.83849, 0.0986, 148.0, -96704.162, -84738,
+        (-1.7675, 1.1429, -0.0003236, 4.2431e-06, -3.39316e-09, 8.82096e-13), -4.5933),
+    'PROPANE': (44.0965, 369.898, 42.5666, 0.1524, 200.0, -119360.054, -103890,
+        (39.4889, 0.395, 0.00211409, 3.96486e-07, -6.67176e-10, 1.67936e-13), -4.9033),
+    'IC4': (58.1234, 408.096, 36.4762, 0.18479, 263.0, -152466.512, -134590,
+        (30.903, 0.1533, 0.00263479, 7.27226e-08, -7.27896e-10, 2.36736e-13), -5.2769),
+    'NC4': (58.1234, 425.199, 37.9662, 0.201, 255.0, -145576.71, -126190,
+        (67.721, 0.00854058, 0.00327699, -1.10968e-06, 1.76646e-10, -6.39926e-15), -4.5838),
+    'IC5': (72.1503, 460.398, 33.3359, 0.22224, 308.0, -176693.306, -154590,
+        (64.25, -0.131798, 0.003541, -1.3332e-06, 2.51446e-10, -1.29576e-14), -4.3789),
+    'NC5': (72.1503, 469.6, 33.7512, 0.25389, 311.0, -169942.681, -146490,
+        (63.198, -0.0117017, 0.0033164, -1.1705e-06, 1.99636e-10, -8.66485e-15), -3.4042),
+    'CYCLOPENTANE': (70.1344, 511.6, 45.0895, 0.192, 260.0, -82868.49, -77288,
+        (1.56197e-08, -0.764518, 0.00386825, -1.44055e-06, 2.31157e-10, -8.26099e-23), -4.8091),
+    'CYCLOHEXANE': (84.1595, 553.2, 40.52999, 0.2133, 308.0, -131896.191, -123190,
+        (4.55567e-09, -0.64805, 0.00363175, -9.99283e-07, 3.92403e-11, -2.5816e-23), 10.4408),
+    'CO2': (44.0098, 304.1, 73.69999, 0.23894, 93.9, -403629.911, -393790,
+        (1.25255e-09, 0.618139, 0.000484485, -1.49353e-07, 2.2905e-11, -1.37045e-15), -1.3758),
+    'HCL': (36.4606, 324.7, 82.99999, 0.133, 80.9, -101289.335, -92359,
+        (0.0, 0.841536, -9.88125e-05, 1.13982e-07, -2.67445e-11, 0.0), -2.4609),
+    'SO2': (64.0648, 430.799, 78.69999, 0.256, 122.2, -306776.128, -297100,
+        (-2.11957e-09, 0.37228, 0.000522843, -2.58127e-07, 5.18235e-11, 1.2589e-23), -1.442),
+    'SO3': (80.0642, 491.0, 82.09999, 0.481, 127.3, -406440.964, -396000,
+        (-3.69848e-08, 0.206948, 0.000904133, -4.66872e-07, 9.09358e-11, 1.15978e-22), 1.8544),
+    'CL2': (70.9054, 416.898, 77.39999, 0.09, 123.8, -9228.059, 0,
+        (0.0, 0.38005, 0.00023878, -1.82e-07, 5.45787e-11, 0.0), -4.4992),
+    'O2': (31.9988, 154.77, 50.80019, 0.019, 73.2, -8659.501, 0,
+        (13.4497, 0.813132, 0.00016558, 6.82e-09, -2.331e-11, 3.7644e-15), -3.0085),
+    'CO': (28.0104, 132.949, 34.9875, 0.093, 89.3, -119260.421, -110590,
+        (-2.269, 1.0739, -0.00017265, 3.02226e-07, -1.37526e-10, 2.00356e-14), -3.4112),
+    'ARGON': (39.948, 150.707, 48.63601, -0.004, 74.9, -6196.04, 0,
+        (0.0, 0.520298, -4.01929e-07, 4.31096e-10, 0.0, 0.0), 0.3675),
+}
+_PR_KIJ = {   # binary interaction parameters (symmetric, sorted pair)
+    ('ARGON', 'H2O'): 0.5,
+    ('ARGON', 'METHANE'): 0.023,
+    ('ARGON', 'NH3'): -0.18,
+    ('ARGON', 'O2'): 0.0104,
+    ('CO', 'CO2'): -0.031399,
+    ('CO', 'ETHANE'): 0.025397,
+    ('CO', 'H2'): 0.025296,
+    ('CO', 'H2O'): -0.3896,
+    ('CO', 'H2S'): 0.087499,
+    ('CO', 'METHANE'): 0.020997,
+    ('CO', 'NITROGEN'): 0.0115,
+    ('CO', 'PROPANE'): 0.061298,
+    ('CO2', 'CYCLOHEXANE'): 0.090098,
+    ('CO2', 'CYCLOPENTANE'): 0.101,
+    ('CO2', 'ETHANE'): 0.1298,
+    ('CO2', 'H2'): 0.1202,
+    ('CO2', 'H2O'): 0.0445,
+    ('CO2', 'H2S'): 0.1,
+    ('CO2', 'IC4'): 0.1298,
+    ('CO2', 'IC5'): 0.125,
+    ('CO2', 'METHANE'): 0.1,
+    ('CO2', 'NC4'): 0.1298,
+    ('CO2', 'NC5'): 0.125,
+    ('CO2', 'NITROGEN'): -0.019997,
+    ('CO2', 'O2'): 0.097497,
+    ('CO2', 'PROPANE'): 0.135,
+    ('CYCLOHEXANE', 'CYCLOPENTANE'): 0.000399,
+    ('CYCLOHEXANE', 'ETHANE'): 0.0261,
+    ('CYCLOHEXANE', 'H2'): 0.2851,
+    ('CYCLOHEXANE', 'H2O'): 0.5,
+    ('CYCLOHEXANE', 'H2S'): 0.045,
+    ('CYCLOHEXANE', 'IC4'): 0.000346,
+    ('CYCLOHEXANE', 'METHANE'): 0.0392,
+    ('CYCLOHEXANE', 'NC4'): 0.000495,
+    ('CYCLOHEXANE', 'NC5'): 0.0013,
+    ('CYCLOHEXANE', 'NITROGEN'): 0.1,
+    ('CYCLOHEXANE', 'PROPANE'): 0.014298,
+    ('CYCLOPENTANE', 'ETHANE'): 0.004393,
+    ('CYCLOPENTANE', 'H2'): 0.2921,
+    ('CYCLOPENTANE', 'H2O'): 0.5,
+    ('CYCLOPENTANE', 'H2S'): 0.045,
+    ('CYCLOPENTANE', 'IC4'): 2e-06,
+    ('CYCLOPENTANE', 'IC5'): 0.000399,
+    ('CYCLOPENTANE', 'METHANE'): 0.012809,
+    ('CYCLOPENTANE', 'NC4'): 5e-06,
+    ('CYCLOPENTANE', 'NC5'): 0.000445,
+    ('CYCLOPENTANE', 'NITROGEN'): 0.1,
+    ('CYCLOPENTANE', 'PROPANE'): 0.000955,
+    ('ETHANE', 'H2'): 0.2231,
+    ('ETHANE', 'H2O'): 0.5,
+    ('ETHANE', 'H2S'): 0.083999,
+    ('ETHANE', 'IC4'): 0.004573,
+    ('ETHANE', 'IC5'): 0.007413,
+    ('ETHANE', 'METHANE'): 0.002241,
+    ('ETHANE', 'NC4'): 0.004096,
+    ('ETHANE', 'NC5'): 0.007609,
+    ('ETHANE', 'NITROGEN'): 0.05,
+    ('ETHANE', 'PROPANE'): 0.001258,
+    ('H2', 'H2O'): -0.2998,
+    ('H2', 'H2S'): 0.75,
+    ('H2', 'IC4'): 0.2037,
+    ('H2', 'IC5'): 0.2921,
+    ('H2', 'METHANE'): 0.202,
+    ('H2', 'NC4'): 0.1941,
+    ('H2', 'NC5'): 0.2921,
+    ('H2', 'NITROGEN'): -0.035999,
+    ('H2', 'PROPANE'): 0.2142,
+    ('H2O', 'H2S'): 0.0819,
+    ('H2O', 'IC4'): 0.5,
+    ('H2O', 'IC5'): 0.5,
+    ('H2O', 'METHANE'): 0.5,
+    ('H2O', 'NC4'): 0.5,
+    ('H2O', 'NC5'): 0.48,
+    ('H2O', 'NH3'): -0.2533,
+    ('H2O', 'NITROGEN'): -0.3156,
+    ('H2O', 'PROPANE'): 0.5,
+    ('H2O', 'SO2'): -0.11409,
+    ('H2S', 'IC4'): 0.05,
+    ('H2S', 'IC5'): 0.059999,
+    ('H2S', 'METHANE'): 0.085,
+    ('H2S', 'NC4'): 0.059999,
+    ('H2S', 'NC5'): 0.064998,
+    ('H2S', 'NITROGEN'): 0.1676,
+    ('H2S', 'PROPANE'): 0.075,
+    ('IC4', 'IC5'): 0.000346,
+    ('IC4', 'METHANE'): 0.013113,
+    ('IC4', 'NC4'): 1.3e-05,
+    ('IC4', 'NC5'): 0.00039,
+    ('IC4', 'NITROGEN'): 0.094999,
+    ('IC4', 'PROPANE'): 0.001041,
+    ('IC5', 'METHANE'): 0.017627,
+    ('IC5', 'NC4'): 0.000495,
+    ('IC5', 'NC5'): 1e-06,
+    ('IC5', 'NITROGEN'): 0.094999,
+    ('IC5', 'PROPANE'): 0.002583,
+    ('METHANE', 'NC4'): 0.012305,
+    ('METHANE', 'NC5'): 0.017925,
+    ('METHANE', 'NITROGEN'): 0.035999,
+    ('METHANE', 'PROPANE'): 0.006829,
+    ('METHANE', 'SO2'): 0.1342,
+    ('NC4', 'NC5'): 0.000547,
+    ('NC4', 'NITROGEN'): 0.09,
+    ('NC4', 'PROPANE'): 0.000819,
+    ('NC5', 'NITROGEN'): 0.1,
+    ('NC5', 'PROPANE'): 0.002701,
+    ('NH3', 'NITROGEN'): 0.222,
+    ('NITROGEN', 'O2'): -0.012,
+    ('NITROGEN', 'PROPANE'): 0.079998,
+    ('NITROGEN', 'SO2'): 0.079998,
+}
+
+_PR_RG = 83.14462618          # cm3·bar/mol/K
+_PR_KEPS = 1.18               # Mason-Saxena cross-term factor (calibrated to the HMB)
+_PR_RJ = 8.314462618          # J/mol/K
+
+
+def _pr_ready(names) -> bool:
+    return bool(names) and all(str(n).upper() in _PR_DATA for n in names)
+
+
+def _pr_poly(co, T):
+    return sum(c * T ** i for i, c in enumerate(co))
+
+
+def _pr_dpoly(co, T):
+    return sum(i * c * T ** (i - 1) for i, c in enumerate(co) if i)
+
+
+class _PRMix:
+    """Peng-Robinson mixture (kij from the PR package) with Peneloux volume shift.
+
+    Vapour/liquid Z, residual enthalpy / Cp (numerical dT), Cp-Cv, and the
+    ideal-gas enthalpy basis of the simulator (formation basis)."""
+
+    def __init__(s, names, y):
+        s.n = [str(x).upper() for x in names]
+        s.y = list(y)
+        s.N = len(s.n)
+        s.d = [_PR_DATA[x] for x in s.n]
+        s.M = sum(s.y[i] * s.d[i][0] for i in range(s.N))
+        s.b = sum(s.y[i] * 0.07780 * _PR_RG * s.d[i][1] / s.d[i][2] for i in range(s.N))
+        s.c = sum(s.y[i] * s.d[i][8] for i in range(s.N))
+        s.k = [[(_PR_KIJ.get(tuple(sorted((s.n[i], s.n[j]))), 0.0) if i != j else 0.0)
+                for j in range(s.N)] for i in range(s.N)]
+
+    @staticmethod
+    def _alpha(d, T):
+        w = d[3]
+        m = 0.37464 + 1.54226 * w - 0.26992 * w * w
+        return (1 + m * (1 - math.sqrt(T / d[1]))) ** 2
+
+    def a(s, T):
+        ai = [0.45724 * _PR_RG ** 2 * d[1] ** 2 / d[2] * s._alpha(d, T) for d in s.d]
+        return sum(s.y[i] * s.y[j] * math.sqrt(ai[i] * ai[j]) * (1 - s.k[i][j])
+                   for i in range(s.N) for j in range(s.N))
+
+    def Z(s, T, P, liquid=False):
+        a = s.a(T)
+        A = a * P / (_PR_RG * T) ** 2
+        B = s.b * P / (_PR_RG * T)
+        co = (1.0, -(1 - B), A - 3 * B * B - 2 * B, -(A * B - B * B - B ** 3))
+        z = (B * 1.0001) if liquid else 1.0
+        for _ in range(400):
+            f = ((z + co[1]) * z + co[2]) * z + co[3]
+            df = (3 * z + 2 * co[1]) * z + co[2]
+            if df == 0:
+                break
+            zn = z - f / df
+            if liquid:
+                zn = max(zn, B * 1.0001)
+            if abs(zn - z) < 1e-13:
+                z = zn
+                break
+            z = zn
+        return z
+
+    def hres(s, T, P, liquid=False):       # J/mol
+        z = s.Z(T, P, liquid)
+        h = 0.01
+        ap = (s.a(T + h) - s.a(T - h)) / (2 * h)
+        a = s.a(T)
+        B = s.b * P / (_PR_RG * T)
+        r2 = math.sqrt(2.0)
+        return 0.1 * (_PR_RG * T * (z - 1) + (T * ap - a) / (2 * r2 * s.b)
+                      * math.log((z + (1 + r2) * B) / (z + (1 - r2) * B)))
+
+    def ideal(s, T):
+        """(Cp_ig J/mol/K, H_ig J/mol) of the mixture."""
+        cp = sum(s.y[i] * s.d[i][0] * _pr_dpoly(s.d[i][7], T) for i in range(s.N))
+        h = sum(s.y[i] * (s.d[i][0] * _pr_poly(s.d[i][7], T) + s.d[i][5]) for i in range(s.N))
+        return cp, h
+
+    def props(s, T, P, liquid=False):
+        """Single-phase properties at T[K], P[bar]; FPS outputs."""
+        z = s.Z(T, P, liquid)
+        v = z * _PR_RG * T / P
+        a = s.a(T)
+        h = 0.01
+        ap = (s.a(T + h) - s.a(T - h)) / (2 * h)
+        cpi, hi = s.ideal(T)
+        dT = 0.05
+        cp = cpi + (s.hres(T + dT, P, liquid) - s.hres(T - dT, P, liquid)) / (2 * dT)
+        q = v * v + 2 * s.b * v - s.b * s.b
+        dPdT = _PR_RG / (v - s.b) - ap / q
+        dPdv = -_PR_RG * T / (v - s.b) ** 2 + a * (2 * v + 2 * s.b) / q ** 2
+        cpmcv = -T * dPdT ** 2 / dPdv * 0.1
+        vt = v - s.c
+        return {"Zk": z, "Z": P * vt / (_PR_RG * T),
+                "rho": s.M / vt * 62.428,                       # lb/ft3
+                "cp": cp / s.M * 0.238846,                      # BTU/lb-F
+                "gamma": cp / (cp - cpmcv),
+                "h": (hi + s.hres(T, P, liquid)) / s.M * 0.429923}   # BTU/lb
+
+
+def _pr_lucas_dilute(d, T):
+    """Non-polar Lucas dilute-gas viscosity, µP (d = _PR_DATA tuple)."""
+    tr = T / d[1]
+    xi = 0.176 * (d[1] / (d[0] ** 3 * d[2] ** 4)) ** (1.0 / 6.0)
+    return (0.807 * tr ** 0.618 - 0.357 * math.exp(-0.449 * tr)
+            + 0.340 * math.exp(-4.058 * tr) + 0.018) / xi
+
+
+def _pr_vapor_props(names, y, T_F, P_psia) -> dict:
+    """Vapour properties of a PR-covered mixture, calibrated to the HMB:
+    Z, ρ, Cp, Cp/Cv, h from PR+Peneloux; μ (Lucas + Wilke + Jossi-Stiel-Thodos);
+    k (Mason-Saxena, ε = 1.043, + Stiel-Thodos density term).  Pure H2 uses
+    equations fitted to the HMB.  Returns FPS: z_vap, rho_vap, cp_vap, cpcv_vap,
+    h_vap, visc_vap (cP), k_vap (BTU/hr-ft-F)."""
+    sy = sum(y)
+    y = [v / sy for v in y]
+    m = _PRMix(names, y)
+    T = (T_F + 459.67) / 1.8
+    P = P_psia * 0.0689476
+    p = m.props(T, P)
+    n, d = m.N, m.d
+    # H2 transport fitted to the HMB (pure-H2 states): Sutherland mu, power-law k
+    mu_i, k_i, cpi = [], [], []
+    for i in range(n):
+        cpi.append(d[i][0] * _pr_dpoly(d[i][7], T))
+        if m.n[i] == "H2":
+            mu_i.append(0.009346 * (T / 310.928) ** 1.5 * (310.928 + 90.91) / (T + 90.91) * 1e4)
+            k_i.append(0.106675 * (T / 310.928) ** 0.705 * 1.7307)
+        else:
+            e = _pr_lucas_dilute(d[i], T)
+            mu_i.append(e)
+            k_i.append(e * 1e-7 / (d[i][0] * 1e-3) * (1.32 * (cpi[i] - _PR_RJ) + 1.77 * _PR_RJ))
+
+    def phi(i, j):
+        return ((1 + math.sqrt(mu_i[i] / mu_i[j]) * (d[j][0] / d[i][0]) ** 0.25) ** 2
+                / math.sqrt(8 * (1 + d[i][0] / d[j][0])))
+
+    def aij(i, j):
+        return ((_PR_KEPS if i != j else 1.0)
+                * (1 + math.sqrt(k_i[i] / k_i[j]) * (d[i][0] / d[j][0]) ** 0.25) ** 2
+                / math.sqrt(8 * (1 + d[i][0] / d[j][0])))
+    mu0 = sum(y[i] * mu_i[i] / sum(y[j] * phi(i, j) for j in range(n)) for i in range(n))
+    k0 = sum(y[i] * k_i[i] / sum(y[j] * aij(i, j) for j in range(n)) for i in range(n))
+    tcm = sum(y[i] * d[i][1] for i in range(n))
+    pcm = sum(y[i] * d[i][2] for i in range(n))
+    vcm = sum(y[i] * d[i][4] for i in range(n))
+    wm = sum(y[i] * d[i][3] for i in range(n))
+    rr = P / (p["Zk"] * _PR_RG * T) * vcm
+    mu = mu0
+    if rr > 0.1:
+        xi = tcm ** (1 / 6) / (m.M ** 0.5 * (pcm / 1.01325) ** (2 / 3))
+        rhs = (1.023 + 0.23364 * rr + 0.58533 * rr ** 2 - 0.40758 * rr ** 3
+               + 0.093324 * rr ** 4)
+        mu = mu0 + (rhs ** 4 - 1) / xi
+    k = k0
+    if rr < 0.5:
+        zc = 0.291 - 0.080 * wm
+        gam = 210 * (tcm * m.M ** 3 / pcm ** 4) ** (1 / 6)
+        k = k0 + 1.22e-2 * (math.exp(0.535 * rr) - 1) / (gam * zc ** 5)
+    return {"z_vap": p["Z"], "rho_vap": p["rho"], "cp_vap": p["cp"],
+            "cpcv_vap": p["gamma"], "h_vap": p["h"],
+            "visc_vap": mu * 1e-4, "k_vap": k * 0.577789}
 
 
 # ════════════════════════════════════════════════════════════════════════
