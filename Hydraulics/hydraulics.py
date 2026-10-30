@@ -4257,7 +4257,20 @@ def build_profile_flash_noiso(
             # phase's absolute override value and adding it to the other
             # phase's un-rescaled natural value (which double-counts mass
             # from two different bases).
-            if not mass_scale_set and ("vap_mass" in override_state
+            # A flow typed on THIS row (not just carried from an earlier row)
+            # re-targets the running flow: mass_scale is re-solved so the flow
+            # leaving this row equals the typed value (e.g. 100% → 50% → 25%
+            # down successive tee rows).
+            row_flow = {k: v for k, v in _row_yellow_overrides(row).items()
+                        if k in ("vap_mass", "liq_mass")}
+            if row_flow and mass_scale_set:
+                eff_v = fr_full.vap_mass * flow_scale * vap_cf * mass_scale
+                eff_l = fr_full.liq_mass * flow_scale * liq_cf * mass_scale
+                if eff_v + eff_l > 0:
+                    tgt = (row_flow.get("vap_mass", eff_v)
+                           + row_flow.get("liq_mass", eff_l))
+                    mass_scale *= tgt / (eff_v + eff_l)
+            elif not mass_scale_set and ("vap_mass" in override_state
                                         or "liq_mass" in override_state):
                 nat_total = fr_full.vap_mass + fr_full.liq_mass
                 tgt_total = (override_state.get("vap_mass", fr_full.vap_mass)
