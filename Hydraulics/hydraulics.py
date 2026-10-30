@@ -4680,6 +4680,15 @@ def _station_props(fr, sp, feed, cmap, p_psia, est_inputs=None) -> dict | None:
     rho_l = pick("liq_density", "rho_liq", "liq ρ", lm > 0)
     vg = (vm / rho_g) if rho_g else 0.0
     vl = (lm / rho_l) if rho_l else 0.0
+    d["q_std_vap_ph"] = nv * _V_STD_FT3_LBMOL
+    d["z_k"] = None
+    if vm > 0 and T is not None and _pr_ready(names) and len(y) == len(names):
+        try:
+            sy_ = sum(y) or 1.0
+            d["z_k"] = _PRMix(names, [v / sy_ for v in y]).Z((T + 459.67) / 1.8,
+                                                           p_psia * 0.0689476)
+        except Exception:
+            d["z_k"] = None
     d.update(rho_vap=rho_g, rho_liq=rho_l, q_vap=vg or None, q_liq=vl or None,
              q_tot=(vg + vl) or None,
              rho_tot=(M / (vg + vl)) if (vg + vl) > 0 else None,
@@ -4745,6 +4754,9 @@ def _station_props(fr, sp, feed, cmap, p_psia, est_inputs=None) -> dict | None:
             return (num_ / den_) if den_ >= 0.98 else None
         d["tc"] = mavg("tc_f")
         d["pc"] = mavg("pc_psia")
+        d["tc_kay"], d["pc_kay"] = d["tc"], d["pc"]       # pure Kay's rule (no HMB fallback)
+        d["comp_y"] = {n_: y[i] for i, n_ in enumerate(names)} if nv > 0 else {}
+        d["comp_x"] = {n_: x[i] for i, n_ in enumerate(names)} if nl > 0 else {}
         d["vc"] = mavg("vc")
         d["omega"] = mavg("omega")
         # fall back to the HMB stream's own (rigorous) values where incomplete
@@ -5611,6 +5623,11 @@ def _build_component_detail_noiso(wb, stations, phase, station_lines=None,
         ("Watson K (UOP)", lambda p: R(p.get("watson"), 3), 10),
         ("Std API Gravity (°API)", lambda p: R(p.get("api"), 2), 11),
         ("Z Factor (total)", lambda p: R(p["z_tot"], 4), 10),
+        ("Z Factor (from K)", lambda p: R(p.get("z_k") if p.get("z_k") is not None
+                                          else p["z_vap"], 4), 10),
+        (u.hdr("Critical Temp (Kay's Rule)", "T"), lambda p: D("T", p.get("tc_kay"), 2), 13),
+        (u.hdr("Critical Press (Kay's Rule)", "P"), lambda p: D("P", p.get("pc_kay"), 2), 13),
+        ("Molecular Weight (for EOS)", lambda p: R(p["mw"], 3), 12),
         ("Estimated by correlation (‡)",
          lambda p: ", ".join(dict.fromkeys(p.get("est_keys") or [])) or "—", 24),
     ]
@@ -5621,7 +5638,10 @@ def _build_component_detail_noiso(wb, stations, phase, station_lines=None,
         ("Vapor Viscosity (cP)", lambda p: R(p["visc_vap"], 5), 12),
         ("Vapor Cp † (BTU/LB-F)", lambda p: R(p.get("cp_vap"), 4), 12),
         ("Vapor Cp/Cv", lambda p: R(p["cpcv_vap"], 4), 10),
-        ("Vapor Z", lambda p: R(p["z_vap"], 4), 9),
+        (u.hdr("Vapor Std Vol Rate", "qvol"), lambda p: D("qvol", p.get("q_std_vap_ph"), 1), 15),
+        ("Vapor Z (from density)", lambda p: R(p["z_vap"], 4), 11),
+        ("Vapor Z (from K)", lambda p: R(p.get("z_k") if p.get("z_k") is not None
+                                         else p["z_vap"], 4), 10),
         ("Vapor Thermal Cond † (BTU/HR-FT-F)", lambda p: R(p.get("k_vap"), 5), 15),
     ]
     liq = [
@@ -5918,6 +5938,59 @@ def _build_composition_splits_sheet(
     for j in range(len(comps)):
         _c(ws, r, 2 + j, 100.0 if mole_tot[j] else "", bg=GREEN, sz=8,
            bold=True, ha="right")
+
+    # ── Extra blocks: ppm (total) and vapour / liquid phase compositions ──
+    def _block(title, getter, nd, tot_label=None, total_fn=None):
+        nonlocal r
+        r += 2
+        ws.merge_cells(f"A{r}:{last_col}{r}")
+        _c(ws, r, 1, title, bg=GRNHDR, fg=WHITE, sz=9, bold=True)
+        r += 1
+        _station_header(r)
+        r += 1
+        for nm in names:
+            _c(ws, r, 1, nm, bg=LGRAY, sz=8, ha="left")
+            for j in range(len(stations)):
+                v = getter(j, nm)
+                _c(ws, r, 2 + j, round(v, nd) if v else "", sz=8, ha="right")
+            r += 1
+        if tot_label:
+            _c(ws, r, 1, tot_label, bg=GREEN, sz=8, bold=True)
+            for j in range(len(stations)):
+                v = total_fn(j)
+                _c(ws, r, 2 + j, round(v, nd) if v else "", bg=GREEN, sz=8,
+                   bold=True, ha="right")
+
+    def _tot_mole_ppm(j, nm):
+        return (1e6 * comps[j].get(nm, 0.0) / mole_tot[j]) if mole_tot[j] else None
+
+    def _tot_mass_ppm(j, nm):
+        return (1e6 * mass_cols[j].get(nm, 0.0) / col_tot[j]) if col_tot[j] else None
+    _block("MOLE FRACTION  (ppm, total)", _tot_mole_ppm, 2)
+    _block("MASS FRACTION  (ppm, total)", _tot_mass_ppm, 2)
+
+    def _pp(j):
+        return (stations[j].props or {}) if j < len(stations) else {}
+
+    def _phase_mole(which):
+        def g(j, nm):
+            return 100.0 * (_pp(j).get(which) or {}).get(nm, 0.0) or None
+        return g
+
+    def _phase_mass(which):
+        def g(j, nm):
+            dct = _pp(j).get(which) or {}
+            tot = sum(v * mw_map.get(k, 0.0) for k, v in dct.items())
+            return (100.0 * dct.get(nm, 0.0) * mw_map.get(nm, 0.0) / tot) if tot else None
+        return g
+    _block("VAPOR PHASE — MOLE FRACTION  (mol %)", _phase_mole("comp_y"), 4,
+           "TOTAL (mol %)", lambda j: 100.0 if _pp(j).get("comp_y") else None)
+    _block("VAPOR PHASE — MASS FRACTION  (mass %)", _phase_mass("comp_y"), 4,
+           "TOTAL (mass %)", lambda j: 100.0 if _pp(j).get("comp_y") else None)
+    _block("LIQUID PHASE — MOLE FRACTION  (mol %)", _phase_mole("comp_x"), 4,
+           "TOTAL (mol %)", lambda j: 100.0 if _pp(j).get("comp_x") else None)
+    _block("LIQUID PHASE — MASS FRACTION  (mass %)", _phase_mass("comp_x"), 4,
+           "TOTAL (mass %)", lambda j: 100.0 if _pp(j).get("comp_x") else None)
 
     # Widths + freeze
     cw(ws, 1, 26)
