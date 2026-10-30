@@ -978,6 +978,7 @@ class Station:
     mach_vap: float | None = None       # v_mix / c_vapour
     rhov2_vap: float | None = None      # ρ_g · v_sg²   (kg/m·s²)
     rhov2_liq: float | None = None      # ρ_l · v_sl²   (kg/m·s²)
+    props: dict | None = None           # stream properties at this station
 
 
 def build_profile(rows, sp, phase, p_start_psia) -> list[Station]:
@@ -3947,6 +3948,132 @@ def _comp_payload(row: dict, p_ref: float, const_map: dict) -> dict:
     return {"feed": feed, "sp": sp, "moles": n_i}
 
 
+# ════════════════════════════════════════════════════════════════════════
+#  Per-station stream properties (Component_Detail)
+# ════════════════════════════════════════════════════════════════════════
+# Standard-liquid specific gravity (60°F, volume-additive basis, GPSA-style) for
+# light pure components whose HMB 'SLD' entries are not usable.  Priority:
+# this table → library/HMB SLD (20–125 lb/ft3) → SG 0.70 assumed.  VERIFY.
+_STD_LIQ_SG = {
+    "H2O": 0.999, "H2S": 0.8014, "NH3": 0.6173, "H2": 0.0709, "NITROGEN": 0.8094,
+    "METHANE": 0.3000, "ETHANE": 0.3564, "PROPANE": 0.5077, "IC4": 0.5631,
+    "NC4": 0.5844, "IC5": 0.6247, "NC5": 0.6311, "CO2": 0.8172, "O2": 1.1410,
+    "CO": 0.7931, "CL2": 1.4247, "SO2": 1.3970, "PROPYLENE": 0.5220,
+    "1-BUTENE": 0.6004, "BUTADIENE": 0.6272,
+}
+_V_STD_FT3_LBMOL = 379.48          # ideal gas at 14.696 psia, 60°F
+
+
+def _std_liq_density(name: str, c: dict | None, fallback: float | None = None) -> float:
+    sg = _STD_LIQ_SG.get(str(name).upper())
+    if sg:
+        return sg * 62.428
+    sld = (c or {}).get("sld")
+    if sld and 20.0 <= sld <= 125.0:
+        return sld
+    return fallback or 0.70 * 62.428
+
+
+def _station_props(fr, sp, feed, cmap, p_psia) -> dict | None:
+    """Everything Component_Detail reports for one station (internal FPS).
+
+    Computed from the station's flash (phase split, component flows) and the
+    component constants (HMB COMP_CONSTANTS / built-in library).  Properties
+    that need a property package (Cp, k, σ, enthalpy) are CARRIED from the HMB
+    stream (``sp``) and are blank for manual-composition streams.
+    """
+    if fr is None:
+        return None
+    cmap = cmap or {}
+    T = fr.temp_f if fr.temp_f is not None else (sp.temp_f if sp else None)
+    vm, lm, nv, nl = fr.vap_mass, fr.liq_mass, fr.vap_moles, fr.liq_moles
+    N, M = nv + nl, vm + lm
+    d: dict = {"phase": _phase_of(fr.quality), "T": T, "P": p_psia,
+               "n_tot": N, "m_tot": M, "n_vap": nv, "n_liq": nl,
+               "m_vap": vm, "m_liq": lm,
+               "mw": (M / N) if N > 0 else None,
+               "beta": (nv / N) if N > 0 else None,
+               "x_liq": (nl / N) if N > 0 else None,
+               "w_liq": (lm / M) if M > 0 else None}
+    z_vap = sp.vap_z if sp else None
+    rho_g = (_gas_rho_kgm3(fr.vap_mw, z_vap, T, p_psia) / LBFT3_TO_KGM3
+             if (vm > 0 and T is not None) else None)
+    rho_l = (sp.liq_density if (sp and lm > 0) else None)
+    vg = (vm / rho_g) if rho_g else 0.0
+    vl = (lm / rho_l) if rho_l else 0.0
+    d.update(rho_vap=rho_g, rho_liq=rho_l, q_vap=vg or None, q_liq=vl or None,
+             q_tot=(vg + vl) or None,
+             rho_tot=(M / (vg + vl)) if (vg + vl) > 0 else None,
+             z_tot=((p_psia * (vg + vl)) / (N * 10.7316 * (T + 459.67))
+                    if ((vg + vl) > 0 and N > 0 and T is not None) else None),
+             q_std_vap=N * _V_STD_FT3_LBMOL,
+             z_vap=(z_vap if vm > 0 else None),
+             visc_vap=(sp.vap_visc if (sp and vm > 0) else None),
+             visc_liq=(sp.liq_visc if (sp and lm > 0) else None),
+             cpcv_vap=(sp.vap_cp_cv if (sp and vm > 0) else None))
+    # carried HMB properties (blank when manual)
+    for k, a in (("cp_vap", "vap_cp"), ("cp_liq", "liq_cp"),
+                 ("k_vap", "vap_therm_cond"), ("k_liq", "liq_therm_cond"),
+                 ("sigma", "liq_surf_tens"), ("h_vap", "vap_sp_enthalpy"),
+                 ("h_liq", "liq_sp_enthalpy")):
+        d[k] = getattr(sp, a, None) if sp else None
+    if d["h_vap"] is not None or d["h_liq"] is not None:
+        hv, hl = (d["h_vap"] or 0.0), (d["h_liq"] or 0.0)
+        wv = (vm / M) if M > 0 else 0.0
+        d["h_spec"] = wv * hv + (1 - wv) * hl
+        d["h_tot"] = d["h_spec"] * M / 1e6                 # MMBTU/hr
+
+    # ── composition-based properties ─────────────────────────────────────
+    names = list(getattr(feed, "names", None) or [])
+    y, x = (fr.y or []), (fr.x or [])
+    if names and len(y) == len(names) and len(x) == len(names) and N > 0:
+        mwl = feed.mw
+        vmol = [nv * yi for yi in y]
+        lmol = [nl * xi for xi in x]
+        tot = [a + b for a, b in zip(vmol, lmol)]
+        zi = [t / N for t in tot]
+        fb = None                    # HMB stream's own average std density
+        if sp and sp.total_std_liq and sp.total_mass:
+            fb = sp.total_mass / sp.total_std_liq
+        rho_std = [_std_liq_density(n, cmap.get(str(n).upper()), fb)
+                   for n in names]
+        svol_v = sum(vmol[i] * mwl[i] / rho_std[i] for i in range(len(names)))
+        svol_l = sum(lmol[i] * mwl[i] / rho_std[i] for i in range(len(names)))
+        svol = svol_v + svol_l
+        d.update(q_std_liq=svol, q_std_liq_liq=svol_l,
+                 rho_std_liq=(lm / svol_l) if svol_l > 0 else None)
+        if svol > 0:
+            sg = (M / svol) / 62.428
+            d["api"] = 141.5 / sg - 131.5
+        d["x_water"] = sum(zi[i] for i, n in enumerate(names)
+                           if str(n).upper() in ("H2O", "WATER"))
+
+        def mavg(key, scale=None):
+            # Kay mole-average; only trusted when the constants cover ≥98 % of
+            # the moles (HMB pseudo-components may be missing from the sheet)
+            num_, den_ = 0.0, 0.0
+            for i, n in enumerate(names):
+                v = (cmap.get(str(n).upper()) or {}).get(key)
+                if v is None:
+                    continue
+                num_ += zi[i] * (scale(v) if scale else v)
+                den_ += zi[i]
+            return (num_ / den_) if den_ >= 0.98 else None
+        d["tc"] = mavg("tc_f")
+        d["pc"] = mavg("pc_psia")
+        d["vc"] = mavg("vc")
+        d["omega"] = mavg("omega")
+        # fall back to the HMB stream's own (rigorous) values where incomplete
+        if sp is not None:
+            for k, a in (("tc", "tc_f"), ("pc", "pc_psia"), ("omega", "acentric")):
+                if d.get(k) is None:
+                    d[k] = getattr(sp, a, None)
+        tb = mavg("nbp_f", lambda v: v + 459.67)
+        if tb and svol > 0:
+            d["watson"] = (tb ** (1.0 / 3.0)) / ((M / svol) / 62.428)
+    return d
+
+
 # ── Yellow-cell property overrides (win over a resolved HMB stream) ──────
 # Maps an input-sheet column to the StreamProps/FlashResult field it overrides.
 _YELLOW_OVERRIDE_MAP = {
@@ -4481,6 +4608,8 @@ def build_profile_flash_noiso(
             mach_vap     = mom["mach_vap"],
             rhov2_vap    = mom["rhov2_vap"],
             rhov2_liq    = mom["rhov2_liq"],
+            props        = (_station_props(fr, sp, a_feed, const_map, p_eval)
+                            if fr is not None else None),
         ))
         flashes.append(fr)
         comps.append(comp_vec)
@@ -4736,6 +4865,136 @@ def _build_pressure_profile_sheet(
         ws.add_chart(chart, f"A{sr + 2}")
 
     return sheet_title
+
+
+def _build_component_detail_noiso(wb, stations, phase, station_lines=None,
+                                  line_colors=None):
+    """Component_Detail: hydraulic results + full stream property set per fitting.
+
+    Stream properties come from each station's flash: HMB composition when a
+    Stream Lookup is used, else the Stream_Composition sheet.  Columns marked †
+    (Cp, k, σ, enthalpy) are carried from the HMB stream and blank for manual
+    composition.
+    """
+    u = _u()
+    ws = wb.create_sheet("Component_Detail")
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = PURPLE
+
+    def D(code, v, nd=4):
+        return None if v is None else u.disp(code, v, nd)
+
+    def R(v, nd=4):
+        return None if v is None else round(v, nd)
+
+    base = [("Seq", None, 5), ("Comp ID", None, 9), ("Fitting", None, 24),
+            (u.hdr("ID", "Lin"), None, 9), (u.hdr("Length", "L"), None, 11),
+            (u.hdr("Velocity", "v"), None, 13), ("Reynolds", None, 11),
+            ("Friction f", None, 10), (u.hdr("Mix Density", "rho"), None, 14),
+            (u.hdr("dP Total", "dP"), None, 13), (u.hdr("P Out", "P"), None, 12),
+            ("Mach (vapor)", None, 11),
+            ("ρv² Vapor (kg/m·s²)", None, 14), ("ρv² Liquid (kg/m·s²)", None, 14)]
+    # (header, getter(props) → value, width, group)
+    tot = [
+        ("Phase", lambda p: p["phase"], 11),
+        (u.hdr("Temperature", "T"), lambda p: D("T", p["T"], 2), 12),
+        (u.hdr("Pressure (in)", "P"), lambda p: D("P", p["P"], 3), 13),
+        (u.hdr("Total Molar Rate", "molflow"), lambda p: D("molflow", p["n_tot"], 3), 15),
+        (u.hdr("Total Mass Rate", "mflow"), lambda p: D("mflow", p["m_tot"], 1), 14),
+        (u.hdr("Std Liq Vol Rate", "qvol"), lambda p: D("qvol", p.get("q_std_liq"), 2), 14),
+        (u.hdr("Std Vap Vol Rate", "qvol"), lambda p: D("qvol", p["q_std_vap"], 1), 15),
+        (u.hdr("Actual Vol Rate", "qvol"), lambda p: D("qvol", p["q_tot"], 2), 14),
+        ("Molecular Weight", lambda p: R(p["mw"], 3), 11),
+        ("Enthalpy † (MM BTU/HR)", lambda p: R(p.get("h_tot"), 4), 13),
+        ("Specific Enthalpy † (BTU/LB)", lambda p: R(p.get("h_spec"), 2), 14),
+        ("Liquid Mole Fraction", lambda p: R(p["x_liq"], 5), 11),
+        ("Vapor Mole Fraction", lambda p: R(p["beta"], 5), 11),
+        ("Liquid Weight Fraction", lambda p: R(p["w_liq"], 5), 11),
+        ("Water Mole Fraction", lambda p: R(p.get("x_water"), 5), 11),
+        (u.hdr("Actual Density (total)", "rho"), lambda p: D("rho", p["rho_tot"], 5), 14),
+        (u.hdr("True Critical Temp", "T"), lambda p: D("T", p.get("tc"), 2), 12),
+        (u.hdr("True Critical Pressure", "P"), lambda p: D("P", p.get("pc"), 2), 13),
+        ("True Critical Volume (FT3/LB-MOL)", lambda p: R(p.get("vc"), 4), 14),
+        ("Acentric Factor", lambda p: R(p.get("omega"), 4), 10),
+        ("Watson K (UOP)", lambda p: R(p.get("watson"), 3), 10),
+        ("Std API Gravity (°API)", lambda p: R(p.get("api"), 2), 11),
+        ("Z Factor (total)", lambda p: R(p["z_tot"], 4), 10),
+    ]
+    vap = [
+        (u.hdr("Vapor Molar Rate", "molflow"), lambda p: D("molflow", p["n_vap"], 3), 15),
+        (u.hdr("Vapor Mass Rate", "mflow"), lambda p: D("mflow", p["m_vap"], 1), 14),
+        (u.hdr("Vapor Actual Density", "rho"), lambda p: D("rho", p["rho_vap"], 5), 14),
+        ("Vapor Viscosity (cP)", lambda p: R(p["visc_vap"], 5), 12),
+        ("Vapor Cp † (BTU/LB-F)", lambda p: R(p.get("cp_vap"), 4), 12),
+        ("Vapor Cp/Cv", lambda p: R(p["cpcv_vap"], 4), 10),
+        ("Vapor Z", lambda p: R(p["z_vap"], 4), 9),
+        ("Vapor Thermal Cond † (BTU/HR-FT-F)", lambda p: R(p.get("k_vap"), 5), 15),
+    ]
+    liq = [
+        (u.hdr("Liquid Molar Rate", "molflow"), lambda p: D("molflow", p["n_liq"], 3), 15),
+        (u.hdr("Liquid Mass Rate", "mflow"), lambda p: D("mflow", p["m_liq"], 1), 14),
+        (u.hdr("Liquid Actual Density", "rho"), lambda p: D("rho", p["rho_liq"], 4), 14),
+        (u.hdr("Liquid Std Density", "rho"), lambda p: D("rho", p.get("rho_std_liq"), 4), 14),
+        ("Liquid Viscosity (cP)", lambda p: R(p["visc_liq"], 5), 12),
+        ("Liquid Cp † (BTU/LB-F)", lambda p: R(p.get("cp_liq"), 4), 12),
+        ("Liquid Surface Tension † (DYNE/CM)", lambda p: R(p.get("sigma"), 4), 14),
+        ("Liquid Thermal Cond † (BTU/HR-FT-F)", lambda p: R(p.get("k_liq"), 5), 15),
+        (u.hdr("Liquid Std LV Rate", "qvol"), lambda p: D("qvol", p.get("q_std_liq_liq"), 3), 14),
+    ]
+    groups = [(tot, "375623"), (vap, STEEL), (liq, PURPLE)]
+    ncol = len(base) + sum(len(g) for g, _ in groups)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    _c(ws, 1, 1,
+       f"COMPONENT DETAIL   |   Phase model: {phase}   |   per-fitting stream properties "
+       "from the local flash (HMB composition, or Stream_Composition when no HMB stream).  "
+       "† = carried from the HMB stream (blank for manual composition).  Critical "
+       "properties = mole-averaged (Kay); Std liquid basis 60°F, volume-additive.",
+       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
+    ws.row_dimensions[1].height = 42
+
+    _hdr(ws, [h for h, _, _ in base] + [h for g, _ in groups for h, _, _ in g], row=2)
+    ci = len(base) + 1
+    for g, colr in groups:
+        for _ in g:
+            ws.cell(2, ci).fill = _fill(colr)
+            ci += 1
+    ws.row_dimensions[2].height = 54
+    for c in range(1, ncol + 1):
+        ws.cell(2, c).alignment = Alignment(wrap_text=True, horizontal="center",
+                                            vertical="center")
+    ws.freeze_panes = "D3"
+    multi = bool(station_lines and line_colors and len(set(station_lines)) > 1)
+    r = 3
+    prev = None
+    for i, st in enumerate(stations):
+        cur = station_lines[i] if (station_lines and i < len(station_lines)) else None
+        if multi and cur and cur != prev:
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncol)
+            _c(ws, r, 1, f"  ▶  LINE: {cur}", bg=line_colors.get(cur, LGRAY),
+               fg=NAVY, sz=9, bold=True)
+            r += 1
+            prev = cur
+        bg = (line_colors.get(cur, LGRAY) if (multi and cur)
+              else (LGRAY if i % 2 else WHITE))
+        vals = [st.seq, st.comp_id, st.fitting, u.disp("Lin", st.id_in),
+                u.disp("L", st.length_ft), u.disp("v", st.v_fts), st.Re, st.f,
+                u.disp("rho", st.rho_lbft3, 5), u.disp("dP", st.dp_total_psi, 5),
+                u.disp("P", st.p_out_psia),
+                R(st.mach_vap), R(st.rhov2_vap, 1), R(st.rhov2_liq, 1)]
+        pr = st.props
+        for g, _ in groups:
+            for _h, fn, _w in g:
+                try:
+                    vals.append(fn(pr) if pr else None)
+                except Exception:
+                    vals.append(None)
+        for c, v in enumerate(vals, 1):
+            _c(ws, r, c, "" if v is None else v, bg=bg, sz=9,
+               ha="right" if isinstance(v, (int, float)) else "left")
+        r += 1
+    widths = [w for _, _, w in base] + [w for g, _ in groups for _, _, w in g]
+    for c, w in enumerate(widths, 1):
+        cw(ws, c, w)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -5243,10 +5502,10 @@ def run_noiso(
         def_case = c["case"] or case
         resolver = _make_stream_resolver(def_hmb, def_case, map_path)
         # HMB COMP_CONSTANTS (MW/Tc/Pc/ω) — only needed for Stream_Composition
-        cmap = (FV._read_comp_constants(def_hmb)
-                if any(r.get("_comp") for r in
-                       c["main_rows"] + [x for b in c["branch_blocks"] for x in b])
-                else None)
+        try:
+            cmap = FV._read_comp_constants(def_hmb)
+        except Exception:
+            cmap = None
 
         # ── Circuit default StreamProps (drives the screening sheets) ─────
         feed = None
@@ -5440,7 +5699,9 @@ def run_noiso(
         # ── Screening / analysis sheets (all main stations, whole circuit)
         circuit_label = f"Circuit {cid}  ({', '.join(lns)})"
         if main_stations:
-            HE.build_detail_sheet(wb, main_stations, phase)
+            _build_component_detail_noiso(wb, main_stations, phase,
+                                          station_lines=station_lines,
+                                          line_colors=lc)
             HE.build_stream_sheet(wb, sp, phase)
             HE.build_fiv_sheet(wb, main_stations, sp,
                                 circuit_label, sk, gas_density_fn=gdf,
@@ -6035,6 +6296,8 @@ def _pure_library() -> dict:
             "tc_f": tc * 1.8 - 459.67, "pc_psia": pc * 14.5038, "omega": om,
             "nbp_f": tb * 1.8 - 459.67,
             "sld": (sg * 62.428) if sg else None,
+            # Vc from Zc ≈ 0.291 − 0.080·ω (Reid) ; ft3/lbmol
+            "vc": (0.291 - 0.080 * om) * 10.7316 * (tc * 1.8) / (pc * 14.5038),
         }
     for al, nm in _PURE_ALIASES.items():
         if nm.upper() in out:
@@ -6075,6 +6338,9 @@ def _read_comp_constants(hmb_path) -> dict:
                     except (TypeError, ValueError): return None
                 out[name.upper()] = {
                     "name":    name,
+                    "nbp_f":   _f(row[5]),    # F
+                    "sld":     _f(row[6]),    # G  (lb/ft3)
+                    "vc":      _f(row[10]) if len(row) > 10 else None,  # K ft3/lbmol
                     "mw":      _f(row[4]),    # E
                     "tc_f":    _f(row[8]),    # I
                     "pc_psia": _f(row[9]),    # J
