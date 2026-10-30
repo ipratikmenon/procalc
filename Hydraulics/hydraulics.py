@@ -9,6 +9,10 @@ flow_pattern_maps.py  into ONE engine.  Companion modules:
   comp_constants.py     — component property constants (project data)
   ../common/units.py    — FPS/SI units layer (UNITS sheet in the input workbook)
 
+Manual (no-HMB) streams may carry a mass/mole composition via the
+Stream_Composition input sheet; streams entering at different Seq are mixed.
+Pressure_Profile and FIV_EI_T2.2 report Mach (vapor) and ρv² (vapor / liquid).
+
 Run:
     python hydraulics.py --template            # create blank FPS input
     python hydraulics.py --template --si       # create blank SI input
@@ -59,12 +63,15 @@ PIPE_OD_IN: dict[str, float] = {
     "2": 2.375, "2-1/2": 2.875, "3": 3.500, "3-1/2": 4.000, "4": 4.500,
     "5": 5.563, "6": 6.625, "8": 8.625, "10": 10.750, "12": 12.750,
     "14": 14.000, "16": 16.000, "18": 18.000, "20": 20.000, "24": 24.000,
+    "26": 26.000, "28": 28.000, "30": 30.000, "32": 32.000, "34": 34.000,
+    "36": 36.000,
 }
 
 # Ordered NPS sequence for range expansion.
 NPS_ORDER: list[str] = [
     "1/2", "3/4", "1", "1-1/4", "1-1/2", "2", "2-1/2", "3", "3-1/2", "4",
     "5", "6", "8", "10", "12", "14", "16", "18", "20", "24",
+    "26", "28", "30", "32", "34", "36",
 ]
 
 # NPS -> DN (mm) for cross-referencing the DN column on the GEMS sheets.
@@ -72,7 +79,8 @@ NPS_TO_DN: dict[str, int] = {
     "1/2": 15, "3/4": 20, "1": 25, "1-1/4": 32, "1-1/2": 40, "2": 50,
     "2-1/2": 65, "3": 80, "3-1/2": 90, "4": 100, "5": 125, "6": 150,
     "8": 200, "10": 250, "12": 300, "14": 350, "16": 400, "18": 450,
-    "20": 500, "24": 600,
+    "20": 500, "24": 600, "26": 650, "28": 700, "30": 750, "32": 800,
+    "34": 850, "36": 900,
 }
 
 # ── ASME B36.10M / B36.19M wall thickness (inches) ─────────────────────────
@@ -100,6 +108,15 @@ PIPE_WALL_IN: dict[str, dict[str, float]] = {
     "18":    {"10S": 0.250, "STD": 0.375, "40": 0.562, "XS": 0.500, "80": 0.938, "160": 1.781},
     "20":    {"10S": 0.250, "STD": 0.375, "40": 0.594, "XS": 0.500, "80": 1.031},
     "24":    {"10S": 0.250, "STD": 0.375, "40": 0.688, "XS": 0.500, "80": 1.219},
+    # 26"-36": only STD/XS are verified (ASME B36.10 holds these constant
+    # through the large-bore range); other schedules intentionally omitted
+    # rather than guessed.
+    "26":    {"STD": 0.375, "XS": 0.500},
+    "28":    {"STD": 0.375, "XS": 0.500},
+    "30":    {"STD": 0.375, "XS": 0.500},
+    "32":    {"STD": 0.375, "XS": 0.500},
+    "34":    {"STD": 0.375, "XS": 0.500},
+    "36":    {"STD": 0.375, "XS": 0.500},
 }
 
 # Commercial schedules ordered thinnest -> thickest, used to round a computed
@@ -357,7 +374,8 @@ _NPS_BY_FLOAT = {
     0.5: "1/2", 0.75: "3/4", 1.0: "1", 1.25: "1-1/4", 1.5: "1-1/2", 2.0: "2",
     2.5: "2-1/2", 3.0: "3", 3.5: "3-1/2", 4.0: "4", 5.0: "5", 6.0: "6",
     8.0: "8", 10.0: "10", 12.0: "12", 14.0: "14", 16.0: "16", 18.0: "18",
-    20.0: "20", 24.0: "24",
+    20.0: "20", 24.0: "24", 26.0: "26", 28.0: "28", 30.0: "30", 32.0: "32",
+    34.0: "34", 36.0: "36",
 }
 
 def _nps_string(bore) -> str | None:
@@ -956,6 +974,10 @@ class Station:
     dp_elev_psi: float
     dp_total_psi: float
     note: str = ""
+    # Per-phase momentum flux & vapour Mach (SI; None when not computable)
+    mach_vap: float | None = None       # v_mix / c_vapour
+    rhov2_vap: float | None = None      # ρ_g · v_sg²   (kg/m·s²)
+    rhov2_liq: float | None = None      # ρ_l · v_sl²   (kg/m·s²)
 
 
 def build_profile(rows, sp, phase, p_start_psia) -> list[Station]:
@@ -1447,8 +1469,9 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
         _U.hdr("ID", "Lin"), _U.hdr("Velocity", "v"), _U.hdr("ρ", "rho"),
         "ρv² (kg/m·s²)", "GVF", "FCF",
         "Fv Stiff", "Fv Med-Stiff", "Fv Medium", "Fv Flexible",
+        "Mach (vapor)", "ρv² Vapor (kg/m·s²)", "ρv² Liquid (kg/m·s²)",
     ]
-    n_base = len(base_headers)               # 16
+    n_base = len(base_headers)               # 19
     # Per-LOF block: Support type, Span (m), Span (ft).
     lim_headers = []
     for lim in limits:
@@ -1512,6 +1535,9 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
             round(rho_v2, 1), round(gvf, 4), round(fcf_v, 4),
             round(fv_stiff(D, T), 1), round(fv_medstiff(D, T), 1),
             round(fv_medium(D, T), 1), round(fv_flexible(D, T), 1),
+            round(s.mach_vap, 4)  if s.mach_vap  is not None else None,
+            round(s.rhov2_vap, 1) if s.rhov2_vap is not None else None,
+            round(s.rhov2_liq, 1) if s.rhov2_liq is not None else None,
         ]
         for ci, v in enumerate(base_vals, 1):
             _c(ws, r, ci, "" if v is None else v, bg=bg, sz=9,
@@ -1531,7 +1557,8 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
             worst = (rho_v2, s, gvf, fcf_v, assessments)
         r += 1
 
-    base_widths = [5, 9, 16, 6, 9, 9, 8, 12, 11, 14, 8, 8, 11, 12, 11, 12]
+    base_widths = [5, 9, 16, 6, 9, 9, 8, 12, 11, 14, 8, 8, 11, 12, 11, 12,
+                   11, 16, 16]
     widths = base_widths + [16, 13, 13] * len(limits)
     for ci, w in enumerate(widths, 1):
         cw(ws, ci, w)
@@ -1550,6 +1577,8 @@ def build_fiv_sheet(wb, stations, sp, line_no, stream_name,
         "",
         "METHOD — Energy Institute T2.2 screening (SI units).",
         "  ρv² = ρ·v²  (effective mixture density × effective velocity²).",
+        "  ρv² Vapor / Liquid = ρ_phase · (superficial velocity of that phase)²;  "
+        "Mach (vapor) = mixture velocity / √(k·Z·R·T/MW), k = Vap Cp/Cv.",
         "  FCF: GVF<0.2 → 0.2+4·GVF;  0.2–0.88 → 1;  0.88–0.99 → "
         "−27.882·GVF²+45.545·GVF−17.495;  ≥0.99 → √(µgas/1.2e-3).",
         "  Fv per support arrangement = α·(D/T)^β  (Medium/Flexible ≤DN200 use "
@@ -2356,9 +2385,17 @@ FITTING_NAMES: list[str] = [
     # Tees
     "Tee Join Branch Flow 1",
     "Tee Join Branch Flow 2",
+    "Tee Join Branch Flow 3",
+    "Tee Join Branch Flow 4",
+    "Tee Join Branch Flow 5",
+    "Tee Join Branch Flow 6",
     "Tee Join Line Flow",
     "Tee Split Branch Flow 1",
     "Tee Split Branch Flow 2",
+    "Tee Split Branch Flow 3",
+    "Tee Split Branch Flow 4",
+    "Tee Split Branch Flow 5",
+    "Tee Split Branch Flow 6",
     "Tee Split Line Flow",
     # Special / instruments
     "Fix Pressure",
@@ -2420,9 +2457,17 @@ _K_TABLE: dict[str, float] = {
     "sudden enlargement":                     1.00,
     "tee join branch flow 1":                 1.80,
     "tee join branch flow 2":                 1.80,
+    "tee join branch flow 3":                 1.80,
+    "tee join branch flow 4":                 1.80,
+    "tee join branch flow 5":                 1.80,
+    "tee join branch flow 6":                 1.80,
     "tee join line flow":                     0.40,
     "tee split branch flow 1":                1.80,
     "tee split branch flow 2":                1.80,
+    "tee split branch flow 3":                1.80,
+    "tee split branch flow 4":                1.80,
+    "tee split branch flow 5":                1.80,
+    "tee split branch flow 6":                1.80,
     "tee split line flow":                    0.40,
     "nozzle":                                 0.04,
     "orifice":                                0.00,   # dP from Instr dP column
@@ -2555,6 +2600,8 @@ INPUT_HEADERS: list[str] = [
     "Run Type",               # Main | Branch
     "Seq",                    # component sequence (auto-incremented if blank)
     "Start P (psia)",         # starting pressure; first row of the circuit / branch
+    "Upstream Line No",       # Branch only: Main Line No it splits from; blank → previous Main line
+    "Upstream Seq",           # Branch only: exact Main Seq of the 'Tee Split Branch Flow N' row
     "Flow Fraction from Main",  # signed fraction of Main flow at a Tee (+merge / -split)
     "Mass Vapor Fraction Carry Over",   # MASS fraction of vapour carried (blank=1; 0=dump)
     "Mass Liquid Fraction Carry Over",  # MASS fraction of liquid carried (blank=1; 0=dump)
@@ -2606,6 +2653,8 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Stream Lookup": ("Stream Lookup", None), "Run Type": ("Run Type", None),
     "Seq": ("Seq", None),
     "Start P (psia)": ("Start P", "P"),
+    "Upstream Line No": ("Upstream Line No", None),
+    "Upstream Seq": ("Upstream Seq", None),
     "Flow Fraction from Main": ("Flow Fraction from Main", None),
     "Mass Vapor Fraction Carry Over": ("Mass Vapor Fraction Carry Over", None),
     "Mass Liquid Fraction Carry Over": ("Mass Liquid Fraction Carry Over", None),
@@ -2704,6 +2753,68 @@ def _parse_hmb_filename(path: str | None) -> dict:
 # ════════════════════════════════════════════════════════════════════════
 #  Input-template creator
 # ════════════════════════════════════════════════════════════════════════
+def _build_composition_input_sheet(wb, usys) -> None:
+    """Stream_Composition input sheet: one column per phase of each inlet stream
+    (see the block comment above ``_read_stream_composition``)."""
+    ws = wb.create_sheet(_COMP_SHEET)
+    ws.sheet_view.showGridLines = False
+    n_ex = 4                                   # example columns
+    ncol = 1 + max(n_ex, 8)                    # leave room for more streams
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    _c(ws, 1, 1,
+       "STREAM COMPOSITION  —  use when NOT referencing an HMB stream.  One COLUMN per phase "
+       "of each inlet stream; Seq says where it enters the line.  Streams entering at "
+       "different Seq (or in extra columns) are MIXED.  Component names = HMB 'COMPONENTS' sheet.",
+       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
+    ws.row_dimensions[1].height = 40
+    labels = ["Circuit (optional)", "Line No", "Seq", "Comp ID (optional)",
+              "Phase", "Basis", f"Phase Flow ({usys.label('mflow')}, mass)"]
+    for i, lab in enumerate(labels):
+        _c(ws, 2 + i, 1, lab, bg=NAVY, fg=WHITE, sz=9, bold=True)
+    _c(ws, 9, 1, "Component", bg=GRNHDR, fg=WHITE, sz=9, bold=True)
+    for ci in range(2, ncol + 1):
+        _c(ws, 9, ci, "amount ↓", bg=GRNHDR, fg=WHITE, sz=9, bold=True, ha="center")
+        for r in range(2, 9):
+            _c(ws, r, ci, None, bg=AMBER, sz=9)
+    cw(ws, 1, 30)
+    for ci in range(2, ncol + 1):
+        cw(ws, ci, 14)
+    ws.freeze_panes = "B10"
+
+    comps = ["H2", "METHANE", "ETHANE", "PROPANE", "NITROGEN", "H2O", "H2S", "CO2"]
+    for i in range(60):                        # component-name rows (free to edit)
+        _c(ws, 10 + i, 1, comps[i] if i < len(comps) else None, bg=WHITE, sz=9)
+        for ci in range(2, ncol + 1):
+            _c(ws, 10 + i, ci, None, bg=AMBER, sz=9)
+
+    # Examples: Circuit C2 / Line H-285.  Gas A enters at Seq 1 (flow taken from
+    # the Pipeline_Input row, 12000 lb/hr); gas B (own flow) is mixed in at Seq 2.
+    flow_a = round(usys.from_internal("mflow", 12000.0), 3)
+    flow_b = round(usys.from_internal("mflow", 3000.0), 3)
+    ex = [
+        ("C2", "H-285", 1, None, "Vapor", "Mass", None,
+         {"H2": 0.10, "METHANE": 0.60, "ETHANE": 0.30}),
+        ("C2", "H-285", 2, None, "Vapor", "Mole", flow_b,
+         {"NITROGEN": 0.80, "CO2": 0.20}),
+    ]
+    for k, (cir, ln, sq, cid, ph, bs, fl, comp) in enumerate(ex):
+        ci = 2 + k
+        for r, v in zip(range(2, 9), (cir, ln, sq, cid, ph, bs, fl)):
+            _c(ws, r, ci, v, bg=AMBER, sz=9, italic=True, fg="808080")
+        for r in range(10, 70):
+            nm = ws.cell(r, 1).value
+            if nm in comp:
+                _c(ws, r, ci, comp[nm], bg=AMBER, sz=9, italic=True, fg="808080")
+
+    dv_ph = DataValidation(type="list", formula1='"Vapor,Liquid"', allow_blank=True)
+    dv_bs = DataValidation(type="list", formula1='"Mass,Mole"', allow_blank=True)
+    ws.add_data_validation(dv_ph)
+    ws.add_data_validation(dv_bs)
+    last = get_column_letter(ncol + 40)
+    dv_ph.add(f"B6:{last}6")
+    dv_bs.add(f"B7:{last}7")
+
+
 def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
                           unit_system: str = "FPS") -> str:
     """Write a blank, styled input workbook with Circuit-aware column layout.
@@ -2733,6 +2844,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     width_map = {
         "Circuit": 9, "Line No": 12, "HMB File": 16, "Case": 10,
         "Stream Lookup": 14, "Run Type": 10, "Seq": 6, "Start P (psia)": 12,
+        "Upstream Line No": 14, "Upstream Seq": 11,
         "Flow Fraction from Main": 14, "Temp (degF)": 11, "Vapor Mass Flow": 14,
         "Vap MW": 9, "Vap Visc (cP)": 11, "Vap Z": 8, "Vap Cp/Cv": 10,
         "Vap Density (lb/ft3)": 14, "Liq Mass Flow (lb/h)": 14,
@@ -2818,6 +2930,9 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
             cell.fill = PatternFill("solid", fgColor=(AMBER if ci in manual_idx else WHITE))
             cell.alignment = Alignment(horizontal="left", vertical="center")
 
+    # ── Stream_Composition sheet (manual mass/mole composition, no HMB) ──
+    _build_composition_input_sheet(wb, usys)
+
     # ── Notes sheet ──────────────────────────────────────────────────
     ws_n = wb.create_sheet("Notes")
     ws_n.sheet_view.showGridLines = False
@@ -2840,12 +2955,32 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  Leave Stream Lookup BLANK to enter properties by hand in the yellow columns.", False),
         ("  Fill Temp, Vapor Mass Flow, Vap MW/Visc/Z/Cp-Cv/Density and (optionally) the Liq columns.", False),
         ("  The engine synthesises a frozen flash split from these numbers — no HMB needed.", False),
+        ("  OVERRIDE MODE: with Stream Lookup filled (pulling an HMB stream), filling a yellow cell on", False),
+        ("  ANY row of that stream makes the typed value win over the HMB property for that field —", False),
+        ("  e.g. type a Vapor Mass Flow to test a different rate without touching the HMB file.", False),
+        ("  The override persists on every row downstream until changed again or a new stream loads.", False),
         ("", False),
         ("FLOW FRACTION FROM MAIN (Tee split / merge)", True),
         ("  On a Tee fitting row, enter a SIGNED fraction of the Main flow:", False),
-        ("    negative  = SPLIT  (that fraction leaves the line)", False),
-        ("    positive  = MERGE  (that fraction joins the line)", False),
+        ("    negative  = SPLIT   (that fraction of the CURRENT flow leaves the line)", False),
+        ("    positive  = MERGE   (running flow becomes that fraction of the ORIGINAL Main flow —", False),
+        ("                         an absolute target, e.g. 0.125 → 0.25 → 0.5 → 1.0 builds a header", False),
+        ("                         up in stages as branches join it)", False),
         ("  The running vapour & liquid mass flows are scaled in Seq order; downstream dP follows.", False),
+        ("", False),
+        ("MANUAL COMPOSITION  (sheet 'Stream_Composition' — use INSTEAD of an HMB stream)", True),
+        ("  Each COLUMN is one phase of one inlet stream.  Header rows: Circuit (optional), Line No,", False),
+        ("  Seq (where the stream enters), Comp ID (optional, if Seq repeats on a line), Phase", False),
+        ("  (Vapor/Liquid), Basis (Mass/Mole — fractions or flows, normalised), Phase Flow (mass).", False),
+        ("  Component rows use the EXACT names of the HMB 'COMPONENTS' sheet (MW/Tc/Pc/ω are read", False),
+        ("  from the HMB 'COMP_CONSTANTS' sheet, so set HMB File on the row or pass the HMB on the CLI).", False),
+        ("  Phase Flow blank → the Vapor / Liq Mass Flow cell of that Pipeline_Input row is used.", False),
+        ("  Still type Temp, Vap Z, Vap Visc, Vap Cp/Cv, Liq Density, Liq Visc on that row (yellow);", False),
+        ("  MW and the vapour/liquid split come from the composition.", False),
+        ("  MIXING: the first composition on a circuit starts the flow.  Every later column (a later Seq,", False),
+        ("  or another column at the same Seq) is MIXED in: component flows add, the blend is re-flashed", False),
+        ("  and the mixed MW / properties carry downstream.  Provide BOTH a vapour and a liquid column", False),
+        ("  for true K = y/x; with one phase only, Wilson K from the HMB constants is used.", False),
         ("", False),
         ("MULTIPLE LINES IN SERIES", True),
         ("  Change Line No to mark a new pipe line.  Keep Circuit the same.", False),
@@ -2882,6 +3017,22 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
         ("  Branches are marched independently.  FIV/AIV/regime sheets use the Main run.", False),
+        ("", False),
+        ("AUTO-LINKED SPLITS & JOINS (Main ↔ Branch)", True),
+        ("  JOIN (Branch → Main): on a Main row, set Fitting = 'Tee Join Branch Flow N'.", False),
+        ("  The Nth Branch block sharing that row's Line No is auto-matched by ordinal count;", False),
+        ("  its real flashed outlet (flow + composition) is blended into Main at that row — no", False),
+        ("  manual entry needed on the Branch side.", False),
+        ("  SPLIT (Main → Branch): on a Main row, set Fitting = 'Tee Split Branch Flow N' with a", False),
+        ("  negative 'Flow Fraction from Main'.  The exact flow + composition that leaves Main at", False),
+        ("  that row is captured and auto-fed as the Branch's inlet — the Branch needs no Stream", False),
+        ("  Lookup or manual properties of its own.", False),
+        ("  Upstream Line No (Branch, optional): which Main Line No this Branch splits from.", False),
+        ("    Blank → defaults to the most recently seen Main Line No.", False),
+        ("  Upstream Seq (Branch, optional): the exact Seq of the Main 'Tee Split Branch Flow N' row.", False),
+        ("    Blank → matched by ordinal count, same as the Join side (N = 1, 2, 3 … up to 6).", False),
+        ("  A Branch with no Upstream Line No match falls back to standalone marching (own Stream", False),
+        ("  Lookup / manual properties / circuit default).", False),
     ]
     note_lines += [
         ("", False),
@@ -2914,7 +3065,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
     ws = next(
         (s for s in wb.worksheets if s.title == "Pipeline_Input"),
-        next((s for s in wb.worksheets if s.title not in ("Notes", "_FittingList")),
+        next((s for s in wb.worksheets if s.title not in ("Notes", "_FittingList", _COMP_SHEET)),
              None),
     )
     if ws is None:
@@ -2951,6 +3102,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
     current_start_p: float | None = None # start P carried within circuit
     current_hmb:     str | None = None   # HMB File carried within circuit
     current_case:    str | None = None   # Case carried within circuit
+    current_main_line: str | None = None # most recent Main Line No (default Upstream Line No)
 
     for rv in ws.iter_rows(min_row=3, values_only=True):
         if not rv or all(v is None for v in rv):
@@ -2978,6 +3130,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             current_start_p = None
             current_hmb     = None
             current_case    = None
+            current_main_line = None
 
         sl = txt(g(rv, "Stream Lookup"))
         if sl:
@@ -3001,6 +3154,14 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             seq_ctr[seq_key] = seq_ctr.get(seq_key, 0) + 1
             seq = seq_ctr[seq_key]
 
+        # Upstream Line No / Seq (Branch only): where this branch splits off
+        # Main.  Blank Upstream Line No → most recent Main Line No seen so far.
+        ul_raw = txt(g(rv, "Upstream Line No"))
+        upstream_line = ul_raw or (current_main_line if run_type == "Branch" else None)
+        upstream_seq  = num(g(rv, "Upstream Seq"))
+        if run_type == "Main":
+            current_main_line = line_no
+
         rows.append({
             "Circuit":          circuit,
             "Line No":          line_no,
@@ -3008,6 +3169,8 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Case":             current_case,
             "Stream Lookup":    current_stream,
             "Start P (psia)":   sp_val,          # raw (only non-None on explicit rows)
+            "Upstream Line No": upstream_line,
+            "Upstream Seq":     int(upstream_seq) if upstream_seq is not None else None,
             "Run Type":         run_type,
             "Seq":              seq,
             "Flow Fraction from Main":      num(g(rv, "Flow Fraction from Main")),
@@ -3050,6 +3213,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Exch Max Allow dP (psi)": gnum(rv, "Exch Max Allow dP (psi)"),
             "Notes":            txt(g(rv, "Notes")),
         })
+    _attach_stream_composition(rows, _read_stream_composition(wb, usys))
     wb.close()
     return rows
 
@@ -3169,6 +3333,41 @@ def _dp_flashed(g: HE.Geom, sp: HE.StreamProps, fr) -> dict:
     dp_k  = g.k * dyn
     dp_z  = rho * G_SI * g.dz_m
     return dict(rho=rho, v=v, Re=Re, f=f, dp_f=dp_f, dp_k=dp_k, dp_z=dp_z)
+
+
+def _phase_momentum(g: HE.Geom, sp: HE.StreamProps, fr, v_mix_ms: float) -> dict:
+    """Vapour Mach number and per-phase ρv² at one station (SI).
+
+    ρ_g·v_sg² and ρ_l·v_sl² use each phase's SUPERFICIAL velocity (phase
+    volumetric flow / pipe area), so for a single-phase stream the relevant
+    one equals the mixture ρv².  Mach = homogeneous mixture velocity divided
+    by the vapour sound speed  c = √(k·Z·R·T / MW)  (k = Cp/Cv).
+    Any term whose inputs are missing is returned as None.
+    """
+    out = dict(mach_vap=None, rhov2_vap=None, rhov2_liq=None)
+    if fr is None or g.area_m2 <= 0:
+        return out
+    vm = fr.vap_mass * LBHR_TO_KGS
+    lm = fr.liq_mass * LBHR_TO_KGS
+    rho_g = _gas_rho_kgm3(fr.vap_mw, sp.vap_z, sp.temp_f, fr.p_psia)
+    rho_l = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
+    if vm > 0 and rho_g > 0:
+        v_sg = vm / rho_g / g.area_m2
+        out["rhov2_vap"] = rho_g * v_sg * v_sg
+        k = sp.vap_cp_cv
+        if k and k > 0 and fr.vap_mw and sp.temp_f is not None:
+            t_k = (sp.temp_f + F_TO_K_OFFSET) / 1.8
+            c = math.sqrt(k * (sp.vap_z or 1.0) * R_UNIV * t_k
+                          / (fr.vap_mw / 1000.0))
+            out["mach_vap"] = v_mix_ms / c if c > 0 else None
+    elif vm <= 0:
+        out["rhov2_vap"] = 0.0
+    if lm > 0 and rho_l > 0:
+        v_sl = lm / rho_l / g.area_m2
+        out["rhov2_liq"] = rho_l * v_sl * v_sl
+    elif lm <= 0:
+        out["rhov2_liq"] = 0.0
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -3298,6 +3497,15 @@ def _is_tee_join(fitting: str | None) -> int | None:
     return None
 
 
+def _is_tee_split_branch(fitting: str | None) -> int | None:
+    """If ``fitting`` is a 'Tee Split Branch Flow N', return N; else None."""
+    f = (fitting or "").lower()
+    if "tee" in f and "split" in f and "branch" in f:
+        m = re.search(r"(\d+)\s*$", f)
+        return int(m.group(1)) if m else 1
+    return None
+
+
 def _feed_comp_flows(feed, fr, vap_mult: float = 1.0, liq_mult: float = 1.0) -> dict:
     """Per-component molar flow (lb-mol/hr) for a station's (scaled) flash.
 
@@ -3357,7 +3565,7 @@ def _build_feed_from_moles(moles: dict, props: dict, p_ref: float,
     Enthalpy reference scalars are inherited from ``proto`` (the main feed).
     """
     names = [n for n, m in moles.items() if m and m > 0]
-    if len(names) < 2 or not p_ref:
+    if len(names) < 1 or not p_ref:
         return None
     F = sum(moles[n] for n in names)
     z, mw, k_ref, tc_r, omega, pc_l = [], [], [], [], [], []
@@ -3456,6 +3664,345 @@ def _blend_sp(sp_a, sp_b, mass_a: float, mass_b: float):
 # ════════════════════════════════════════════════════════════════════════
 #  No-ISO pressure marcher
 # ════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════
+#  Manual stream COMPOSITION  (no HMB stream) — Stream_Composition sheet
+# ════════════════════════════════════════════════════════════════════════
+# Each column of the sheet is ONE phase of ONE inlet stream:
+#
+#     Circuit | Line No | Seq | Comp ID | Phase | Basis | Phase Flow | <component amounts…>
+#
+# * Seq (+ Line No) picks the Pipeline_Input row where the stream ENTERS.
+#   Comp ID (optional) disambiguates when a Seq number repeats on a line.
+# * Phase = Vapor | Liquid ; Basis = Mass | Mole (fractions OR flows — normalised).
+# * Phase Flow = MASS flow of that phase (blank → the row's Vapor Mass Flow /
+#   Liq Mass Flow cell is used).
+# * The FIRST composition stream on a circuit starts the flow.  Every later
+#   composition column (new Seq, or the same Seq in another column) is MIXED
+#   into the running stream: component flows add, the blend is re-flashed.
+# Component names must match the HMB COMPONENTS / COMP_CONSTANTS sheet — that
+# sheet also supplies MW / Tc / Pc / ω.
+_COMP_SHEET = "Stream_Composition"
+_COMP_HDR_KEYS = (            # (label prefix in col A, key) — longest first
+    ("phase flow", "flow"), ("comp id", "comp_id"), ("line no", "line"),
+    ("circuit", "circuit"), ("phase", "phase"), ("basis", "basis"),
+    ("seq", "seq"),
+)
+
+
+def _read_stream_composition(wb, usys) -> list[dict]:
+    """Parse the Stream_Composition sheet → list of column dicts
+    {circuit, line, seq, comp_id, phase('vap'|'liq'), basis('mass'|'mole'),
+     flow (lb/hr or None), amounts {name: value}, col (letter)}."""
+    if _COMP_SHEET not in wb.sheetnames:
+        return []
+    ws = wb[_COMP_SHEET]
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+    if not grid:
+        return []
+    ncols = max(len(r) for r in grid)
+    hdr: dict[str, int] = {}          # key → grid row index
+    comp_start = None
+    for ri, r in enumerate(grid):
+        a = txt(r[0]) if r else None
+        if not a:
+            continue
+        al = a.lower()
+        if al == "component":
+            comp_start = ri + 1
+            break
+        for pref, key in _COMP_HDR_KEYS:
+            if al.startswith(pref):
+                hdr.setdefault(key, ri)
+                break
+    if comp_start is None or "line" not in hdr or "phase" not in hdr:
+        return []
+
+    def cell(key, ci):
+        ri = hdr.get(key)
+        if ri is None or ci >= len(grid[ri]):
+            return None
+        return grid[ri][ci]
+
+    cols: list[dict] = []
+    for ci in range(1, ncols):
+        line = txt(cell("line", ci))
+        ph = (txt(cell("phase", ci)) or "").lower()
+        if not line or not ph:
+            continue
+        amounts: dict[str, float] = {}
+        for r in grid[comp_start:]:
+            nm = txt(r[0]) if r else None
+            v = num(r[ci]) if (nm and ci < len(r)) else None
+            if nm and v is not None and v > 0:
+                amounts[nm] = amounts.get(nm, 0.0) + v
+        if not amounts:
+            continue
+        seq_v = num(cell("seq", ci))
+        flow_v = num(cell("flow", ci))
+        basis = (txt(cell("basis", ci)) or "mass").lower()
+        cols.append({
+            "circuit": txt(cell("circuit", ci)),
+            "line":    line,
+            "seq":     int(seq_v) if seq_v is not None else None,
+            "comp_id": txt(cell("comp_id", ci)),
+            "phase":   "liq" if ph.startswith("l") else "vap",
+            "basis":   "mole" if basis.startswith("mol") else "mass",
+            "flow":    (usys.to_internal("mflow", flow_v)
+                        if flow_v is not None else None),
+            "amounts": amounts,
+            "col":     get_column_letter(ci + 1),
+        })
+    return cols
+
+
+def _attach_stream_composition(rows: list[dict], cols: list[dict]) -> None:
+    """Attach each composition column to the FIRST matching input row (same
+    Line No / Seq [/ Circuit] [/ Comp ID]) and make that row's phase-flow cells
+    consistent with the composition flows."""
+    for col in cols:
+        hit = next((r for r in rows
+                    if r["Line No"] == col["line"]
+                    and (col["seq"] is None or r["Seq"] == col["seq"])
+                    and (col["circuit"] is None or r["Circuit"] == col["circuit"])
+                    and (col["comp_id"] is None
+                         or (r.get("Comp ID") or "") == col["comp_id"])),
+                   None)
+        if hit is None:
+            print(f"  WARNING: {_COMP_SHEET} column {col['col']} (Line "
+                  f"{col['line']}, Seq {col['seq']}) matches no Pipeline_Input "
+                  f"row — ignored.")
+            continue
+        hit.setdefault("_comp", []).append(col)
+
+    for r in rows:
+        cl = r.get("_comp")
+        if not cl:
+            continue
+        for ph, cell_key in (("vap", "Vapor Mass Flow"),
+                             ("liq", "Liq Mass Flow (lb/h)")):
+            pcols = [c for c in cl if c["phase"] == ph]
+            if not pcols:
+                continue
+            blank = [c for c in pcols if c["flow"] is None]
+            if blank:
+                if len(pcols) == 1 and r.get(cell_key):
+                    blank[0]["flow"] = r[cell_key]
+                else:
+                    print(f"  WARNING: {_COMP_SHEET} column {blank[0]['col']} has "
+                          f"no Phase Flow (and no single {cell_key} on the "
+                          f"row) — column ignored.")
+                    for c in blank:
+                        c["flow"] = 0.0
+            r[cell_key] = sum(c["flow"] or 0.0 for c in pcols)
+        # a phase with no composition column is NOT part of the composition
+        # stream: zero its flow so the row cell can't leak into the mix
+        for ph, cell_key in (("vap", "Vapor Mass Flow"),
+                             ("liq", "Liq Mass Flow (lb/h)")):
+            if not any(c["phase"] == ph for c in cl):
+                r[cell_key] = None
+
+
+def _wilson_k(tc_r: float, pc: float, omega: float, t_r: float, p: float) -> float:
+    return (pc / p) * math.exp(WILSON_C * (1.0 + omega) * (1.0 - tc_r / t_r))
+
+
+def _comp_payload(row: dict, p_ref: float, const_map: dict) -> dict:
+    """Build the inlet stream described by ``row['_comp']`` at pressure ``p_ref``.
+
+    Returns {"feed": FlashFeed, "sp": StreamProps, "moles": {name: lb-mol/hr}}.
+    Raises ValueError (with an actionable message) on unknown components.
+
+    Equilibrium ratios: true K = y/x when both a vapour AND a liquid
+    composition are supplied; otherwise Wilson K from the HMB COMP_CONSTANTS
+    (anchored to the stated vapour fraction if Wilson disagrees with it).
+    """
+    if not const_map:
+        raise ValueError(
+            "composition input needs component data: the HMB workbook must have "
+            "a COMP_CONSTANTS sheet (MW, Tc, Pc, ω).  Set 'HMB File' on the row "
+            "(or pass the HMB on the command line).")
+    vmol: dict[str, float] = {}
+    lmol: dict[str, float] = {}
+    mw: dict[str, float] = {}
+    for col in row["_comp"]:
+        flow = col.get("flow") or 0.0
+        if flow <= 0:
+            continue
+        amt: dict[str, float] = {}
+        for nm, a in col["amounts"].items():
+            c = const_map.get(nm.strip().upper())
+            if c is None or not c.get("mw"):
+                raise ValueError(
+                    f"component '{nm}' ({_COMP_SHEET} col {col['col']}) is not in "
+                    f"the HMB COMP_CONSTANTS sheet — use the exact HMB component "
+                    f"name.")
+            cn = c.get("name") or nm.strip().upper()
+            mw[cn] = c["mw"]
+            amt[cn] = amt.get(cn, 0.0) + a
+        tot = sum(amt.values())
+        if col["basis"] == "mass":
+            mol = {n: flow * a / tot / mw[n] for n, a in amt.items()}
+        else:
+            avg_mw = sum(a / tot * mw[n] for n, a in amt.items())
+            ntot = flow / avg_mw
+            mol = {n: ntot * a / tot for n, a in amt.items()}
+        tgt = vmol if col["phase"] == "vap" else lmol
+        for n, m in mol.items():
+            tgt[n] = tgt.get(n, 0.0) + m
+
+    names = list(dict.fromkeys(list(vmol) + list(lmol)))
+    if not names:
+        raise ValueError(f"no usable composition on Line {row.get('Line No')} "
+                         f"Seq {row.get('Seq')} (check Phase Flow and amounts).")
+    nv, nl = sum(vmol.values()), sum(lmol.values())
+    n_i = {n: vmol.get(n, 0.0) + lmol.get(n, 0.0) for n in names}
+    N = nv + nl
+    vap_mass = sum(vmol.get(n, 0.0) * mw[n] for n in names)
+    liq_mass = sum(lmol.get(n, 0.0) * mw[n] for n in names)
+    vmw = (vap_mass / nv) if nv > 0 else None
+    lmw = (liq_mass / nl) if nl > 0 else None
+
+    base = _streamprops_from_manual(row)
+    if base is None:
+        base = HE.StreamProps(stream="(manual)", source_sheet="manual-input",
+                              temp_f=num(row.get("Temp (degF)")))
+    sp = replace(
+        base, stream="(manual composition)", source_sheet="manual-input",
+        phase=("TWO-PHASE" if (vap_mass > 0 and liq_mass > 0)
+               else "VAPOR" if vap_mass > 0 else "LIQUID"),
+        pres_psia=p_ref, total_mass=vap_mass + liq_mass,
+        vap_mass=vap_mass, liq_mass=liq_mass, vap_mw=vmw, liq_mw=lmw,
+        mol_weight=vmw or lmw)
+    if sp.vap_density is None and vmw and sp.temp_f is not None:
+        sp = replace(sp, vap_density=_gas_rho_kgm3(vmw, sp.vap_z, sp.temp_f, p_ref)
+                     / LBFT3_TO_KGM3)
+
+    # ── equilibrium ratios ───────────────────────────────────────────────
+    z = [n_i[n] / N for n in names]
+    x_d = {n: lmol[n] / nl for n in lmol} if nl > 0 else {}
+    y_d = {n: vmol[n] / nv for n in vmol} if nv > 0 else {}
+    both = sum(1 for n in names if n in vmol and n in lmol)
+    tc_r, omega, pc_l = [], [], []
+    for n in names:
+        c = const_map.get(n.upper(), {})
+        tc_r.append(c["tc_f"] + F_TO_R if c.get("tc_f") is not None else None)
+        omega.append(c.get("omega"))
+        pc_l.append(c.get("pc_psia"))
+
+    if both >= 2:
+        feed = _build_feed(
+            {n: n_i[n] / N for n in names}, x_d,
+            {n: n_i[n] * mw[n] for n in names}, n_i, sp,
+            y_d=y_d, const_map={k.upper(): v for k, v in const_map.items()})
+    else:
+        feed = None
+    if feed is None:
+        t_f = sp.temp_f
+        have = (t_f is not None
+                and all(t is not None and o is not None and p is not None
+                        for t, o, p in zip(tc_r, omega, pc_l)))
+        beta0 = min(max(nv / N, 1e-4), 1.0 - 1e-4)
+        if have:
+            t_r = t_f + F_TO_R
+            k_raw = [_wilson_k(tc_r[i], pc_l[i], omega[i], t_r, p_ref)
+                     for i in range(len(names))]
+            if abs(rachford_rice(z, k_raw) - beta0) < 0.01:
+                k_ref, basis = [min(1e10, max(1e-10, k)) for k in k_raw], "wilson"
+            else:
+                lam = _solve_lambda(z, k_raw, beta0)
+                k_ref = [min(1e10, max(1e-10, lam * k)) for k in k_raw]
+                basis = "wilson-lambda"
+        else:
+            # no T or no criticals: neutral volatility ordering by MW
+            k_raw = [1.0 / max(mw[n], 1.0) for n in names]
+            lam = _solve_lambda(z, k_raw, beta0)
+            k_ref = [min(1e10, max(1e-10, lam * k)) for k in k_raw]
+            basis = "zx-lambda"
+        total_mw = sum(zi * mw[n] for zi, n in zip(z, names))
+        feed = FlashFeed(
+            names=names, z=z, k_ref=k_ref, mw=[mw[n] for n in names],
+            total_mass_lbhr=vap_mass + liq_mass, p_ref_psia=p_ref,
+            temp_f=sp.temp_f, total_mw=total_mw, total_moles_lbmolhr=N,
+            tc_r=tc_r, omega=omega, pc_psia=pc_l,
+            vap_cp=sp.vap_cp, liq_cp=sp.liq_cp, k_basis=basis)
+        feed.beta_ref = rachford_rice(z, k_ref)
+    return {"feed": feed, "sp": sp, "moles": n_i}
+
+
+# ── Yellow-cell property overrides (win over a resolved HMB stream) ──────
+# Maps an input-sheet column to the StreamProps/FlashResult field it overrides.
+_YELLOW_OVERRIDE_MAP = {
+    "Temp (degF)":          "temp_f",
+    "Vapor Mass Flow":      "vap_mass",
+    "Vap MW":               "vap_mw",
+    "Vap Visc (cP)":        "vap_visc",
+    "Vap Z":                "vap_z",
+    "Vap Cp/Cv":            "vap_cp_cv",
+    "Vap Density (lb/ft3)": "vap_density",
+    "Liq Mass Flow (lb/h)": "liq_mass",
+    "Liq Density (lb/ft3)": "liq_density",
+    "Liq Visc (cP)":        "liq_visc",
+}
+
+
+def _row_yellow_overrides(row: dict) -> dict:
+    """Non-blank yellow manual-input cells on this row, keyed by field name."""
+    out = {}
+    for col, field_name in _YELLOW_OVERRIDE_MAP.items():
+        v = num(row.get(col))
+        if v is not None:
+            out[field_name] = v
+    return out
+
+
+def _apply_property_overrides(sp, fr, overrides: dict, feed_mode: bool = False):
+    """Overlay persisted yellow-cell overrides onto a resolved sp/fr pair.
+
+    Lets any filled yellow cell win over the matching property pulled from
+    the HMB stream, without having to clear Stream Lookup and re-enter every
+    property by hand. In MANUAL mode (no composition feed) mass-flow
+    overrides also re-derive quality/beta/moles on the FlashResult directly,
+    since ``fr`` there has no other source of truth.  In FEED mode (a
+    composition feed flashed via Rachford-Rice), vap_mass/liq_mass overrides
+    are instead applied upstream as a persistent mass-scale ratio on the
+    whole feed-flash (see ``build_profile_flash_noiso``) — they are dropped
+    here to avoid double-counting the override against the feed's own
+    un-scaled natural flow.
+    """
+    if not overrides or sp is None:
+        return sp, fr
+    if feed_mode:
+        overrides = {k: v for k, v in overrides.items()
+                     if k not in ("vap_mass", "liq_mass")}
+        if not overrides:
+            return sp, fr
+    sp_fields = dict(overrides)
+    if "vap_mw" in sp_fields:
+        sp_fields["mol_weight"] = sp_fields["vap_mw"]
+    if "vap_mass" in sp_fields or "liq_mass" in sp_fields:
+        sp_fields["total_mass"] = ((sp_fields.get("vap_mass", sp.vap_mass) or 0.0)
+                                    + (sp_fields.get("liq_mass", sp.liq_mass) or 0.0))
+    sp = replace(sp, **sp_fields)
+
+    if fr is not None:
+        fr_fields = {k: overrides[k] for k in ("vap_mass", "liq_mass", "vap_mw", "temp_f")
+                     if k in overrides}
+        if fr_fields:
+            vm  = fr_fields.get("vap_mass", fr.vap_mass)
+            lm  = fr_fields.get("liq_mass", fr.liq_mass)
+            vmw = fr_fields.get("vap_mw", fr.vap_mw) or 1.0
+            lmw = fr.liq_mw or vmw
+            tot = vm + lm
+            vmol, lmol = (vm / vmw if vmw else 0.0), (lm / lmw if lmw else 0.0)
+            tmol = vmol + lmol
+            fr_fields["quality"]   = (vm / tot) if tot > 0 else (1.0 if vm > 0 else 0.0)
+            fr_fields["vap_moles"] = vmol
+            fr_fields["liq_moles"] = lmol
+            fr_fields["beta"]      = (vmol / tmol) if tmol > 0 else fr_fields["quality"]
+            fr = replace(fr, **fr_fields)
+    return sp, fr
+
+
 def build_profile_flash_noiso(
         block_rows: list[dict],
         resolver,
@@ -3465,9 +4012,19 @@ def build_profile_flash_noiso(
         default_sp: HE.StreamProps | None = None,
         injections: dict | None = None,
         cv_overrides: dict | None = None,
+        default_feed=None,
+        default_vap_cf: float = 1.0,
+        default_liq_cf: float = 1.0,
+        splits_out: dict | None = None,
+        const_map: dict | None = None,
 ) -> tuple[list[HE.Station], list, list, dict]:
     """
     March pressure along ``block_rows`` with flash-coupled VLE.
+
+    Manual composition (no HMB): a row carrying ``_comp`` (from the
+    Stream_Composition sheet) STARTS the stream if none is active, otherwise
+    its component flows are MIXED into the running stream and re-flashed.
+    ``const_map`` (HMB COMP_CONSTANTS) supplies MW / Tc / Pc / ω for it.
 
     Special fittings handled:
       Fix Pressure — subtract ``Fixed dP (psi)`` directly; no velocity calc
@@ -3477,6 +4034,20 @@ def build_profile_flash_noiso(
     Tee split / merge:
       A ``Flow Fraction from Main`` on a Tee fitting row scales the running
       vapour & liquid mass flows (negative = split, positive = merge).
+
+    Main→Branch split (the reverse of a Branch→Main join):
+      ``default_feed``/``default_vap_cf``/``default_liq_cf`` seed the FIRST
+      row of a Branch block — used to auto-feed a Branch with the actual
+      mixture + mass flow that left Main at a matching 'Tee Split Branch
+      Flow N' row (see ``splits_out`` below and ``run_noiso``'s Upstream
+      Line No / Upstream Seq matching).
+
+    ``splits_out``, if given, is populated with one entry per encountered
+    'Tee Split Branch Flow N' row, keyed by (Line No, Seq) of that row:
+    ``{"n": N, "feed": ..., "sp": ..., "vap_cf": ..., "liq_cf": ...}`` — the
+    composition/properties feed and mass-fraction multipliers of the flow
+    that left Main there, ready to be passed back in as a downstream
+    Branch's ``default_feed``/``default_vap_cf``/``default_liq_cf``.
 
     Mass Vapor / Liquid carry-over:
       ``Mass Vapor/Liquid Fraction Carry Over`` scale the running vapour and
@@ -3506,10 +4077,13 @@ def build_profile_flash_noiso(
     flow_scale = 1.0          # running Tee split/merge multiplier (both phases)
     vap_cf = 1.0              # running vapour carry-forward multiplier
     liq_cf = 1.0              # running liquid carry-forward multiplier
+    mass_scale = 1.0          # feed-mode override: rescales the whole feed-flash
+    mass_scale_set = False    # to the user's real total flow (fixed once per stream)
     cur_feed = None           # ACTIVE mixture feed (a blend after a Tee join)
     cur_sp:  HE.StreamProps | None = None   # active mixture StreamProps
     last_key = None           # (stream, hmb, case) to detect a genuine new stream
     mw_map: dict[str, float] = {}   # component → MW (for mole→mass in the sheet)
+    override_state: dict = {}       # persisted yellow-cell overrides (this stream)
 
     def _flash(fd, pp):
         return (FV.flash_isenthalpic(fd, pp) if use_isoH else FV.flash(fd, pp))
@@ -3519,13 +4093,76 @@ def build_profile_flash_noiso(
         key = (row.get("Stream Lookup"), row.get("HMB File"), row.get("Case"))
         # First row, or a genuinely NEW stream → (re)set the active mixture.
         if last_key is None or key != last_key:
-            cur_feed = row_feed
+            cur_feed = row_feed if row_feed is not None else (
+                default_feed if ridx == 0 else None)
             cur_sp   = row_sp if row_sp is not None else default_sp
             last_key = key
-            flow_scale = vap_cf = liq_cf = 1.0
+            flow_scale = 1.0
+            vap_cf = default_vap_cf if ridx == 0 else 1.0
+            liq_cf = default_liq_cf if ridx == 0 else 1.0
+            mass_scale = 1.0
+            mass_scale_set = False
+            override_state = {}
         elif cur_feed is None and row_sp is not None:
             cur_sp = row_sp                       # manual rows refresh sp
+
+        # ── Manual composition stream (Stream_Composition sheet) ─────────
+        # No active stream → this composition STARTS the flow.  Otherwise it
+        # is MIXED into the running stream below.  Its yellow cells describe
+        # THIS inlet only, so they must not become persistent overrides.
+        comp_pl, mix_pl = None, None
+        if row.get("_comp"):
+            try:
+                comp_pl = _comp_payload(row, max(p, p_floor), const_map)
+            except ValueError as exc:
+                raise SystemExit(f"  ERROR (Line {row.get('Line No')}, Seq "
+                                 f"{row.get('Seq')}): {exc}")
+            if cur_feed is None:
+                cur_feed, cur_sp = comp_pl["feed"], comp_pl["sp"]
+                flow_scale = vap_cf = liq_cf = 1.0
+                mass_scale, mass_scale_set = 1.0, False
+                override_state = {}
+            else:
+                mix_pl = comp_pl
+        else:
+            override_state.update(_row_yellow_overrides(row))
         a_feed, a_sp = cur_feed, (cur_sp or default_sp)
+
+        scale_tag_mix = ""
+        if mix_pl is not None:
+            p_mix = max(p, p_floor)
+            fr0 = _flash(a_feed, p_mix)
+            main_moles = _feed_comp_flows(
+                a_feed, fr0, flow_scale * vap_cf * mass_scale,
+                flow_scale * liq_cf * mass_scale)
+            blended = _blend_feeds(a_feed, main_moles,
+                                   mix_pl["feed"], mix_pl["moles"])
+            if blended is not None:
+                mwm = {n: a_feed.mw[i] for i, n in enumerate(a_feed.names)}
+                mwm.update({n: mix_pl["feed"].mw[i]
+                            for i, n in enumerate(mix_pl["feed"].names)})
+                main_mass = sum(m * mwm.get(n, 50.0) for n, m in main_moles.items())
+                add_mass = sum(m * mwm.get(n, 50.0)
+                               for n, m in mix_pl["moles"].items())
+                new_sp = _blend_sp(a_sp, mix_pl["sp"], main_mass, add_mass)
+                if new_sp is not None and (main_mass + add_mass) > 0:
+                    wa = main_mass / (main_mass + add_mass)
+                    ssp = mix_pl["sp"]
+
+                    def _mx(av, bv):
+                        return bv if av is None else av if bv is None else wa * av + (1 - wa) * bv
+                    new_sp = replace(
+                        new_sp,
+                        temp_f=_mx(a_sp.temp_f if a_sp else None, ssp.temp_f),
+                        vap_cp_cv=_mx(a_sp.vap_cp_cv if a_sp else None, ssp.vap_cp_cv))
+                cur_feed, cur_sp = blended, new_sp
+                a_feed, a_sp = cur_feed, (cur_sp or default_sp)
+                flow_scale = vap_cf = liq_cf = 1.0
+                mass_scale = 1.0
+                override_state.pop("vap_mass", None)
+                override_state.pop("liq_mass", None)
+                scale_tag_mix = (f" | composition mixed in (+{add_mass:.1f} lb/hr)"
+                                 f" → re-flash blended feed")
 
         fitting    = row.get("Fitting Name")
         spec       = row.get("Piping Spec")
@@ -3548,13 +4185,23 @@ def build_profile_flash_noiso(
         idr = HE.resolve_id(spec, bore)
         p_eval = max(p, p_floor)
         scale_tag = ""
+        mom = dict(mach_vap=None, rhov2_vap=None, rhov2_liq=None)
 
         # ── Tee split / merge: update running flow scale ─────────────────
+        # negative = SPLIT: a delta fraction of the CURRENT flow leaves the line.
+        # positive = MERGE: the running flow becomes that fraction of the
+        # original Main flow (an ABSOLUTE target), e.g. 0.125 → 0.25 → 0.5 → 1.0
+        # builds a header up in stages as branches join it.
         frac = num(row.get("Flow Fraction from Main"))
+        split_n = _is_tee_split_branch(fitting)
+        pending_split_scale = None    # filled below if this row splits off a branch
+        scale_tag += scale_tag_mix
         if frac is not None and _is_tee(fitting):
-            new_scale = max(0.0, flow_scale + frac)
+            new_scale = frac if frac > 0 else max(0.0, flow_scale + frac)
             verb = "merge" if frac > 0 else "split"
             scale_tag += f" | Tee {verb} {frac:+.3f} → flow×{new_scale:.3f}"
+            if frac < 0 and split_n is not None:
+                pending_split_scale = flow_scale - new_scale   # magnitude removed
             flow_scale = new_scale
 
         # ── Mass Vapor/Liquid carry-over (phase MASS fraction, compounding) ──
@@ -3594,22 +4241,59 @@ def build_profile_flash_noiso(
                               f"(skipped — needs HMB streams on both runs)")
 
         # ── Flash the ACTIVE mixture at this pressure, then scale ────────
-        vap_eff = flow_scale * vap_cf
-        liq_eff = flow_scale * liq_cf
         comp_vec: dict = {}
+        fr_full = None
         if a_feed is not None:
             for i, n in enumerate(a_feed.names):
                 if n not in mw_map and i < len(a_feed.mw):
                     mw_map[n] = a_feed.mw[i]
             fr_full = _flash(a_feed, p_eval)
+            # A Vapor/Liquid Mass Flow override on a Stream-Lookup row means
+            # "this composition's REAL total flow is X" — fix a single ratio,
+            # once per stream, between that target and the feed's own
+            # natural (un-scaled) total, and apply it like any other
+            # carry-forward multiplier.  This preserves the feed's rigorous
+            # VLE phase split at each pressure instead of substituting one
+            # phase's absolute override value and adding it to the other
+            # phase's un-rescaled natural value (which double-counts mass
+            # from two different bases).
+            if not mass_scale_set and ("vap_mass" in override_state
+                                        or "liq_mass" in override_state):
+                nat_total = fr_full.vap_mass + fr_full.liq_mass
+                tgt_total = (override_state.get("vap_mass", fr_full.vap_mass)
+                             + override_state.get("liq_mass", fr_full.liq_mass))
+                if nat_total > 0:
+                    mass_scale = tgt_total / nat_total
+                mass_scale_set = True
+            vap_eff = flow_scale * vap_cf * mass_scale
+            liq_eff = flow_scale * liq_cf * mass_scale
             fr = _scale_flash_result(fr_full, vap_eff, liq_eff)
             comp_vec = _feed_comp_flows(a_feed, fr_full, vap_eff, liq_eff)
         elif a_sp is not None and (a_sp.vap_mass or a_sp.liq_mass):
-            fr = _scale_flash_result(_synth_flash_result(a_sp, p_eval),
-                                     vap_eff, liq_eff)        # manual mode
+            vap_eff = flow_scale * vap_cf
+            liq_eff = flow_scale * liq_cf
+            fr_full = _synth_flash_result(a_sp, p_eval)
+            fr = _scale_flash_result(fr_full, vap_eff, liq_eff)  # manual mode
         else:
+            vap_eff = flow_scale * vap_cf
+            liq_eff = flow_scale * liq_cf
             fr = None
         sp = a_sp                       # used by the ΔP dispatch below
+
+        # ── Main→Branch split capture: stash the flow that LEFT here ─────
+        if pending_split_scale is not None and splits_out is not None and fr_full is not None:
+            splits_out[(row.get("Line No"), int(num(row.get("Seq")) or 0))] = {
+                "n":      split_n,
+                "feed":   a_feed,
+                "sp":     a_sp,
+                "vap_cf": pending_split_scale * vap_cf,
+                "liq_cf": pending_split_scale * liq_cf,
+            }
+        if override_state:
+            sp, fr = _apply_property_overrides(sp, fr, override_state,
+                                                feed_mode=(a_feed is not None))
+            scale_tag += (" | manual override: "
+                          + ", ".join(sorted(override_state)))
 
         if vap_eff <= 1e-9 and liq_eff <= 1e-9:
             scale_tag += ("  | stream terminated (carry-forward 0)"
@@ -3722,6 +4406,8 @@ def build_profile_flash_noiso(
                                    dp_f=0.0, dp_k=0.0, dp_z=0.0))
                 k_tag = f" | K={k_val}" if _is_fix_k(fitting) else ""
                 note  = idr.basis + k_tag + flash_tag
+                if fr is not None:
+                    mom = _phase_momentum(g_obj, sp, fr, res["v"])
 
             dp_f = res["dp_f"] * PA_TO_PSI
             dp_k = res["dp_k"] * PA_TO_PSI
@@ -3761,6 +4447,9 @@ def build_profile_flash_noiso(
             dp_elev_psi  = round(dp_z, 5),
             dp_total_psi = round(dp_t, 5),
             note         = note,
+            mach_vap     = mom["mach_vap"],
+            rhov2_vap    = mom["rhov2_vap"],
+            rhov2_liq    = mom["rhov2_liq"],
         ))
         flashes.append(fr)
         comps.append(comp_vec)
@@ -3779,6 +4468,11 @@ def build_profile_solved(
         injections: dict | None = None,
         max_pass: int = 24,
         tol: float = 0.01,
+        default_feed=None,
+        default_vap_cf: float = 1.0,
+        default_liq_cf: float = 1.0,
+        splits_out: dict | None = None,
+        const_map: dict | None = None,
 ) -> tuple[list[HE.Station], list, list, dict]:
     """March a block, solving flow-control Control Valves to their Destination.
 
@@ -3804,7 +4498,10 @@ def build_profile_solved(
                 targets[ri] = (di, num(block_rows[di].get("Set P (psia)")))
 
     common = dict(p_floor=p_floor, flash_mode=flash_mode,
-                  default_sp=default_sp, injections=injections)
+                  default_sp=default_sp, injections=injections,
+                  default_feed=default_feed, default_vap_cf=default_vap_cf,
+                  default_liq_cf=default_liq_cf, splits_out=splits_out,
+                  const_map=const_map)
     if not targets:
         return build_profile_flash_noiso(block_rows, resolver, p_start, **common)
 
@@ -3860,11 +4557,12 @@ def _pp_headers(u: "UN.UnitSystem") -> list[str]:
         "β (molar vap)", "Quality (mass)", u.hdr("Vap Mass Flow", "mflow"),
         u.hdr("Liq Mass Flow", "mflow"), "MW Vapor", "MW Liquid",
         u.hdr("Vap Density", "rho"), u.hdr("Liq Density", "rho"),
-        "GVF (local, vol)", "Note",
+        "GVF (local, vol)", "Mach (vapor)",
+        "ρv² Vapor (kg/m·s²)", "ρv² Liquid (kg/m·s²)", "Note",
     ]
 
 
-_PP_NCOL = 30
+_PP_NCOL = 33
 
 
 def _build_pressure_profile_sheet(
@@ -3962,6 +4660,9 @@ def _build_pressure_profile_sheet(
             u.disp("rho", vap_rho, 6)     if vap_rho else None,
             u.disp("rho", rho_l_lbft3, 4) if rho_l_lbft3 else None,
             round(gvf, 4)         if gvf is not None else None,
+            round(s.mach_vap, 4)  if s.mach_vap  is not None else None,
+            round(s.rhov2_vap, 1) if s.rhov2_vap is not None else None,
+            round(s.rhov2_liq, 1) if s.rhov2_liq is not None else None,
             s.note,
         ]
         for ci, v in enumerate(vals, 1):
@@ -3975,7 +4676,7 @@ def _build_pressure_profile_sheet(
 
     widths = ([5, 10, 28, 6, 7, 9, 11, 14, 10, 16, 13, 12, 10, 16,
                12, 13, 12, 13, 12, 12]
-              + [12, 12, 18, 18, 10, 10, 16, 16, 14, 36])
+              + [12, 12, 18, 18, 10, 10, 16, 16, 14, 12, 18, 18, 36])
     for ci, w in enumerate(widths, 1):
         cw(ws, ci, w)
 
@@ -4509,6 +5210,11 @@ def run_noiso(
         def_hmb  = c["hmb_file"] or hmb_path
         def_case = c["case"] or case
         resolver = _make_stream_resolver(def_hmb, def_case, map_path)
+        # HMB COMP_CONSTANTS (MW/Tc/Pc/ω) — only needed for Stream_Composition
+        cmap = (FV._read_comp_constants(def_hmb)
+                if any(r.get("_comp") for r in
+                       c["main_rows"] + [x for b in c["branch_blocks"] for x in b])
+                else None)
 
         # ── Circuit default StreamProps (drives the screening sheets) ─────
         feed = None
@@ -4537,14 +5243,28 @@ def run_noiso(
         else:
             # No HMB stream at circuit level → manual mode.  Use the first main
             # row carrying manual data as the representative StreamProps.
-            sp = next((m for m in (_streamprops_from_manual(r)
-                                   for r in c["main_rows"]) if m), None)
-            if sp is None:
-                print(f"  WARNING: circuit '{cid}' has no Stream Lookup and no "
-                      f"manual properties — skipped.")
-                continue
-            sk = "(manual)"
-            print("  Manual stream mode — properties from yellow input cells.")
+            comp_row = next((r for r in c["main_rows"] if r.get("_comp")), None)
+            if comp_row is not None:
+                try:
+                    pl0 = _comp_payload(comp_row, p0 or 100.0, cmap)
+                except ValueError as exc:
+                    raise SystemExit(f"  ERROR (circuit {cid}, Line "
+                                     f"{comp_row.get('Line No')}, Seq "
+                                     f"{comp_row.get('Seq')}): {exc}")
+                sp, feed = pl0["sp"], pl0["feed"]
+                sk = "(manual composition)"
+                print(f"  Manual composition mode — {feed.n} components from "
+                      f"{_COMP_SHEET} | K basis: {feed.k_basis} | "
+                      f"β₀={feed.beta_ref:.4f}")
+            else:
+                sp = next((m for m in (_streamprops_from_manual(r)
+                                       for r in c["main_rows"]) if m), None)
+                if sp is None:
+                    print(f"  WARNING: circuit '{cid}' has no Stream Lookup and no "
+                          f"manual properties — skipped.")
+                    continue
+                sk = "(manual)"
+                print("  Manual stream mode — properties from yellow input cells.")
 
         print(f"\n  Circuit {cid}  |  Lines: {', '.join(lns)}  |  "
               f"Stream {sk}  |  {sp.phase}  "
@@ -4562,20 +5282,66 @@ def run_noiso(
         branch_blocks = c["branch_blocks"]
         p_start = p0 or sp.pres_psia or 100.0
 
+        # ── Preliminary Main march (no branch injections) ────────────────
+        # Captures the flow/composition that leaves Main at every
+        # 'Tee Split Branch Flow N' row, so any Branch block that splits off
+        # of Main can be auto-seeded below (mirrors the Branch→Main join
+        # injection further down, but in the opposite direction).
+        splits_out: dict[tuple, dict] = {}
+        build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
+                              default_sp=sp, splits_out=splits_out,
+                              const_map=cmap)
+
         # ── March branch blocks FIRST (independent sub-runs) ─────────────
         # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
         # the same line is INJECTED into the Main at that row (its outlet flow +
         # composition merge in); others stay standalone Branch sheets.
+        # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
+        # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
+        # captured split-off flow/composition instead of marching standalone.
         branch_runs: list = []            # (label, sts, fls, cmps, b_lns)
         injections: dict[int, dict] = {}  # main_rows index → branch outlet
         line_branch_count: dict[str, int] = {}
+        line_split_count: dict[str, int] = {}
         for bi, block in enumerate(branch_blocks):
             bp = _start_p_of_block(block) or p_start
-            sts, fls, cmps, _bmw = build_profile_solved(
-                block, resolver, bp, flash_mode=flash_mode, default_sp=sp)
+            b0 = block[0] if block else {}
+            up_line = b0.get("Upstream Line No")
+            up_seq  = b0.get("Upstream Seq")
+            split_cap = None
+            if up_line:
+                if up_seq is not None:
+                    split_cap = splits_out.get((up_line, up_seq))
+                else:
+                    line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
+                    split_n = line_split_count[up_line]
+                    split_row = next(
+                        (mr for mr in main_rows
+                         if mr.get("Line No") == up_line
+                         and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
+                        None)
+                    if split_row is not None:
+                        split_cap = splits_out.get((up_line, split_row.get("Seq")))
+                if split_cap is None:
+                    print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
+                          f"Upstream Line No '{up_line}' but no matching "
+                          f"'Tee Split Branch Flow N' output was found on Main.")
+
+            solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp,
+                                const_map=cmap)
+            if split_cap is not None:
+                solve_kwargs.update(default_feed=split_cap["feed"],
+                                     default_vap_cf=split_cap["vap_cf"],
+                                     default_liq_cf=split_cap["liq_cf"])
+                if split_cap.get("sp") is not None:
+                    solve_kwargs["default_sp"] = split_cap["sp"]
+            sts, fls, cmps, _bmw = build_profile_solved(block, resolver, bp, **solve_kwargs)
             b_lns = [r["Line No"] for r in block]
             label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
             branch_runs.append((label, sts, fls, cmps, b_lns))
+            if split_cap is not None:
+                print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
+                      f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
 
             bline  = block[0].get("Line No") if block else None
             line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
@@ -4588,6 +5354,9 @@ def run_noiso(
             if join_idx is not None and fls and fls[-1] is not None:
                 out_fr = fls[-1]
                 b_sp, b_feed = resolver(block[0]) if block else (None, None)
+                if b_feed is None and block and block[0].get("_comp"):
+                    _bpl = _comp_payload(block[0], bp, cmap)
+                    b_sp, b_feed = _bpl["sp"], _bpl["feed"]
                 injections[join_idx] = {
                     "vap_mass": out_fr.vap_mass,
                     "liq_mass": out_fr.liq_mass,
@@ -4604,7 +5373,7 @@ def run_noiso(
         # ── March the Main with branch injections ────────────────────────
         main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
             main_rows, resolver, p_start, flash_mode=flash_mode,
-            default_sp=sp, injections=injections)
+            default_sp=sp, injections=injections, const_map=cmap)
 
         # station_lines: map each station back to its source Line No
         station_lines = [r["Line No"] for r in main_rows
@@ -4753,6 +5522,13 @@ def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
         "  Fittings:  K·½ρv²   (K from Crane TP-410 table; Fix K uses user value)",
         "  Elevation: ρ·g·Δz",
         "  Roughness: 0.0018 in commercial steel.",
+        "  Mach (vapor) = mixture velocity / vapour sound speed √(k·Z·R·T/MW), k = Vap Cp/Cv.",
+        "  ρv² Vapor / Liquid = ρ_phase·(superficial velocity of that phase)², kg/m·s²",
+        "    (shown on Pressure_Profile and FIV_EI_T2.2; blank where Cp/Cv or densities are missing).",
+        "",
+        "MANUAL COMPOSITION (no HMB stream)",
+        "  Stream_Composition input sheet: vapour / liquid mass or mole composition per Seq.",
+        "  Later streams are mixed into the running flow and re-flashed (see input Notes sheet).",
         "",
         "VERIFY: schedule/wall from asme_data.py — confirm before design use.",
     ]
@@ -5189,6 +5965,7 @@ def _read_comp_constants(hmb_path) -> dict:
                     try:    return float(v)
                     except (TypeError, ValueError): return None
                 out[name.upper()] = {
+                    "name":    name,
                     "mw":      _f(row[4]),    # E
                     "tc_f":    _f(row[8]),    # I
                     "pc_psia": _f(row[9]),    # J
@@ -5212,6 +5989,7 @@ def _read_comp_constants(hmb_path) -> dict:
             if cpath is not None:
                 for c in _CC.read_constants(str(cpath)):
                     out[c["name"].upper()] = {
+                        "name":    c["name"],
                         "mw":      c.get("MW"),
                         "tc_f":    c.get("Tc_F"),
                         "pc_psia": c.get("Pc_psia"),
