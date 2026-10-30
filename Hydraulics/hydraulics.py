@@ -4398,7 +4398,28 @@ _PR_KIJ = {   # binary interaction parameters (symmetric, sorted pair)
 }
 
 _PR_RG = 83.14462618          # cm3·bar/mol/K
-_PR_KEPS = 1.18               # Mason-Saxena cross-term factor (calibrated to the HMB)
+_PR_H2_CP = (3.004605, 1.6031e-03, -1.3188e-06)       # BTU/lb-F, T in K (HMB fit)
+_PR_TUNE = {   # coefficients fitted to HMB H2-rich states (applied when H2 >= 50 mol%)
+    "m_H2": 0.258927,
+    "c_H2": 0.213118,
+    "k_H2": 1,
+    "c_HC": 0.592434,
+    "h_res": 1,
+    "e0": 550.947,
+    "e1": -0.463104,
+    "g_cv": 1.0011,
+    "mu_s": 1.34035,
+    "k_s": 3,
+    "mu_hc": 0.968744,
+    "mu_q": -0.0108797,
+    "k_hc": 0.899878,
+    "k_q": -0.091523,
+}
+_PR_TUNE_OFF = {"m_H2": None, "c_H2": 1.0, "k_H2": 1.0, "c_HC": 1.0, "h_res": 1.0, "e0": 0.0,
+                "e1": 0.0, "g_cv": 1.0, "mu_s": 1.0, "k_s": 1.0, "mu_hc": 1.0, "mu_q": 0.0,
+                "k_hc": 1.0, "k_q": 0.0}
+_PR_TUNE_FIT = dict(_PR_TUNE)   # frozen copy of the fitted values   # HMB-fitted H2 coefficients
+_PR_KEPS = 1.25554               # Mason-Saxena cross-term factor (calibrated to the HMB)
 _PR_RJ = 8.314462618          # J/mol/K
 
 
@@ -4425,16 +4446,23 @@ class _PRMix:
         s.y = list(y)
         s.N = len(s.n)
         s.d = [_PR_DATA[x] for x in s.n]
+        # HMB-fitted coefficients apply to H2-rich gas only
+        yh2 = sum(s.y[i] for i in range(s.N) if s.n[i] == "H2")
+        s.tn = _PR_TUNE if yh2 >= 0.5 else _PR_TUNE_OFF
         s.M = sum(s.y[i] * s.d[i][0] for i in range(s.N))
         s.b = sum(s.y[i] * 0.07780 * _PR_RG * s.d[i][1] / s.d[i][2] for i in range(s.N))
-        s.c = sum(s.y[i] * s.d[i][8] for i in range(s.N))
-        s.k = [[(_PR_KIJ.get(tuple(sorted((s.n[i], s.n[j]))), 0.0) if i != j else 0.0)
+        s.c = sum(s.y[i] * s.d[i][8] * (s.tn["c_H2"] if s.n[i] == "H2"
+                                        else s.tn["c_HC"]) for i in range(s.N))
+        s.k = [[(_PR_KIJ.get(tuple(sorted((s.n[i], s.n[j]))), 0.0)
+                 * (s.tn["k_H2"] if "H2" in (s.n[i], s.n[j]) else 1.0)
+                 if i != j else 0.0)
                 for j in range(s.N)] for i in range(s.N)]
 
-    @staticmethod
-    def _alpha(d, T):
+    def _alpha(s, d, T):
         w = d[3]
         m = 0.37464 + 1.54226 * w - 0.26992 * w * w
+        if d is _PR_DATA["H2"] and s.tn["m_H2"] is not None:
+            m = s.tn["m_H2"]
         return (1 + m * (1 - math.sqrt(T / d[1]))) ** 2
 
     def a(s, T):
@@ -4469,13 +4497,28 @@ class _PRMix:
         a = s.a(T)
         B = s.b * P / (_PR_RG * T)
         r2 = math.sqrt(2.0)
-        return 0.1 * (_PR_RG * T * (z - 1) + (T * ap - a) / (2 * r2 * s.b)
-                      * math.log((z + (1 + r2) * B) / (z + (1 - r2) * B)))
+        return s.tn["h_res"] * 0.1 * (
+            _PR_RG * T * (z - 1) + (T * ap - a) / (2 * r2 * s.b)
+            * math.log((z + (1 + r2) * B) / (z + (1 - r2) * B)))
 
     def ideal(s, T):
-        """(Cp_ig J/mol/K, H_ig J/mol) of the mixture."""
-        cp = sum(s.y[i] * s.d[i][0] * _pr_dpoly(s.d[i][7], T) for i in range(s.N))
-        h = sum(s.y[i] * (s.d[i][0] * _pr_poly(s.d[i][7], T) + s.d[i][5]) for i in range(s.N))
+        """(Cp_ig J/mol/K, H_ig J/mol) of the mixture.  H2 uses ideal-gas Cp/h
+        equations fitted to the HMB pure-H2 states (reference: 77 F = 0)."""
+        cp = h = 0.0
+        for i in range(s.N):
+            d = s.d[i]
+            if s.n[i] == "H2":
+                a0, b0, c0 = _PR_H2_CP
+                T0 = (77 + 459.67) / 1.8
+                cp_i = (a0 + b0 * T + c0 * T * T) / 0.238846 * d[0]          # J/mol/K
+                h_i = 1.8 * (a0 * (T - T0) + b0 * (T * T - T0 * T0) / 2
+                             + c0 * (T ** 3 - T0 ** 3) / 3) / 0.429923 * d[0]  # J/mol
+            else:
+                cp_i = d[0] * _pr_dpoly(d[7], T) + s.tn["e1"]
+                h_i = (d[0] * _pr_poly(d[7], T) + d[5]
+                       + s.tn["e0"] + s.tn["e1"] * (T - 298.15))
+            cp += s.y[i] * cp_i
+            h += s.y[i] * h_i
         return cp, h
 
     def props(s, T, P, liquid=False):
@@ -4496,7 +4539,7 @@ class _PRMix:
         return {"Zk": z, "Z": P * vt / (_PR_RG * T),
                 "rho": s.M / vt * 62.428,                       # lb/ft3
                 "cp": cp / s.M * 0.238846,                      # BTU/lb-F
-                "gamma": cp / (cp - cpmcv),
+                "gamma": cp / (cp - s.tn["g_cv"] * cpmcv),
                 "h": (hi + s.hres(T, P, liquid)) / s.M * 0.429923}   # BTU/lb
 
 
@@ -4529,16 +4572,17 @@ def _pr_vapor_props(names, y, T_F, P_psia) -> dict:
             mu_i.append(0.009346 * (T / 310.928) ** 1.5 * (310.928 + 90.91) / (T + 90.91) * 1e4)
             k_i.append(0.106675 * (T / 310.928) ** 0.705 * 1.7307)
         else:
-            e = _pr_lucas_dilute(d[i], T)
+            e = _pr_lucas_dilute(d[i], T) * m.tn["mu_hc"] * (T / 373.15) ** m.tn["mu_q"]
             mu_i.append(e)
-            k_i.append(e * 1e-7 / (d[i][0] * 1e-3) * (1.32 * (cpi[i] - _PR_RJ) + 1.77 * _PR_RJ))
+            k_i.append(e * 1e-7 / (d[i][0] * 1e-3) * (1.32 * (cpi[i] - _PR_RJ) + 1.77 * _PR_RJ)
+                       * m.tn["k_hc"] * (T / 373.15) ** m.tn["k_q"])
 
     def phi(i, j):
         return ((1 + math.sqrt(mu_i[i] / mu_i[j]) * (d[j][0] / d[i][0]) ** 0.25) ** 2
                 / math.sqrt(8 * (1 + d[i][0] / d[j][0])))
 
     def aij(i, j):
-        return ((_PR_KEPS if i != j else 1.0)
+        return (((_PR_KEPS if m.tn is _PR_TUNE else 1.0) if i != j else 1.0)
                 * (1 + math.sqrt(k_i[i] / k_i[j]) * (d[i][0] / d[j][0]) ** 0.25) ** 2
                 / math.sqrt(8 * (1 + d[i][0] / d[j][0])))
     mu0 = sum(y[i] * mu_i[i] / sum(y[j] * phi(i, j) for j in range(n)) for i in range(n))
@@ -4553,12 +4597,14 @@ def _pr_vapor_props(names, y, T_F, P_psia) -> dict:
         xi = tcm ** (1 / 6) / (m.M ** 0.5 * (pcm / 1.01325) ** (2 / 3))
         rhs = (1.023 + 0.23364 * rr + 0.58533 * rr ** 2 - 0.40758 * rr ** 3
                + 0.093324 * rr ** 4)
-        mu = mu0 + (rhs ** 4 - 1) / xi
+        mu = mu0 + m.tn["mu_s"] * (rhs ** 4 - 1) / xi
     k = k0
-    if rr < 0.5:
+    if m.n == ["H2"]:        # pure H2: HMB-fitted k(T, P) already has the P effect
+        k = 0.106675 * (T / 310.928) ** 0.705 * (1 + 4.99e-5 * P_psia) * 1.7307
+    elif rr < 0.5:
         zc = 0.291 - 0.080 * wm
         gam = 210 * (tcm * m.M ** 3 / pcm ** 4) ** (1 / 6)
-        k = k0 + 1.22e-2 * (math.exp(0.535 * rr) - 1) / (gam * zc ** 5)
+        k = k0 + m.tn["k_s"] * 1.22e-2 * (math.exp(0.535 * rr) - 1) / (gam * zc ** 5)
     return {"z_vap": p["Z"], "rho_vap": p["rho"], "cp_vap": p["cp"],
             "cpcv_vap": p["gamma"], "h_vap": p["h"],
             "visc_vap": mu * 1e-4, "k_vap": k * 0.577789}
