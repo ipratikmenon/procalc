@@ -2806,6 +2806,21 @@ def _build_composition_input_sheet(wb, usys) -> None:
             if nm in comp:
                 _c(ws, r, ci, comp[nm], bg=AMBER, sz=9, italic=True, fg="808080")
 
+    # Component-name suggestions (pure HMB components + built-in library).  The
+    # list is advisory only — any HMB COMP_CONSTANTS name may be typed.
+    ws_cl = wb.create_sheet("_CompList")
+    ws_cl.sheet_state = "hidden"
+    suggest = list(dict.fromkeys(
+        ["H2O", "H2S", "NH3", "H2", "NITROGEN", "METHANE", "ETHANE", "PROPANE",
+         "IC4", "NC4", "IC5", "NC5", "CYCLOPENTANE", "ISOHEXANE", "CO2", "HCL",
+         "SO2", "SO3", "CL2", "O2", "CO"] + [r[0] for r in _PURE_LIB_ROWS]))
+    for i, nm in enumerate(suggest, 1):
+        ws_cl.cell(row=i, column=1, value=nm)
+    dv_cn = DataValidation(type="list", formula1=f"_CompList!$A$1:$A${len(suggest)}",
+                           allow_blank=True, showErrorMessage=False)
+    ws.add_data_validation(dv_cn)
+    dv_cn.add("A10:A200")
+
     dv_ph = DataValidation(type="list", formula1='"Vapor,Liquid"', allow_blank=True)
     dv_bs = DataValidation(type="list", formula1='"Mass,Mole"', allow_blank=True)
     ws.add_data_validation(dv_ph)
@@ -2974,6 +2989,9 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  (Vapor/Liquid), Basis (Mass/Mole — fractions or flows, normalised), Phase Flow (mass).", False),
         ("  Component rows use the EXACT names of the HMB 'COMPONENTS' sheet (MW/Tc/Pc/ω are read", False),
         ("  from the HMB 'COMP_CONSTANTS' sheet, so set HMB File on the row or pass the HMB on the CLI).", False),
+        ("  Names missing from the HMB fall back to a built-in PURE library (benzene, toluene, xylenes,", False),
+        ("  styrene, cumene, trimethylbenzenes, butylbenzene, naphthalene, methylnaphthalene, biphenyl,", False),
+        ("  NC6-NC16, cyclohexanes, olefins, He/Ar, methanol/ethanol/phenol — see _PURE_LIB_ROWS).", False),
         ("  Phase Flow blank → the Vapor / Liq Mass Flow cell of that Pipeline_Input row is used.", False),
         ("  Still type Temp, Vap Z, Vap Visc, Vap Cp/Cv, Liq Density, Liq Visc on that row (yellow);", False),
         ("  MW and the vapour/liquid split come from the composition.", False),
@@ -5947,6 +5965,83 @@ def _solve_lambda(z, k_raw, beta_target, it_max: int = 200) -> float:
 
 _CONST_CACHE: dict[str, dict] = {}
 
+# ── Built-in PURE-component library (fallback for names absent from the HMB) ─
+# Used ONLY when a component is not in the HMB COMP_CONSTANTS sheet (HMB values
+# always win).  Columns: name, MW (g/mol), NBP (K), Tc (K), Pc (bar), ω, SG 60°F
+# (None for gases).  Literature values (Reid-Prausnitz-Poling / DIPPR style) —
+# VERIFY against your project property basis before design use; add an HMB
+# COMP_CONSTANTS row to override any entry.
+_PURE_LIB_ROWS = [
+    # aromatics (light → heavy)
+    ("BENZENE",             78.114, 353.24, 562.05, 48.95, 0.2103, 0.8846),
+    ("TOLUENE",             92.141, 383.78, 591.75, 41.08, 0.2640, 0.8719),
+    ("ETHYLBENZENE",       106.167, 409.35, 617.15, 36.09, 0.3030, 0.8718),
+    ("O-XYLENE",           106.167, 417.58, 630.33, 37.34, 0.3100, 0.8848),
+    ("M-XYLENE",           106.167, 412.27, 617.05, 35.41, 0.3260, 0.8684),
+    ("P-XYLENE",           106.167, 411.51, 616.23, 35.11, 0.3220, 0.8657),
+    ("STYRENE",            104.152, 418.31, 636.00, 38.40, 0.2970, 0.9110),
+    ("CUMENE",             120.194, 425.56, 631.00, 32.09, 0.3260, 0.8670),
+    ("N-PROPYLBENZENE",    120.194, 432.39, 638.35, 32.00, 0.3440, 0.8620),
+    ("124TMB",             120.194, 442.53, 649.17, 32.32, 0.3770, 0.8796),
+    ("135TMB",             120.194, 437.89, 637.36, 31.27, 0.3996, 0.8652),
+    ("N-BUTYLBENZENE",     134.221, 456.46, 660.50, 28.90, 0.3935, 0.8601),
+    ("NAPHTHALENE",        128.174, 491.14, 748.40, 40.50, 0.3020, 1.0250),
+    ("1-METHYLNAPHTHALENE", 142.201, 517.84, 772.00, 36.00, 0.3400, 1.0202),
+    ("BIPHENYL",           154.211, 528.15, 789.00, 38.50, 0.3720, 1.0400),
+    # paraffins / naphthenes
+    ("NC6",                 86.178, 341.88, 507.60, 30.25, 0.3013, 0.6640),
+    ("NC7",                100.205, 371.58, 540.20, 27.40, 0.3495, 0.6882),
+    ("NC8",                114.232, 398.83, 568.70, 24.90, 0.3996, 0.7070),
+    ("NC9",                128.259, 423.97, 594.60, 22.90, 0.4435, 0.7219),
+    ("NC10",               142.286, 447.30, 617.70, 21.10, 0.4923, 0.7342),
+    ("NC12",               170.340, 489.47, 658.00, 18.20, 0.5764, 0.7487),
+    ("NC16",               226.446, 560.01, 723.00, 14.00, 0.7174, 0.7733),
+    ("CYCLOHEXANE",         84.161, 353.87, 553.80, 40.80, 0.2096, 0.7835),
+    ("METHYLCYCLOPENTANE",  84.161, 345.00, 532.80, 37.85, 0.2305, 0.7536),
+    ("METHYLCYCLOHEXANE",   98.188, 374.08, 572.20, 34.71, 0.2350, 0.7740),
+    # olefins / light
+    ("ETHYLENE",            28.054, 169.42, 282.34, 50.41, 0.0866, None),
+    ("PROPYLENE",           42.081, 225.43, 364.90, 46.00, 0.1424, None),
+    ("1-BUTENE",            56.108, 266.90, 419.50, 40.20, 0.1919, None),
+    ("ISOBUTYLENE",         56.108, 266.25, 417.90, 40.00, 0.1940, None),
+    ("BUTADIENE",           54.092, 268.74, 425.00, 43.20, 0.1932, None),
+    ("ACETYLENE",           26.038, 189.15, 308.30, 61.40, 0.1870, None),
+    ("HELIUM",               4.003,   4.22,   5.19,  2.27, -0.390, None),
+    ("ARGON",               39.948,  87.30, 150.86, 48.98, -0.002, None),
+    # oxygenates
+    ("METHANOL",            32.042, 337.70, 512.60, 80.97, 0.5649, 0.7960),
+    ("ETHANOL",             46.069, 351.40, 513.90, 61.48, 0.6452, 0.7940),
+    ("PHENOL",              94.113, 455.00, 694.30, 61.30, 0.4438, 1.0600),
+]
+_PURE_ALIASES = {
+    "N-HEXANE": "NC6", "HEXANE": "NC6", "N-HEPTANE": "NC7", "HEPTANE": "NC7",
+    "N-OCTANE": "NC8", "OCTANE": "NC8", "N-NONANE": "NC9", "N-DECANE": "NC10",
+    "N-DODECANE": "NC12", "N-HEXADECANE": "NC16", "ISOPROPYLBENZENE": "CUMENE",
+    "1,2,4-TRIMETHYLBENZENE": "124TMB", "1,3,5-TRIMETHYLBENZENE": "135TMB",
+    "MESITYLENE": "135TMB", "PSEUDOCUMENE": "124TMB", "XYLENE": "M-XYLENE",
+    "ETHENE": "ETHYLENE", "PROPENE": "PROPYLENE", "1,3-BUTADIENE": "BUTADIENE",
+    "ISOBUTENE": "ISOBUTYLENE", "ETHYNE": "ACETYLENE", "AR": "ARGON",
+    "HE": "HELIUM", "N2": "NITROGEN", "CH4": "METHANE", "C2H6": "ETHANE",
+    "C3H8": "PROPANE", "NAPHTHALENE (C10H8)": "NAPHTHALENE",
+}
+
+
+def _pure_library() -> dict:
+    """{NAME_UPPER: {name, mw, tc_f, pc_psia, omega, nbp_f, sld}} incl. aliases."""
+    out: dict = {}
+    for nm, mw, tb, tc, pc, om, sg in _PURE_LIB_ROWS:
+        out[nm.upper()] = {
+            "name": nm, "mw": mw,
+            "tc_f": tc * 1.8 - 459.67, "pc_psia": pc * 14.5038, "omega": om,
+            "nbp_f": tb * 1.8 - 459.67,
+            "sld": (sg * 62.428) if sg else None,
+        }
+    for al, nm in _PURE_ALIASES.items():
+        if nm.upper() in out:
+            out.setdefault(al.upper(), out[nm.upper()])
+    return out
+
+
 def _read_comp_constants(hmb_path) -> dict:
     """Read the COMP_CONSTANTS sheet embedded in the HMB (if present) →
     {NAME_UPPER: {'tc_f','pc_psia','omega','mw'}}.  Cached per file.
@@ -6012,6 +6107,8 @@ def _read_comp_constants(hmb_path) -> dict:
         except Exception:
             pass
 
+    for k, v in _pure_library().items():      # fallback: HMB entries win
+        out.setdefault(k, v)
     _CONST_CACHE[key] = out
     return out
 
