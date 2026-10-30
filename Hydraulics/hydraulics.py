@@ -4668,8 +4668,8 @@ def _build_pressure_profile_sheet(
             round(fr.quality, 4) if fr else None,
             u.disp("mflow", fr.vap_mass, 1) if fr else None,
             u.disp("mflow", fr.liq_mass, 1) if fr else None,
-            round(fr.vap_mw, 2)   if fr else None,
-            round(fr.liq_mw, 2)   if fr else None,
+            round(fr.vap_mw, 2)   if (fr and fr.vap_mass > 0) else None,
+            round(fr.liq_mw, 2)   if (fr and fr.liq_mass > 0) else None,
             u.disp("rho", vap_rho, 6)     if vap_rho else None,
             u.disp("rho", rho_l_lbft3, 4) if rho_l_lbft3 else None,
             round(gvf, 4)         if gvf is not None else None,
@@ -4781,7 +4781,8 @@ def _build_flash_detail_sheet(
                 u.disp("molflow", fr.liq_moles, 3),
                 u.disp("mflow", fr.vap_mass, 1),
                 u.disp("mflow", fr.liq_mass, 1),
-                round(fr.vap_mw, 2), round(fr.liq_mw, 2)] if fr else [
+                round(fr.vap_mw, 2) if fr.vap_mass > 0 else None,
+                round(fr.liq_mw, 2) if fr.liq_mass > 0 else None] if fr else [
             s.seq, s.comp_id, u.disp("P", s.p_in_psia), None, None,
             None, None, None, None, None, None]
         for ci, v in enumerate(vals, 1):
