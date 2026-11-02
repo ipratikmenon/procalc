@@ -2999,6 +2999,9 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  Phase Flow blank → the Vapor / Liq Mass Flow cell of that Pipeline_Input row is used.", False),
         ("  Still type Temp, Vap Z, Vap Visc, Vap Cp/Cv, Liq Density, Liq Visc on that row (yellow);", False),
         ("  MW and the vapour/liquid split come from the composition.", False),
+        ("  TEMPERATURE: composition streams are marched ADIABATICALLY (isenthalpic, PR enthalpy):", False),
+        ("  the temperature falls/rises across every fitting with its pressure drop (Joule-Thomson),", False),
+        ("  carried to all downstream stations.  Use  --isothermal-comp  on the command line to disable.", False),
         ("  MIXING: the first composition on a circuit starts the flow.  Every later column (a later Seq,", False),
         ("  or another column at the same Seq) is MIXED in: component flows add, the blend is re-flashed", False),
         ("  and the mixed MW / properties carry downstream.  Provide BOTH a vapour and a liquid column", False),
@@ -4521,6 +4524,10 @@ class _PRMix:
             h += s.y[i] * h_i
         return cp, h
 
+    def h_only(s, T, P, liquid=False):
+        """Specific enthalpy, BTU/lb (formation basis) — lighter than props()."""
+        return (s.ideal(T)[1] + s.hres(T, P, liquid)) / s.M * 0.429923
+
     def props(s, T, P, liquid=False):
         """Single-phase properties at T[K], P[bar]; FPS outputs."""
         z = s.Z(T, P, liquid)
@@ -4608,6 +4615,61 @@ def _pr_vapor_props(names, y, T_F, P_psia) -> dict:
     return {"z_vap": p["Z"], "rho_vap": p["rho"], "cp_vap": p["cp"],
             "cpcv_vap": p["gamma"], "h_vap": p["h"],
             "visc_vap": mu * 1e-4, "k_vap": k * 0.577789}
+
+
+_COMP_ISOTHERMAL = False      # True (CLI --isothermal-comp) → composition streams stay isothermal
+
+
+def _pr_stream_h(names, fr, T_F, P_psia) -> float | None:
+    """Total specific enthalpy (BTU/lb) of a flashed composition stream (PR)."""
+    try:
+        T, P = (T_F + 459.67) / 1.8, P_psia * 0.0689476
+        vm, lm = fr.vap_mass, fr.liq_mass
+        tot = vm + lm
+        if tot <= 0:
+            return None
+        h = 0.0
+        if vm > 0 and fr.y:
+            sy = sum(fr.y) or 1.0
+            h += vm * _PRMix(names, [v / sy for v in fr.y]).h_only(T, P)
+        if lm > 0 and fr.x:
+            sx = sum(fr.x) or 1.0
+            h += lm * _PRMix(names, [v / sx for v in fr.x]).h_only(T, P, liquid=True)
+        return h / tot
+    except Exception:
+        return None
+
+
+def _iso_T_out(feed, T_in_F, P_in, P_out):
+    """Outlet temperature (°F) of an adiabatic, no-work (isenthalpic) pressure
+    change P_in → P_out of a composition stream, using the PR enthalpy and the
+    temperature-corrected flash.  Returns T_in if it cannot be solved."""
+    if feed is None or not _pr_ready(feed.names) or abs(P_in - P_out) < 1e-9:
+        return T_in_F
+    fr_in = FV.flash(feed, P_in, temp_f=T_in_F)
+    h_in = _pr_stream_h(feed.names, fr_in, T_in_F, P_in)
+    if h_in is None:
+        return T_in_F
+
+    def f(T):
+        h = _pr_stream_h(feed.names, FV.flash(feed, P_out, temp_f=T), T, P_out)
+        return None if h is None else h - h_in
+    t0, t1 = T_in_F, T_in_F - 1.0
+    f0, f1 = f(t0), f(t1)
+    if f0 is None or f1 is None:
+        return T_in_F
+    for _ in range(40):
+        if f1 == f0:
+            break
+        t2 = t1 - f1 * (t1 - t0) / (f1 - f0)
+        t2 = min(max(t2, T_in_F - 250.0), T_in_F + 250.0)
+        f2 = f(t2)
+        if f2 is None:
+            return T_in_F
+        t0, f0, t1, f1 = t1, f1, t2, f2
+        if abs(t1 - t0) < 1e-5:
+            break
+    return t1
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -4926,8 +4988,12 @@ def build_profile_flash_noiso(
     mw_map: dict[str, float] = {}   # component → MW (for mole→mass in the sheet)
     override_state: dict = {}       # persisted yellow-cell overrides (this stream)
     est_inputs: list[str] = []      # sp fields filled by correlation (composition streams)
+    iso_T = False                   # composition stream marched adiabatically (isenthalpic)
+    T_run = None                    # running stream temperature, °F (when iso_T)
 
     def _flash(fd, pp):
+        if iso_T and T_run is not None:
+            return FV.flash(fd, pp, temp_f=T_run)
         return (FV.flash_isenthalpic(fd, pp) if use_isoH else FV.flash(fd, pp))
 
     for ridx, row in enumerate(block_rows):
@@ -4945,6 +5011,7 @@ def build_profile_flash_noiso(
             mass_scale = 1.0
             mass_scale_set = False
             override_state = {}
+            iso_T = False
         elif cur_feed is None and row_sp is not None:
             cur_sp = row_sp                       # manual rows refresh sp
 
@@ -4968,6 +5035,9 @@ def build_profile_flash_noiso(
                                   + ", ".join(comp_pl["estimated"]))
             if cur_feed is None:
                 cur_feed, cur_sp = comp_pl["feed"], comp_pl["sp"]
+                iso_T = (not _COMP_ISOTHERMAL and _pr_ready(cur_feed.names)
+                         and cur_sp.temp_f is not None)
+                T_run = cur_sp.temp_f if iso_T else None
                 flow_scale = vap_cf = liq_cf = 1.0
                 mass_scale, mass_scale_set = 1.0, False
                 override_state = {}
@@ -5005,6 +5075,9 @@ def build_profile_flash_noiso(
                         vap_cp_cv=_mx(a_sp.vap_cp_cv if a_sp else None, ssp.vap_cp_cv))
                 cur_feed, cur_sp = blended, new_sp
                 a_feed, a_sp = cur_feed, (cur_sp or default_sp)
+                iso_T = (not _COMP_ISOTHERMAL and _pr_ready(blended.names)
+                         and new_sp is not None and new_sp.temp_f is not None)
+                T_run = new_sp.temp_f if iso_T else None
                 flow_scale = vap_cf = liq_cf = 1.0
                 mass_scale = 1.0
                 override_state.pop("vap_mass", None)
@@ -5012,6 +5085,25 @@ def build_profile_flash_noiso(
                 scale_tag_mix = (f" | composition mixed in (+{add_mass:.1f} lb/hr)"
                                  f" → re-flash blended feed")
 
+        if iso_T and T_run is not None and a_sp is not None:
+            a_sp = replace(a_sp, temp_f=T_run)         # carry the running temperature
+            # refresh ESTIMATED vapour Z / µ / Cp-Cv at this station's local T, P
+            # (values you typed on the input sheet are never touched)
+            if est_inputs and a_feed is not None and (a_sp.vap_mass or 0) > 0:
+                try:
+                    _fl = FV.flash(a_feed, max(p, p_floor), temp_f=T_run)
+                    if _fl.vap_mass > 0 and _fl.y:
+                        _vp = _pr_vapor_props(a_feed.names, _fl.y, T_run, max(p, p_floor))
+                        _upd = {}
+                        for _a, _k in (("vap_z", "z_vap"), ("vap_visc", "visc_vap"),
+                                       ("vap_cp_cv", "cpcv_vap")):
+                            if _a in est_inputs:
+                                _upd[_a] = _vp[_k]
+                        if _upd:
+                            a_sp = replace(a_sp, **_upd)
+                except Exception:
+                    pass
+            cur_sp = a_sp
         fitting    = row.get("Fitting Name")
         spec       = row.get("Piping Spec")
         line_bore_before = last_bore        # upstream line bore (for CV β ratio)
@@ -5284,6 +5376,14 @@ def build_profile_flash_noiso(
         p_out = p - dp_t
         cum  += length_ft
 
+        # ── Adiabatic (isenthalpic) temperature change across this fitting ──
+        t_out = None
+        if (iso_T and T_run is not None and a_feed is not None and fr_full is not None
+                and not _is_source(fitting) and not _is_destination(fitting)):
+            t_out = _iso_T_out(a_feed, T_run, max(p, p_floor), max(p_out, p_floor))
+            if abs(t_out - T_run) >= 0.005:
+                note += f" | T {T_run:.2f} → {t_out:.2f} °F (isenthalpic)"
+
         stations.append(HE.Station(
             seq          = int(num(row.get("Seq")) or 0),
             comp_id      = txt(row.get("Comp ID")),
@@ -5317,6 +5417,11 @@ def build_profile_flash_noiso(
         ))
         flashes.append(fr)
         comps.append(comp_vec)
+        if stations[-1].props is not None:
+            stations[-1].props["T_out"] = t_out if t_out is not None else (
+                fr.temp_f if fr is not None else None)
+        if t_out is not None:
+            T_run = t_out
         p = p_out
 
     return stations, flashes, comps, mw_map
@@ -5601,7 +5706,8 @@ def _build_component_detail_noiso(wb, stations, phase, station_lines=None,
     # (header, getter(props) → value, width, group)
     tot = [
         ("Phase", lambda p: p["phase"], 11),
-        (u.hdr("Temperature", "T"), lambda p: D("T", p["T"], 2), 12),
+        (u.hdr("Temperature (in)", "T"), lambda p: D("T", p["T"], 2), 12),
+        (u.hdr("Temperature (out)", "T"), lambda p: D("T", p.get("T_out"), 2), 12),
         (u.hdr("Pressure (in)", "P"), lambda p: D("P", p["P"], 3), 13),
         (u.hdr("Total Molar Rate", "molflow"), lambda p: D("molflow", p["n_tot"], 3), 15),
         (u.hdr("Total Mass Rate", "mflow"), lambda p: D("mflow", p["m_tot"], 1), 14),
@@ -6646,6 +6752,8 @@ def main():
         f.lower() in ("--adiabatic", "--isenthalpic", "-h2", "--jt")
         for f in flags
     ) else "isothermal"
+    global _COMP_ISOTHERMAL
+    _COMP_ISOTHERMAL = any(f.lower() == "--isothermal-comp" for f in flags)
 
     input_path = args[0] if len(args) > 0 else "pipeline_input_noiso.xlsx"
     hmb_path   = args[1] if len(args) > 1 else None
