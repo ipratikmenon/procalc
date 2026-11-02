@@ -2631,7 +2631,7 @@ INPUT_HEADERS: list[str] = [
     "Instr Tag",              # instrument tag number (e.g. FI-101)
     "Instr dP (psi)",         # rated / manual pressure drop for instrument
     # ── Boundaries / control valves ─────────────────────────────────────────
-    "Set P (psia)",           # boundary pressure for Source / Destination rows
+    "Set P (psia)",           # boundary pressure for Source / Destination rows; on a Control Valve row = desired OUTLET pressure (ΔP back-calculated if Fixed dP is blank)
     "Control Valve Type",     # P | T | F | L  (Control Valve rows only)
     "Exch Max Allow dP (psi)",  # T-control floor: max allowable dP across exchanger
     "Notes",                  # free notes
@@ -3042,6 +3042,16 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("BRANCHES", True),
         ("  Set Run Type = Branch.  Fill Start P on the first Branch row.", False),
         ("  Branches are marched independently.  FIV/AIV/regime sheets use the Main run.", False),
+        ("", False),
+        ("CONTROL VALVE ΔP FROM SET PRESSURE", True),
+        ("  Fitting = 'Control Valve': leave Fixed dP BLANK and type the desired OUTLET pressure in", False),
+        ("  'Set P (psia)' on the same row — the engine back-calculates ΔP = P_upstream − Set P.", False),
+        ("  (A typed Fixed dP wins; Set P ≥ upstream pressure = valve fully open, ΔP = 0.)", False),
+        ("  Composition streams cool/heat across the valve (isenthalpic) and carry that downstream.", False),
+        ("", False),
+        ("TEE JOINS (temperature)", True),
+        ("  When two composition streams (or a Branch) join, the mixed temperature comes from an", False),
+        ("  ENTHALPY BALANCE (PR enthalpy) — not a mass-weighted average.", False),
         ("", False),
         ("AUTO-LINKED SPLITS & JOINS (Main ↔ Branch)", True),
         ("  JOIN (Branch → Main): on a Main row, set Fitting = 'Tee Join Branch Flow N'.", False),
@@ -4672,6 +4682,43 @@ def _iso_T_out(feed, T_in_F, P_in, P_out):
     return t1
 
 
+def _enthalpy_mix_T(feed_a, T_a, mass_a, feed_b, T_b, mass_b, blended, p_psia, T_guess):
+    """Mixed-stream temperature (°F) from an ENTHALPY BALANCE:
+    mass_a·h_a(T_a) + mass_b·h_b(T_b) = (mass_a+mass_b)·h_mix(T_mix), all at p_psia,
+    with the PR enthalpy and the temperature-corrected flash.  Falls back to T_guess."""
+    try:
+        if not (_pr_ready(feed_a.names) and _pr_ready(feed_b.names)
+                and _pr_ready(blended.names)) or (mass_a + mass_b) <= 0:
+            return T_guess
+        h_a = _pr_stream_h(feed_a.names, FV.flash(feed_a, p_psia, temp_f=T_a), T_a, p_psia)
+        h_b = _pr_stream_h(feed_b.names, FV.flash(feed_b, p_psia, temp_f=T_b), T_b, p_psia)
+        if h_a is None or h_b is None:
+            return T_guess
+        h_t = (h_a * mass_a + h_b * mass_b) / (mass_a + mass_b)
+
+        def f(T):
+            h = _pr_stream_h(blended.names, FV.flash(blended, p_psia, temp_f=T), T, p_psia)
+            return None if h is None else h - h_t
+        t0, t1 = T_guess, T_guess - 1.0
+        f0, f1 = f(t0), f(t1)
+        if f0 is None or f1 is None:
+            return T_guess
+        for _ in range(40):
+            if f1 == f0:
+                break
+            t2 = t1 - f1 * (t1 - t0) / (f1 - f0)
+            t2 = min(max(t2, min(T_a, T_b) - 250.0), max(T_a, T_b) + 250.0)
+            f2 = f(t2)
+            if f2 is None:
+                return T_guess
+            t0, f0, t1, f1 = t1, f1, t2, f2
+            if abs(t1 - t0) < 1e-5:
+                break
+        return t1
+    except Exception:
+        return T_guess
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Per-station stream properties (Component_Detail)
 # ════════════════════════════════════════════════════════════════════════
@@ -5073,6 +5120,15 @@ def build_profile_flash_noiso(
                         new_sp,
                         temp_f=_mx(a_sp.temp_f if a_sp else None, ssp.temp_f),
                         vap_cp_cv=_mx(a_sp.vap_cp_cv if a_sp else None, ssp.vap_cp_cv))
+                if (iso_T and T_run is not None and new_sp is not None
+                        and mix_pl["feed"] is not None):
+                    # ENTHALPY BALANCE for the mixed temperature
+                    T_b = mix_pl["sp"].temp_f if mix_pl["sp"].temp_f is not None else T_run
+                    T_mix = _enthalpy_mix_T(a_feed, T_run, main_mass, mix_pl["feed"],
+                                            T_b, add_mass, blended, p_mix, new_sp.temp_f)
+                    scale_tag_mix += (f" | T mix {T_run:.2f} + {T_b:.2f} → {T_mix:.2f} °F "
+                                      f"(enthalpy balance)")
+                    new_sp = replace(new_sp, temp_f=T_mix)
                 cur_feed, cur_sp = blended, new_sp
                 a_feed, a_sp = cur_feed, (cur_sp or default_sp)
                 iso_T = (not _COMP_ISOTHERMAL and _pr_ready(blended.names)
@@ -5170,12 +5226,26 @@ def build_profile_flash_noiso(
                     mwmap = {n: a_feed.mw[i] for i, n in enumerate(a_feed.names)}
                     main_mass = sum(m * mwmap.get(n, 50.0)
                                     for n, m in main_moles.items())
+                    t_note = ""
+                    new_sp_j = _blend_sp(a_sp, inj.get("sp"), main_mass, b_mass)
+                    if iso_T and T_run is not None and new_sp_j is not None:
+                        T_b = inj.get("T_out")
+                        if T_b is None:
+                            T_b = (inj["sp"].temp_f if inj.get("sp") is not None
+                                   and inj["sp"].temp_f is not None else T_run)
+                        T_mix = _enthalpy_mix_T(a_feed, T_run, main_mass, b_feed, T_b,
+                                                b_mass, blended, p_eval, T_run)
+                        t_note = (f" | T mix {T_run:.2f} + {T_b:.2f} → {T_mix:.2f} °F "
+                                  f"(enthalpy balance)")
+                        new_sp_j = replace(new_sp_j, temp_f=T_mix)
+                        iso_T = _pr_ready(blended.names)
+                        T_run = T_mix if iso_T else None
                     cur_feed = blended
-                    cur_sp   = _blend_sp(a_sp, inj.get("sp"), main_mass, b_mass)
+                    cur_sp   = new_sp_j
                     a_feed, a_sp = cur_feed, cur_sp
                     flow_scale = vap_cf = liq_cf = 1.0   # blend = new full flow
                     scale_tag += (f" | Tee join {inj.get('label','Branch')} "
-                                  f"→ re-flash blended feed (+{b_mass:.1f} lb/hr)")
+                                  f"→ re-flash blended feed (+{b_mass:.1f} lb/hr)" + t_note)
             else:
                 scale_tag += (f" | Tee join {inj.get('label','Branch')} "
                               f"(skipped — needs HMB streams on both runs)")
@@ -5299,7 +5369,13 @@ def build_profile_flash_noiso(
                       if ctype == "F" else None)
             # Base ΔP: flow control floats to the downstream Destination P;
             # otherwise a fixed design ΔP (Fixed dP, else Darcy with Fixed K).
-            if dest_p is not None:
+            if not fixed_dp and set_p is not None:
+                # ΔP back-calculated from the desired valve OUTLET pressure (Set P)
+                base_dp = max(0.0, p - set_p)
+                src_tag = (f"ΔP back-calculated from Set P = {set_p:.3f} psia (outlet)"
+                           if p > set_p else
+                           f"Set P {set_p:.3f} ≥ upstream {p:.3f} psia → valve fully open, ΔP = 0")
+            elif dest_p is not None:
                 ov = (cv_overrides or {}).get(ridx)
                 if ov is not None:
                     base_dp = ov
@@ -5458,7 +5534,9 @@ def build_profile_solved(
     targets: dict[int, tuple[int, float]] = {}
     for ri, row in enumerate(block_rows):
         if (_is_control_valve(row.get("Fitting Name"))
-                and _cv_control_type(row) == "F"):
+                and _cv_control_type(row) == "F"
+                and num(row.get("Set P (psia)")) is None
+                and not num(row.get("Fixed dP (psi)"))):
             di = next((j for j in range(ri + 1, len(block_rows))
                        if _is_destination(block_rows[j].get("Fitting Name"))
                        and num(block_rows[j].get("Set P (psia)")) is not None),
@@ -6531,6 +6609,7 @@ def run_noiso(
                     "comp":     cmps[-1] if cmps else {},
                     "feed":     b_feed,
                     "sp":       b_sp,
+                    "T_out":    ((sts[-1].props or {}).get("T_out") if sts else None),
                     "label":    label,
                 }
                 print(f"  Branch '{label}' (line {bline}) joins Main at "
