@@ -401,6 +401,11 @@ class IDResult:
     basis: str
 
 
+# ASME B36.10M 8" schedules missing from the base table (wall, in) — verify before design use
+PIPE_WALL_IN["8"].update({"20": 0.250, "30": 0.277, "60": 0.406, "100": 0.594,
+                          "120": 0.719, "140": 0.812})
+
+
 def resolve_id(spec: str | None, bore) -> IDResult:
     """Internal diameter (in) for a component from its piping spec + bore.
 
@@ -413,6 +418,13 @@ def resolve_id(spec: str | None, bore) -> IDResult:
         return IDResult(None, None, None, None, nps, "bore not recognised")
     od = A.PIPE_OD_IN[nps]
 
+    # Optional schedule override:  "<class>/<schedule>"  e.g.  G9A-3/100  or  G9A-3/SCH80
+    spec_raw = (spec or "").strip()
+    sched_ov = None
+    if "/" in spec_raw:
+        spec_raw, _ov = spec_raw.split("/", 1)
+        sched_ov = _ov.strip().upper().replace("SCH", "").replace(".", "").strip() or None
+        spec = spec_raw.strip()
     cls = _CLASS_BY_NAME.get((spec or "").upper())
     sched = None
     if cls:
@@ -424,6 +436,9 @@ def resolve_id(spec: str | None, bore) -> IDResult:
                 break
 
     basis = f"{spec} {nps}\""
+    if sched_ov:
+        sched = sched_ov
+        basis += f" Sch {sched_ov} (override)"
     if sched is None:
         sched = "STD"
         basis += " (spec n/a -> STD)"
@@ -3363,7 +3378,7 @@ def _phase_of(quality: float) -> str:
 
 def _dp_flashed(g: HE.Geom, sp: HE.StreamProps, fr) -> dict:
     """Δp using flashed vapor/liquid split (homogeneous model)."""
-    rho_g = _gas_rho_kgm3(fr.vap_mw, sp.vap_z, sp.temp_f, fr.p_psia)
+    rho_g = _gas_rho_sp(sp, fr.vap_mw, sp.temp_f, fr.p_psia)
     rho_l = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
     mu_g  = (sp.vap_visc or 0.0) * CP_TO_PAS
     mu_l  = (sp.liq_visc or 0.0) * CP_TO_PAS
@@ -3392,6 +3407,16 @@ def _dp_flashed(g: HE.Geom, sp: HE.StreamProps, fr) -> dict:
     return dict(rho=rho, v=v, Re=Re, f=f, dp_f=dp_f, dp_k=dp_k, dp_z=dp_z)
 
 
+def _gas_rho_sp(sp, vap_mw, T_F, P_psia, z=None) -> float:
+    """Gas density kg/m3.  A manual-property stream with a typed ``Vap Density`` uses it
+    (at the row's Start P) scaled with local pressure; otherwise MW·P/(Z·R·T)."""
+    if (sp is not None and getattr(sp, "stream", None) == "(manual)"
+            and sp.vap_density and sp.pres_psia and P_psia):
+        return sp.vap_density * LBFT3_TO_KGM3 * (P_psia / sp.pres_psia)
+    return _gas_rho_kgm3(vap_mw, z if z is not None else (sp.vap_z if sp else None),
+                         T_F, P_psia)
+
+
 def _phase_momentum(g: HE.Geom, sp: HE.StreamProps, fr, v_mix_ms: float) -> dict:
     """Vapour Mach number and per-phase ρv² at one station (SI).
 
@@ -3406,7 +3431,7 @@ def _phase_momentum(g: HE.Geom, sp: HE.StreamProps, fr, v_mix_ms: float) -> dict
         return out
     vm = fr.vap_mass * LBHR_TO_KGS
     lm = fr.liq_mass * LBHR_TO_KGS
-    rho_g = _gas_rho_kgm3(fr.vap_mw, sp.vap_z, sp.temp_f, fr.p_psia)
+    rho_g = _gas_rho_sp(sp, fr.vap_mw, sp.temp_f, fr.p_psia)
     rho_l = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
     if vm > 0 and rho_g > 0:
         v_sg = vm / rho_g / g.area_m2
@@ -4808,7 +4833,7 @@ def _station_props(fr, sp, feed, cmap, p_psia, est_inputs=None) -> dict | None:
             return est[est_key]
         return v
     z_vap = pick("vap_z", "z_vap", "Z", vm > 0)
-    rho_g = (_gas_rho_kgm3(fr.vap_mw, z_vap, T, p_psia) / LBFT3_TO_KGM3
+    rho_g = (_gas_rho_sp(sp, fr.vap_mw, T, p_psia, z_vap) / LBFT3_TO_KGM3
              if (vm > 0 and T is not None) else None)
     rho_l = pick("liq_density", "rho_liq", "liq ρ", lm > 0)
     vg = (vm / rho_g) if rho_g else 0.0
@@ -5787,8 +5812,9 @@ def _build_pressure_profile_sheet(
         else:
             row_bg = fitting_bg(s.fitting)
 
-        vap_rho = (_gas_rho_kgm3(fr.vap_mw, sp.vap_z, sp.temp_f, s.p_in_psia)
-                   / LBFT3_TO_KGM3) if fr else None
+        vap_rho = ((s.props or {}).get("rho_vap")
+                   or (_gas_rho_sp(sp, fr.vap_mw, sp.temp_f, s.p_in_psia)
+                       / LBFT3_TO_KGM3)) if fr else None
         q_gas  = (fr.vap_mass / vap_rho) if (fr and vap_rho) else None
         q_liq  = (fr.liq_mass / rho_l_lbft3) if (fr and rho_l_lbft3) else None
         q_tot  = (q_gas or 0.0) + (q_liq or 0.0)
