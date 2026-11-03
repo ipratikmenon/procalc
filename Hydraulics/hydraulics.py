@@ -8405,6 +8405,22 @@ def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_
     try:
         wsd = wb["Flow_Pattern_Data"]
         c0 = len(_TABLE_COLS) + 1
+        # inputs behind the superficial velocities (FPS) so they can be checked by hand
+        chk = ("Gas mass (lb/hr)", "Liq mass (lb/hr)", "Gas ρ (lb/ft3)", "Liq ρ (lb/ft3)",
+               "Flow area (ft2)", "Vsg (ft/s)", "Vsl (ft/s)")
+        c1 = c0 + 4
+        for j, nm_ in enumerate(chk):
+            _cell(wsd, 2, c1 + j, nm_, bg=GRNHDR, fg=WHITE, sz=9, bold=True,
+                  ha="center", wrap=True)
+            wsd.column_dimensions[get_column_letter(c1 + j)].width = 13
+        for i_, (st_, pr_) in enumerate(rows):
+            ph_ = _station_phase_state(st_, sp, gas_density_fn)
+            area_ = math.pi / 4.0 * ((st_.id_in or 0.0) / 12.0) ** 2
+            vals_ = [ph_["mg"], ph_["ml"], ph_["rho_g"], ph_["rho_l"], area_,
+                     (pr_.Vsg / FT_TO_M) if pr_.Vsg is not None else None,
+                     (pr_.Vsl / FT_TO_M) if pr_.Vsl is not None else None]
+            for j, v_ in enumerate(vals_):
+                _cell(wsd, 3 + i_, c1 + j, _fmt(v_), sz=9, ha="right")
         names_ = ("Regime (Taitel-Dukler)", "Regime (Shell DEP)", "Regime (Baker)",
                   "Regime (Hewitt-Roberts)")
         keys_ = ("Taitel-Dukler", "Shell DEP", "Baker", "Hewitt-Roberts")
