@@ -1437,14 +1437,15 @@ def fiv_station_inputs(station, sp, gas_density_fn):
     rho_si = (station.rho_lbft3 or 0.0) * LBFT3_TO_KGM3
     v_si = (station.v_fts or 0.0) * FT_TO_M
     rho_v2 = rho_si * v_si * v_si
-    rho_gas_si = (gas_density_fn(station.p_in_psia) or 0.0) * LBFT3_TO_KGM3
-    vm = (sp.vap_mass or 0.0) * LBHR_TO_KGS
-    lm = (sp.liq_mass or 0.0) * LBHR_TO_KGS
+    ph = _station_phase_state(station, sp, gas_density_fn)
+    rho_gas_si = ph["rho_g"] * LBFT3_TO_KGM3
+    vm = ph["mg"] * LBHR_TO_KGS
+    lm = ph["ml"] * LBHR_TO_KGS
     q_gas = vm / rho_gas_si if rho_gas_si > 0 else 0.0
-    rho_l_si = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
+    rho_l_si = ph["rho_l"] * LBFT3_TO_KGM3
     q_liq = lm / rho_l_si if rho_l_si > 0 else 0.0
     gvf = q_gas / (q_gas + q_liq) if (q_gas + q_liq) > 0 else 1.0
-    mu_gas = (sp.vap_visc or 0.0) * CP_TO_PAS
+    mu_gas = (ph["mu_g"] or 0.0) * CP_TO_PAS
     return {"D": D, "T": T, "rho_v2": rho_v2, "gvf": gvf, "fcf": fcf(gvf, mu_gas)}
 
 
@@ -1810,14 +1811,15 @@ def station_tp_inputs(station, sp, gas_density_fn) -> "TPInputs | None":
     d = d_in * IN_TO_M
     area = math.pi * 0.25 * d * d
 
-    rho_g = (gas_density_fn(station.p_in_psia) or 0.0) * LBFT3_TO_KGM3
-    rho_l = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
-    mu_g = (sp.vap_visc or 0.01) * CP_TO_PAS
-    mu_l = (sp.liq_visc or 0.5) * CP_TO_PAS
-    sigma = (sp.liq_surf_tens or 20.0) * DYNCM_TO_NM
+    ph = _station_phase_state(station, sp, gas_density_fn)
+    rho_g = ph["rho_g"] * LBFT3_TO_KGM3
+    rho_l = ph["rho_l"] * LBFT3_TO_KGM3
+    mu_g = (ph["mu_g"] or 0.01) * CP_TO_PAS
+    mu_l = (ph["mu_l"] or 0.5) * CP_TO_PAS
+    sigma = (ph["sigma"] or 20.0) * DYNCM_TO_NM
 
-    mg = (sp.vap_mass or 0.0) * LBHR_TO_KGS      # kg/s
-    ml = (sp.liq_mass or 0.0) * LBHR_TO_KGS
+    mg = ph["mg"] * LBHR_TO_KGS      # kg/s
+    ml = ph["ml"] * LBHR_TO_KGS
     qg = mg / rho_g if rho_g > 0 else 0.0
     ql = ml / rho_l if rho_l > 0 else 0.0
     vsg = qg / area
@@ -2617,6 +2619,10 @@ INPUT_HEADERS: list[str] = [
     "Liq Mass Flow (lb/h)",
     "Liq Density (lb/ft3)",
     "Liq Visc (cP)",
+    "Liq MW",                 # liquid molecular weight (g/mol) — manual streams
+    "Liq Surf Tension (N/m)", # liquid surface tension, N/m (flow-pattern maps)
+    "Vap Cp (BTU/lb-F)",      # vapour Cp — used for the enthalpy balance at tee joins
+    "Liq Cp (BTU/lb-F)",      # liquid Cp — used for the enthalpy balance at tee joins
     # ── Component / geometry ────────────────────────────────────────────────
     "Comp ID",                # identifier / tag label
     "Fitting Name",           # from Fittings.md drop-down
@@ -2642,7 +2648,8 @@ _NCOL = len(INPUT_HEADERS)   # 37
 _MANUAL_PROP_COLS = [
     "Temp (degF)", "Vapor Mass Flow", "Vap MW", "Vap Visc (cP)", "Vap Z",
     "Vap Cp/Cv", "Vap Density (lb/ft3)", "Liq Mass Flow (lb/h)",
-    "Liq Density (lb/ft3)", "Liq Visc (cP)",
+    "Liq Density (lb/ft3)", "Liq Visc (cP)", "Liq MW", "Liq Surf Tension (N/m)",
+    "Vap Cp (BTU/lb-F)", "Liq Cp (BTU/lb-F)",
 ]
 
 # ── Units-layer metadata per canonical column ───────────────────────────────
@@ -2667,6 +2674,10 @@ _FIELD_META: dict[str, tuple[str, str | None]] = {
     "Liq Mass Flow (lb/h)": ("Liq Mass Flow", "mflow"),
     "Liq Density (lb/ft3)": ("Liq Density", "rho"),
     "Liq Visc (cP)": ("Liq Visc (cP)", None),
+    "Liq MW": ("Liq MW", None),
+    "Liq Surf Tension (N/m)": ("Liq Surf Tension", None),
+    "Vap Cp (BTU/lb-F)": ("Vap Cp", None),
+    "Liq Cp (BTU/lb-F)": ("Liq Cp", None),
     "Comp ID": ("Comp ID", None), "Fitting Name": ("Fitting Name", None),
     "Bore (in)": ("Bore (in)", None),    # NPS — always inches (B36.10 convention)
     "Piping Spec": ("Piping Spec", None),
@@ -2865,6 +2876,8 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         "Vap MW": 9, "Vap Visc (cP)": 11, "Vap Z": 8, "Vap Cp/Cv": 10,
         "Vap Density (lb/ft3)": 14, "Liq Mass Flow (lb/h)": 14,
         "Liq Density (lb/ft3)": 14, "Liq Visc (cP)": 10, "Comp ID": 12,
+        "Liq MW": 9, "Liq Surf Tension (N/m)": 14, "Vap Cp (BTU/lb-F)": 12,
+        "Liq Cp (BTU/lb-F)": 12,
         "Fitting Name": 32, "Bore (in)": 9, "Piping Spec": 11, "Length (ft)": 11,
         "Elev Change (ft)": 13, "Direction": 10, "Fixed K": 9,
         "Fixed dP (psi)": 12, "Instr Type": 10, "Instr Tag": 12,
@@ -3232,6 +3245,10 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Liq Mass Flow (lb/h)": gnum(rv, "Liq Mass Flow (lb/h)"),
             "Liq Density (lb/ft3)": gnum(rv, "Liq Density (lb/ft3)"),
             "Liq Visc (cP)":        num(g(rv, "Liq Visc (cP)")),
+            "Liq MW":               num(g(rv, "Liq MW")),
+            "Liq Surf Tension (N/m)": num(g(rv, "Liq Surf Tension (N/m)")),
+            "Vap Cp (BTU/lb-F)":    num(g(rv, "Vap Cp (BTU/lb-F)")),
+            "Liq Cp (BTU/lb-F)":    num(g(rv, "Liq Cp (BTU/lb-F)")),
             # ── Geometry / component ────────────────────────────────────
             "Comp ID":          txt(g(rv, "Comp ID")),
             "Fitting Name":     txt(g(rv, "Fitting Name")),
@@ -3447,14 +3464,19 @@ def _streamprops_from_manual(row: dict) -> HE.StreamProps | None:
         total_mass  = vm + lm,
         vap_mass    = vap_mass,
         liq_mass    = liq_mass,
-        mol_weight  = vap_mw,
+        mol_weight  = vap_mw if vap_mw else num(row.get("Liq MW")),
         vap_mw      = vap_mw,
+        liq_mw      = num(row.get("Liq MW")),
         vap_density = vap_den,
         liq_density = liq_den,
         vap_visc    = num(row.get("Vap Visc (cP)")),
         liq_visc    = num(row.get("Liq Visc (cP)")),
         vap_z       = num(row.get("Vap Z")),
         vap_cp_cv   = num(row.get("Vap Cp/Cv")),
+        vap_cp      = num(row.get("Vap Cp (BTU/lb-F)")),
+        liq_cp      = num(row.get("Liq Cp (BTU/lb-F)")),
+        liq_surf_tens = ((num(row.get("Liq Surf Tension (N/m)")) * 1000.0)   # N/m → dyn/cm
+                         if num(row.get("Liq Surf Tension (N/m)")) is not None else None),
     )
 
 
@@ -4899,6 +4921,10 @@ _YELLOW_OVERRIDE_MAP = {
     "Liq Mass Flow (lb/h)": "liq_mass",
     "Liq Density (lb/ft3)": "liq_density",
     "Liq Visc (cP)":        "liq_visc",
+    "Liq MW":               "liq_mw",
+    "Liq Surf Tension (N/m)": "liq_surf_tens",
+    "Vap Cp (BTU/lb-F)":    "vap_cp",
+    "Liq Cp (BTU/lb-F)":    "liq_cp",
 }
 
 
@@ -4908,7 +4934,7 @@ def _row_yellow_overrides(row: dict) -> dict:
     for col, field_name in _YELLOW_OVERRIDE_MAP.items():
         v = num(row.get(col))
         if v is not None:
-            out[field_name] = v
+            out[field_name] = v * 1000.0 if field_name == "liq_surf_tens" else v   # N/m → dyn/cm
     return out
 
 
@@ -5277,19 +5303,55 @@ def build_profile_flash_noiso(
                 vmw = ((mv + bv) / mol_v) if mol_v > 0 else (mwa or mwb)
                 nsp = _blend_sp(a_sp, bsp, mv + ml, bv + bl)
                 if nsp is not None:
+                    def _wavg(pairs):
+                        """weighted mean over (weight, value) pairs with a value."""
+                        pr_ = [(w, v) for w, v in pairs if v is not None and w > 0]
+                        tw_ = sum(w for w, _ in pr_)
+                        return (sum(w * v for w, v in pr_) / tw_) if tw_ > 0 else None
+                    cpv = _wavg([(mv, a_sp.vap_cp), (bv, bsp.vap_cp)])
+                    cpl = _wavg([(ml, a_sp.liq_cp), (bl, bsp.liq_cp)])
+                    sig = _wavg([(ml, a_sp.liq_surf_tens), (bl, bsp.liq_surf_tens)])
+                    # liquid MW: mass-weighted harmonic (mole-weighted)
+                    lmw_a = a_sp.liq_mw or (a_sp.mol_weight if ml > 0 and mv <= 0 else None)
+                    mol_l = ((ml / lmw_a) if (ml > 0 and lmw_a) else 0.0) + \
+                            ((bl / bsp.liq_mw) if (bl > 0 and bsp.liq_mw) else 0.0)
+                    lmw = ((ml + bl) / mol_l) if mol_l > 0 else None
+                    # ENTHALPY (sensible-heat) balance for the mixed temperature:
+                    #   Σ m_i·Cp_i·(T_mix − T_i) = 0   (no phase change / heat of mixing)
+                    Ta_ = override_state.get("temp_f", a_sp.temp_f)
+                    Tb_ = bsp.temp_f
+                    ca_ = (mv * (a_sp.vap_cp or 0.0) + ml * (a_sp.liq_cp or 0.0))
+                    cb_ = (bv * (bsp.vap_cp or 0.0) + bl * (bsp.liq_cp or 0.0))
+                    ok_cp = (Ta_ is not None and Tb_ is not None
+                             and (mv <= 0 or a_sp.vap_cp) and (ml <= 0 or a_sp.liq_cp)
+                             and (bv <= 0 or bsp.vap_cp) and (bl <= 0 or bsp.liq_cp)
+                             and (ca_ + cb_) > 0)
+                    if ok_cp:
+                        T_mix_m = (ca_ * Ta_ + cb_ * Tb_) / (ca_ + cb_)
+                        t_note_m = (f" | T mix {Ta_:.2f} + {Tb_:.2f} → {T_mix_m:.2f} °F "
+                                    f"(enthalpy balance, Cp)")
+                    else:
+                        T_mix_m = (((mv + ml) * Ta_ + (bv + bl) * Tb_) / (mv + ml + bv + bl)
+                                   if (Ta_ is not None and Tb_ is not None) else nsp.temp_f)
+                        t_note_m = (f" | T mix {T_mix_m:.2f} °F (mass-weighted — enter Vap Cp / "
+                                    f"Liq Cp for an enthalpy balance)"
+                                    if (Ta_ is not None and Tb_ is not None
+                                        and abs(Ta_ - Tb_) > 0.05) else "")
                     nsp = replace(
                         nsp, vap_mass=mv + bv, liq_mass=ml + bl,
-                        total_mass=mv + bv + ml + bl, vap_mw=vmw, mol_weight=vmw,
+                        total_mass=mv + bv + ml + bl, vap_mw=vmw,
+                        mol_weight=vmw if vmw else lmw, liq_mw=lmw,
+                        vap_cp=cpv, liq_cp=cpl, liq_surf_tens=sig, temp_f=T_mix_m,
                         vap_cp_cv=(a_sp.vap_cp_cv if (mv > 0 and a_sp.vap_cp_cv)
                                    else bsp.vap_cp_cv),
                         phase=("TWO-PHASE" if (mv + bv) > 0 and (ml + bl) > 0
                                else "VAPOR" if (mv + bv) > 0 else "LIQUID"))
                     cur_sp, a_sp = nsp, nsp
                     flow_scale = vap_cf = liq_cf = 1.0
-                    override_state.pop("vap_mass", None)
-                    override_state.pop("liq_mass", None)
+                    for _k in set(_YELLOW_OVERRIDE_MAP.values()):   # merged values now in sp
+                        override_state.pop(_k, None)
                     scale_tag += (f" | Tee join {inj.get('label','Branch')} (manual streams): "
-                                  f"+{bv:.1f} vapour, +{bl:.1f} liquid lb/hr")
+                                  f"+{bv:.1f} vapour, +{bl:.1f} liquid lb/hr" + t_note_m)
             else:
                 scale_tag += (f" | Tee join {inj.get('label','Branch')} "
                               f"(skipped — needs HMB streams on both runs)")
@@ -7902,17 +7964,44 @@ def compute_params(mg_kgh, rg, mug_cp, ml_kgh, rl, mul_cp, sigma_nm, d_mm):
     return p
 
 
+def _station_phase_state(station, sp, gas_density_fn) -> dict:
+    """Phase flows / densities / viscosities / surface tension AT THIS STATION.
+
+    Uses the station's own flash & property set (``station.props``) so that
+    stations upstream of a tee join, flashed or cooled streams, etc. are each
+    evaluated with their own flows — not with one circuit-level stream.  Falls back
+    to the circuit stream ``sp`` where a station has no property set.
+    """
+    pr = getattr(station, "props", None) or {}
+    rho_g = pr.get("rho_vap")
+    if rho_g is None:
+        rho_g = gas_density_fn(station.p_in_psia) if gas_density_fn else None
+    rho_l = pr.get("rho_liq")
+    if rho_l is None and sp is not None:
+        rho_l = sp.liq_density
+    return dict(
+        mg=(pr["m_vap"] if pr.get("m_vap") is not None else (sp.vap_mass or 0.0)),
+        ml=(pr["m_liq"] if pr.get("m_liq") is not None else (sp.liq_mass or 0.0)),
+        rho_g=rho_g or 0.0, rho_l=rho_l or 0.0,
+        mu_g=(pr.get("visc_vap") if pr.get("visc_vap") is not None
+              else (sp.vap_visc if sp else None)),
+        mu_l=(pr.get("visc_liq") if pr.get("visc_liq") is not None
+              else (sp.liq_visc if sp else None)),
+        sigma=(pr.get("sigma") if pr.get("sigma") is not None
+               else (sp.liq_surf_tens if sp else None)))
+
+
 def params_from_station(sp, station, gas_density_fn):
     """FPParams for one pipe station, using LOCAL (pressure-dependent) gas ρ."""
-    rg_lbft3 = gas_density_fn(station.p_in_psia)
-    rg = (rg_lbft3 or 0.0) * LBFT3_TO_KGM3
-    rl = (sp.liq_density or 0.0) * LBFT3_TO_KGM3
-    mg = (sp.vap_mass or 0.0) * LBHR_TO_KGH
-    ml = (sp.liq_mass or 0.0) * LBHR_TO_KGH
-    sigma = (sp.liq_surf_tens or 0.0) * DYNCM_TO_NM
+    ph = _station_phase_state(station, sp, gas_density_fn)
+    rg = ph["rho_g"] * LBFT3_TO_KGM3
+    rl = ph["rho_l"] * LBFT3_TO_KGM3
+    mg = ph["mg"] * LBHR_TO_KGH
+    ml = ph["ml"] * LBHR_TO_KGH
+    sigma = (ph["sigma"] or 0.0) * DYNCM_TO_NM
     d_mm = (station.id_in or 0.0) * IN_TO_MM
-    return compute_params(mg, rg, sp.vap_visc or 0.0, ml, rl,
-                          sp.liq_visc or 0.0, sigma, d_mm)
+    return compute_params(mg, rg, ph["mu_g"] or 0.0, ml, rl,
+                          ph["mu_l"] or 0.0, sigma, d_mm)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -8011,9 +8100,8 @@ MAPS = [
            "Frtp", "Frtp/√L", 0.1, 1e4,
            "QgQl", "(Qg/Ql)^0.5", 0.1, 100, "OSH_UP_V"),
     MapDef("V HEDH down", "HEDH — VERTICAL DOWNWARD",                    # chart7
-           "Vsl", "Liquid apparent velocity (m/s)", 0, 2,
-           "Vsg", "Gas apparent velocity (m/s)", 0, 2, "HEDH_DN_V",
-           logx=False, logy=False),
+           "Vsl", "Liquid apparent velocity (m/s)", 0.01, 10,
+           "Vsg", "Gas apparent velocity (m/s)", 0.01, 10, "HEDH_DN_V"),
     MapDef("V Oshinowo down", "OSHINOWO-CHARLES — VERTICAL DOWNWARD",    # chart8
            "Frtp", "Frtp/√L", 0.1, 1e4,
            "QgQl", "(Qg/Ql)^0.5", 0.1, 100, "OSH_DN_V"),
@@ -8111,10 +8199,20 @@ def _write_series_cols(ws, col, points, header):
     return col, col + 1, 2, max(2, r - 1)
 
 
-def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
+def _logsafe(mp, pt):
+    """Floor non-positive coordinates on log axes (they cannot be plotted)."""
+    x, y = pt
+    if x is not None and mp.logx and x <= 0:
+        x = mp.xmin
+    if y is not None and mp.logy and y <= 0:
+        y = mp.ymin
+    return (x, y)
+
+
+def _add_scatter(ws, mp, data_col, op_points, ctrl_point, regime_text=None):
     """Build one ScatterChart for map mp; data laid out from column data_col."""
     chart = ScatterChart()
-    chart.title = mp.title
+    chart.title = mp.title + (f"   —   REGIME: {regime_text}" if regime_text else "")
     chart.height = 11
     chart.width = 18
     chart.x_axis.title = mp.xlabel
@@ -8132,7 +8230,8 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
     col = data_col
     # boundary polylines (grey lines, no markers)
     for i, poly in enumerate(BOUNDARIES.get(mp.bnd, [])):
-        xc, yc, r0, r1 = _write_series_cols(ws, col, poly, f"bnd{i}")
+        xc, yc, r0, r1 = _write_series_cols(
+            ws, col, [_logsafe(mp, q) for q in poly], f"bnd{i}")
         xref = Reference(ws, min_col=xc, min_row=r0, max_row=r1)
         yref = Reference(ws, min_col=yc, min_row=r0, max_row=r1)
         s = Series(yref, xref, title=("regime boundary" if i == 0 else None))
@@ -8143,7 +8242,8 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
         col += 3
 
     # operating path (blue line + small markers)
-    xc, yc, r0, r1 = _write_series_cols(ws, col, op_points, "path")
+    xc, yc, r0, r1 = _write_series_cols(
+        ws, col, [_logsafe(mp, q) for q in op_points], "path")
     if r1 >= r0:
         xref = Reference(ws, min_col=xc, min_row=r0, max_row=r1)
         yref = Reference(ws, min_col=yc, min_row=r0, max_row=r1)
@@ -8156,7 +8256,8 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
 
     # controlling point (large red diamond)
     if ctrl_point and ctrl_point[0] is not None and ctrl_point[1] is not None:
-        xc, yc, r0, r1 = _write_series_cols(ws, col, [ctrl_point], "ctrl")
+        xc, yc, r0, r1 = _write_series_cols(
+            ws, col, [_logsafe(mp, ctrl_point)], "ctrl")
         xref = Reference(ws, min_col=xc, min_row=r0, max_row=r1)
         yref = Reference(ws, min_col=yc, min_row=r0, max_row=r1)
         s = Series(yref, xref, title="controlling (max ρv²)")
@@ -8167,8 +8268,92 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point):
     return chart, col
 
 
-def build_map_sheets(wb, rows, ctrl_seq):
-    """rows = [(station, FPParams)]; build one sheet per map-group with charts."""
+# ── Regime on every map ──────────────────────────────────────────────────
+def _loglog_y(poly, x):
+    """y on a polyline at x, interpolated linearly in log-log space (None if outside)."""
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:]):
+        lo, hi = min(x0, x1), max(x0, x1)
+        if lo <= x <= hi and hi > lo:
+            t = (math.log10(x) - math.log10(x0)) / (math.log10(x1) - math.log10(x0))
+            return 10 ** (math.log10(y0) + t * (math.log10(y1) - math.log10(y0)))
+    return None
+
+
+def _shell2_h_regime(frg, frl) -> str:
+    """Shell DEP 31.22.05.11-Gen (horizontal): region of (gas Froude, liquid Froude),
+    from the digitised boundary polylines of the DEP2-horizontal map."""
+    P0, P1, P2, P3, P4, P5, P6, P7, P8 = BOUNDARIES["SHELL2_H"]
+    x, y = frg, frl
+    if not (x and y and x > 0 and y > 0):
+        return "n/a"
+    top = (_loglog_y(P5, x) if x <= 0.2 else _loglog_y(P6, x) if x <= 3.5
+           else _loglog_y(P8, x))
+    if top is not None and y >= top:
+        return "Bubbly" if x <= 3.5 else "Bubbly / Intermittent (upper limit of map)"
+    if x <= 0.3:
+        low = _loglog_y(P1, x)
+        if low is not None and y >= low:
+            return "Intermittent (Slug-Plug)"
+    else:
+        up = _loglog_y(P7, x) if x <= 3.5 else _loglog_y(P8, x)
+        if up is not None and y >= up:
+            return "Intermittent (Slug-Plug)"
+        lower = (_loglog_y(P2, x) if x <= 2.0 else _loglog_y(P3, x) if x <= 6.0
+                 else _loglog_y(P4, x))
+        if lower is not None and y >= lower:
+            return "Annular"
+        mist_line = _loglog_y(P4, x)
+        if x >= 6.0 and mist_line is not None and y < mist_line:
+            return "Mist flow"
+        return "Stratified wavy flow"
+    s0 = _loglog_y(P0, x)
+    if x <= 0.08 and s0 is not None and y < s0:
+        return "Stratified smooth flow"
+    return "Stratified wavy flow"
+
+
+def _station_regimes(st, sp, gdf, params) -> dict:
+    """{method: regime} for one station (T&D, Taitel-Barnea, Baker, Hewitt-Roberts,
+    Barnea, Beggs-Brill) plus Shell DEP2 (map polygons)."""
+    out: dict = {}
+    t = station_tp_inputs(st, sp, gdf)
+    if t is None:
+        return out
+    sph = _is_single_phase(t)
+    if sph:
+        return {k: sph for k in ("Taitel-Dukler", "Taitel-Barnea", "Baker",
+                                 "Hewitt-Roberts", "Barnea", "Beggs-Brill", "Shell DEP")}
+    for name, fn in (("Taitel-Dukler", lambda: taitel_dukler(t)["regime"]),
+                     ("Taitel-Barnea", lambda: taitel_barnea_vertical(t)),
+                     ("Baker", lambda: baker(t)["regime"]),
+                     ("Hewitt-Roberts", lambda: hewitt_roberts(t)["regime"]),
+                     ("Barnea", lambda: barnea_unified(t)),
+                     ("Beggs-Brill", lambda: shell_beggs_brill(t))):
+        try:
+            out[name] = fn()
+        except Exception:
+            out[name] = "n/a"
+    out["Shell DEP"] = _shell2_h_regime(params.FrG, params.FrL)
+    return out
+
+
+# which classifier names each map (primary regime written on its charts)
+_MAP_REGIME_METHOD = {
+    "H Taitel-Dukler": "Taitel-Dukler", "H Gregory-Fogarasi": "Taitel-Dukler",
+    "H Shell DEP": "Shell DEP", "H Shell DEP2": "Shell DEP", "H HTRI": "Taitel-Dukler",
+    "H Baker (HEDH)": "Baker",
+    "V Gregory-Fogarasi": "Taitel-Barnea", "V Shell DEP2": "Taitel-Barnea",
+    "V Shell DEP": "Taitel-Barnea", "V HTRI": "Taitel-Barnea",
+    "V HEDH up": "Hewitt-Roberts", "V Oshinowo up": "Taitel-Barnea",
+    "V HEDH down": "Hewitt-Roberts", "V Oshinowo down": "Taitel-Barnea",
+}
+
+
+def build_map_sheets(wb, rows, ctrl_seq, regimes=None):
+    """rows = [(station, FPParams)]; build one sheet per map-group with charts.
+    ``regimes`` = {method: regime} at the controlling station — written on every
+    chart title and in a banner above the charts."""
+    regimes = regimes or {}
     # group maps by output sheet (T&D has three charts on one sheet)
     by_sheet: dict[str, list[MapDef]] = {}
     for mp in MAPS:
@@ -8182,12 +8367,24 @@ def build_map_sheets(wb, rows, ctrl_seq):
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = GRNHDR
         data_col = 30                       # data lives far to the right
+        ctrl_pr0 = next((pr for st, pr in rows if st.seq == ctrl_seq), None)
+        primary = regimes.get(_MAP_REGIME_METHOD.get(sheet, "Taitel-Dukler"), "n/a")
+        others = "   |   ".join(f"{k}: {v}" for k, v in regimes.items())
+        ws.merge_cells("A1:R1")
+        _cell(ws, 1, 1,
+              f"OPERATING REGIME at controlling station Seq {ctrl_seq}:  {primary}   "
+              f"({_MAP_REGIME_METHOD.get(sheet, 'Taitel-Dukler')})"
+              + (f"   |   FrG = {ctrl_pr0.FrG:.4g}, FrL = {ctrl_pr0.FrL:.4g}"
+                 if (ctrl_pr0 and ctrl_pr0.FrG and ctrl_pr0.FrL) else ""),
+              bg=NAVY, fg=WHITE, sz=11, bold=True)
+        _cell(ws, 2, 1, f"All methods:  {others}" if others else "", sz=9, bold=False)
         for j, mp in enumerate(maps):
             op_points = [(pr.get(mp.xkey), pr.get(mp.ykey)) for _, pr in rows]
             ctrl_pr = next((pr for st, pr in rows if st.seq == ctrl_seq), None)
             ctrl_point = (ctrl_pr.get(mp.xkey), ctrl_pr.get(mp.ykey)) if ctrl_pr else None
-            chart, data_col = _add_scatter(ws, mp, data_col, op_points, ctrl_point)
-            anchor = f"A{2 + j * 23}"
+            chart, data_col = _add_scatter(ws, mp, data_col, op_points, ctrl_point,
+                                           primary)
+            anchor = f"A{4 + j * 23}"
             ws.add_chart(chart, anchor)
     return list(by_sheet)
 
@@ -8204,7 +8401,26 @@ def build_flow_pattern_maps(wb, stations, sp, line_no, stream_name, gas_density_
     ctrl_seq = max(
         rows, key=lambda rp: (rp[1].rgvg2 or 0.0))[0].seq
     build_param_table(wb, rows, line_no, stream_name, ctrl_seq)
-    sheets = build_map_sheets(wb, rows, ctrl_seq)
+    # per-station regimes next to the parameter table
+    try:
+        wsd = wb["Flow_Pattern_Data"]
+        c0 = len(_TABLE_COLS) + 1
+        names_ = ("Regime (Taitel-Dukler)", "Regime (Shell DEP)", "Regime (Baker)",
+                  "Regime (Hewitt-Roberts)")
+        keys_ = ("Taitel-Dukler", "Shell DEP", "Baker", "Hewitt-Roberts")
+        for j, nm_ in enumerate(names_):
+            _cell(wsd, 2, c0 + j, nm_, bg=NAVY, fg=WHITE, sz=9, bold=True,
+                  ha="center", wrap=True)
+            wsd.column_dimensions[get_column_letter(c0 + j)].width = 26
+        for i_, (st_, pr_) in enumerate(rows):
+            rg_ = _station_regimes(st_, sp, gas_density_fn, pr_)
+            for j, k_ in enumerate(keys_):
+                _cell(wsd, 3 + i_, c0 + j, rg_.get(k_, ""), sz=9, ha="left")
+    except Exception:
+        pass
+    ctrl_row = next((rp for rp in rows if rp[0].seq == ctrl_seq), rows[0])
+    regimes = _station_regimes(ctrl_row[0], sp, gas_density_fn, ctrl_row[1])
+    sheets = build_map_sheets(wb, rows, ctrl_seq, regimes)
     return ["Flow_Pattern_Data"] + sheets
 
 
