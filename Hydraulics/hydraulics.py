@@ -3054,7 +3054,8 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("  ENTHALPY BALANCE (PR enthalpy) — not a mass-weighted average.", False),
         ("", False),
         ("AUTO-LINKED SPLITS & JOINS (Main ↔ Branch)", True),
-        ("  JOIN (Branch → Main): on a Main row, set Fitting = 'Tee Join Branch Flow N'.", False),
+        ("  JOIN (Branch → Main): on a Main row, set Fitting = 'Tee Join Branch Flow N' and (optional)", False),
+        ("  type the joining Branch's Line No in 'Upstream Line No' of that row to name it explicitly.", False),
         ("  The Nth Branch block sharing that row's Line No is auto-matched by ordinal count;", False),
         ("  its real flashed outlet (flow + composition) is blended into Main at that row — no", False),
         ("  manual entry needed on the Branch side.", False),
@@ -3206,6 +3207,7 @@ def read_pipeline_input(xlsx_path: str) -> list[dict]:
             "Stream Lookup":    current_stream,
             "Start P (psia)":   sp_val,          # raw (only non-None on explicit rows)
             "Upstream Line No": upstream_line,
+            "_Up_defaulted":    bool(not ul_raw and upstream_line is not None),
             "Upstream Seq":     int(upstream_seq) if upstream_seq is not None else None,
             "Run Type":         run_type,
             "Seq":              seq,
@@ -5041,6 +5043,9 @@ def build_profile_flash_noiso(
     def _flash(fd, pp):
         if iso_T and T_run is not None:
             return FV.flash(fd, pp, temp_f=T_run)
+        t_ov = override_state.get("temp_f")      # typed Temp: flash at that temperature
+        if t_ov is not None and not use_isoH:
+            return FV.flash(fd, pp, temp_f=t_ov)
         return (FV.flash_isenthalpic(fd, pp) if use_isoH else FV.flash(fd, pp))
 
     for ridx, row in enumerate(block_rows):
@@ -5220,7 +5225,8 @@ def build_profile_flash_noiso(
             if a_feed is not None and b_feed is not None and b_comp:
                 fr0 = _flash(a_feed, p_eval)
                 main_moles = _feed_comp_flows(a_feed, fr0,
-                                              flow_scale * vap_cf, flow_scale * liq_cf)
+                                              flow_scale * vap_cf * mass_scale,
+                                              flow_scale * liq_cf * mass_scale)
                 blended = _blend_feeds(a_feed, main_moles, b_feed, b_comp)
                 if blended is not None:
                     mwmap = {n: a_feed.mw[i] for i, n in enumerate(a_feed.names)}
@@ -5244,6 +5250,9 @@ def build_profile_flash_noiso(
                     cur_sp   = new_sp_j
                     a_feed, a_sp = cur_feed, cur_sp
                     flow_scale = vap_cf = liq_cf = 1.0   # blend = new full flow
+                    mass_scale = 1.0                     # main's flow override is now in the blend
+                    override_state.pop("vap_mass", None)
+                    override_state.pop("liq_mass", None)
                     scale_tag += (f" | Tee join {inj.get('label','Branch')} "
                                   f"→ re-flash blended feed (+{b_mass:.1f} lb/hr)" + t_note)
             else:
@@ -6566,7 +6575,7 @@ def run_noiso(
                         None)
                     if split_row is not None:
                         split_cap = splits_out.get((up_line, split_row.get("Seq")))
-                if split_cap is None:
+                if split_cap is None and not b0.get("_Up_defaulted"):
                     print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
                           f"Upstream Line No '{up_line}' but no matching "
                           f"'Tee Split Branch Flow N' output was found on Main.")
@@ -6590,11 +6599,21 @@ def run_noiso(
             bline  = block[0].get("Line No") if block else None
             line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
             join_n = line_branch_count[bline]
+            # A Main 'Tee Join Branch Flow N' row may name the joining Branch
+            # explicitly through its "Upstream Line No" cell; otherwise the Nth
+            # join row sharing the Branch's Line No is used.
             join_idx = next(
                 (mi for mi, mr in enumerate(main_rows)
-                 if mr.get("Line No") == bline
-                 and _is_tee_join(mr.get("Fitting Name")) == join_n),
+                 if _is_tee_join(mr.get("Fitting Name")) is not None
+                 and mr.get("Upstream Line No") == bline
+                 and mr.get("Run Type") == "Main"),
                 None)
+            if join_idx is None:
+                join_idx = next(
+                    (mi for mi, mr in enumerate(main_rows)
+                     if mr.get("Line No") == bline
+                     and _is_tee_join(mr.get("Fitting Name")) == join_n),
+                    None)
             if join_idx is not None and fls and fls[-1] is not None:
                 out_fr = fls[-1]
                 b_sp, b_feed = resolver(block[0]) if block else (None, None)
@@ -7489,7 +7508,10 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         else:
             tc_r.append(None); omega.append(None); pc_l.append(None)
 
-    if len(z) < 2:
+    # A single-component stream only gets a feed when it is pure VAPOUR (so it
+    # can join/mix); a pure liquid would flash unphysically from the proxy K.
+    if len(z) < 1 or (len(z) == 1 and ((sp.liq_mass or 0.0) > 1e-9
+                                       or not (sp.vap_mass or 0.0) > 0)):
         return None
     known = [m for m in mw if m]
     avg = (sum(known) / len(known)) if known else (sp.mol_weight or 50.0)
@@ -7505,6 +7527,8 @@ def _build_feed(z_d, x_d, mass_d, mole_d, sp,
         lam = _solve_lambda(z, k_raw, beta0)
         basis = "zx-lambda"
     k_ref = [min(1e10, max(1e-10, lam * kr)) for kr in k_raw]
+    if len(z) == 1:       # pure vapour: Rachford-Rice is a step; keep K >> 1 at any P
+        k_ref = [1e10]
 
     total_mw = sum(zi * mi for zi, mi in zip(z, mw))
     total_mass = (sp.vap_mass or 0.0) + (sp.liq_mass or 0.0)
