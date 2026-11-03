@@ -4823,6 +4823,11 @@ def _station_props(fr, sp, feed, cmap, p_psia, est_inputs=None) -> dict | None:
             "liq_density": "liq ρ", "liq_visc": "liq μ"}
     est_keys += [_lab[k] for k in (est_inputs or []) if k in _lab]
     d["est_keys"] = est_keys
+    # Manual stream with a liquid but no liquid MW: molar quantities would rest on a
+    # fictitious MW, so leave them blank instead of showing misleading numbers.
+    if feed is None and lm > 0 and not (getattr(sp, "liq_mw", None) if sp else None):
+        for k_ in ("n_tot", "n_liq", "mw", "beta", "x_liq", "z_tot", "q_std_vap"):
+            d[k_] = None
     if d["h_vap"] is not None or d["h_liq"] is not None:
         hv, hl = (d["h_vap"] or 0.0), (d["h_liq"] or 0.0)
         wv = (vm / M) if M > 0 else 0.0
@@ -5255,6 +5260,36 @@ def build_profile_flash_noiso(
                     override_state.pop("liq_mass", None)
                     scale_tag += (f" | Tee join {inj.get('label','Branch')} "
                                   f"→ re-flash blended feed (+{b_mass:.1f} lb/hr)" + t_note)
+            elif (a_feed is None and b_feed is None and a_sp is not None
+                  and inj.get("sp") is not None and b_mass > 0):
+                # ── Manual (frozen-split) streams: add the flows, merge the phase
+                # properties (vapour props from whichever run carries vapour, etc.)
+                bsp = inj["sp"]
+                mv = ((override_state.get("vap_mass", a_sp.vap_mass) or 0.0)
+                      * flow_scale * vap_cf)
+                ml = ((override_state.get("liq_mass", a_sp.liq_mass) or 0.0)
+                      * flow_scale * liq_cf)
+                bv, bl = inj.get("vap_mass", 0.0), inj.get("liq_mass", 0.0)
+                mwa = a_sp.vap_mw or a_sp.mol_weight
+                mwb = bsp.vap_mw or bsp.mol_weight
+                mol_v = ((mv / mwa) if (mv > 0 and mwa) else 0.0) + \
+                        ((bv / mwb) if (bv > 0 and mwb) else 0.0)
+                vmw = ((mv + bv) / mol_v) if mol_v > 0 else (mwa or mwb)
+                nsp = _blend_sp(a_sp, bsp, mv + ml, bv + bl)
+                if nsp is not None:
+                    nsp = replace(
+                        nsp, vap_mass=mv + bv, liq_mass=ml + bl,
+                        total_mass=mv + bv + ml + bl, vap_mw=vmw, mol_weight=vmw,
+                        vap_cp_cv=(a_sp.vap_cp_cv if (mv > 0 and a_sp.vap_cp_cv)
+                                   else bsp.vap_cp_cv),
+                        phase=("TWO-PHASE" if (mv + bv) > 0 and (ml + bl) > 0
+                               else "VAPOR" if (mv + bv) > 0 else "LIQUID"))
+                    cur_sp, a_sp = nsp, nsp
+                    flow_scale = vap_cf = liq_cf = 1.0
+                    override_state.pop("vap_mass", None)
+                    override_state.pop("liq_mass", None)
+                    scale_tag += (f" | Tee join {inj.get('label','Branch')} (manual streams): "
+                                  f"+{bv:.1f} vapour, +{bl:.1f} liquid lb/hr")
             else:
                 scale_tag += (f" | Tee join {inj.get('label','Branch')} "
                               f"(skipped — needs HMB streams on both runs)")
@@ -6639,6 +6674,30 @@ def run_noiso(
             main_rows, resolver, p_start, flash_mode=flash_mode,
             default_sp=sp, injections=injections, const_map=cmap)
 
+        # Manual circuit with joins: the screening sheets (FIV / AIV / regime / maps)
+        # should describe the MIXED stream at the end of the line, not the first inlet.
+        if (injections and main_stations and feed is None
+                and (main_stations[-1].props or None)):
+            pe = main_stations[-1].props
+            try:
+                sp = replace(
+                    sp, vap_mass=pe["m_vap"], liq_mass=pe["m_liq"],
+                    total_mass=pe["m_vap"] + pe["m_liq"],
+                    vap_mw=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.vap_mw),
+                    mol_weight=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.mol_weight),
+                    vap_visc=pe.get("visc_vap") or sp.vap_visc,
+                    liq_density=pe.get("rho_liq") or sp.liq_density,
+                    liq_visc=pe.get("visc_liq") or sp.liq_visc,
+                    vap_z=pe.get("z_vap") or sp.vap_z,
+                    vap_cp_cv=pe.get("cpcv_vap") or sp.vap_cp_cv)
+                phase = HE.classify_phase(sp)
+
+                def gdf(p_, _sp=sp):
+                    return (HE.vapor_density_kgm3(_sp, p_) / LBFT3_TO_KGM3
+                            if _sp.mol_weight else (_sp.vap_density or 0.0))
+            except Exception:
+                pass
+
         # station_lines: map each station back to its source Line No
         station_lines = [r["Line No"] for r in main_rows
                          if r["Run Type"] == "Main"]
@@ -6868,7 +6927,13 @@ def main():
                 hmb_path = cand
                 break
     if not hmb_path or not os.path.exists(hmb_path):
-        raise SystemExit(f"HMB not found: {hmb_path}")
+        # An HMB is only needed for Stream Lookup rows / composition constants.
+        needs_hmb = any(r.get("Stream Lookup") or r.get("_comp")
+                        for r in read_pipeline_input(input_path))
+        if needs_hmb:
+            raise SystemExit(f"HMB not found: {hmb_path}")
+        print("  (no HMB file — manual-property input, HMB not needed)")
+        hmb_path = hmb_path or ""
 
     print(f"\n  No-ISO Flash Hydraulics  |  input: {os.path.basename(input_path)}"
           f"  |  HMB: {os.path.basename(hmb_path)}  |  case: {case}"
