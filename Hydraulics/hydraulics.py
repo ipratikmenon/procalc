@@ -8239,8 +8239,9 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point, regime_text=None):
     """Build one ScatterChart for map mp; data laid out from column data_col."""
     chart = ScatterChart()
     chart.title = mp.title + (f"   —   REGIME: {regime_text}" if regime_text else "")
-    chart.height = 11
-    chart.width = 18
+    chart.height = 13
+    chart.width = 22
+    chart.legend = None          # regime is in the title/banner; a legend only squeezes the plot
     chart.x_axis.title = mp.xlabel
     chart.y_axis.title = mp.ylabel
     chart.x_axis.delete = False
@@ -8268,8 +8269,12 @@ def _add_scatter(ws, mp, data_col, op_points, ctrl_point, regime_text=None):
         col += 3
 
     # operating path (blue line + small markers)
-    xc, yc, r0, r1 = _write_series_cols(
-        ws, col, [_logsafe(mp, q) for q in op_points], "path")
+    # operating path: a point that cannot be plotted on a log axis (e.g. gas Froude = 0
+    # at a liquid-only station) is DROPPED, not floored, so it cannot draw a false line
+    op_ok = [q for q in op_points
+             if q[0] is not None and q[1] is not None
+             and (q[0] > 0 or not mp.logx) and (q[1] > 0 or not mp.logy)]
+    xc, yc, r0, r1 = _write_series_cols(ws, col, op_ok, "path")
     if r1 >= r0:
         xref = Reference(ws, min_col=xc, min_row=r0, max_row=r1)
         yref = Reference(ws, min_col=yc, min_row=r0, max_row=r1)
