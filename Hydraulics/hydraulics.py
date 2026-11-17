@@ -9916,7 +9916,8 @@ _INSTR_DATA_SHEET = "Instrument_Data"
 _INSTR_DATA_HEADERS = [
     "Tag", "Description", "Orifice / throat d (in)", "TW insertion U (in)",
     "TW root OD (in)", "TW tip OD (in)", "TW bore (in)", "TW material",
-    "CV rated Cv", "CV FL", "CV xT", "Notes"]
+    "CV rated Cv", "CV FL", "CV xT", "CV characteristic", "CV rangeability",
+    "CV curve points", "Notes"]
 
 # thermowell materials: E at 70 °F (psi), dE/dT (psi/°F), density (lb/in³)
 _TW_MATERIALS = {
@@ -9982,7 +9983,8 @@ def _read_instrument_data(path) -> dict:
     key = {"tag": "tag", "description": "desc", "orifice / throat d": "d_or",
            "tw insertion u": "tw_u", "tw root od": "tw_root", "tw tip od": "tw_tip",
            "tw bore": "tw_bore", "tw material": "tw_mat", "cv rated cv": "cv_rated",
-           "cv fl": "fl", "cv xt": "xt", "notes": "notes"}
+           "cv fl": "fl", "cv xt": "xt", "cv characteristic": "cv_char",
+           "cv rangeability": "cv_range", "cv curve points": "cv_curve", "notes": "notes"}
     hdr = {}
     for i, h in enumerate(rows[1]):
         if h:
@@ -9999,7 +10001,7 @@ def _read_instrument_data(path) -> dict:
         for f, i in hdr.items():
             if f == "tag" or i >= len(r):
                 continue
-            d[f] = txt(r[i]) if f in ("desc", "tw_mat", "notes") else num(r[i])
+            d[f] = (txt(r[i]) if f in ("desc", "tw_mat", "notes", "cv_char", "cv_curve") else num(r[i]))
         out[tg.upper()] = d
     return out
 
@@ -10007,25 +10009,32 @@ def _read_instrument_data(path) -> dict:
 def _build_instrument_data_sheet(wb) -> None:
     ws = wb.create_sheet(_INSTR_DATA_SHEET)
     ws.sheet_view.showGridLines = False
-    ws.merge_cells("A1:L1")
+    ws.merge_cells("A1:O1")
     _c(ws, 1, 1,
        "INSTRUMENT DATA (optional) — one row per Instr Tag (or Comp ID) used on Pipeline_Input.  "
        "TT: thermowell geometry for the wake-frequency check.  FO / RO: orifice bore d.  "
-       "Control Valve: rated Cv, FL, xT.  Blank cells use a flagged default.",
+       "Control Valve: rated Cv (100 % travel), FL, xT and the Cv CURVE — either a characteristic "
+       "(Equal %, Linear, Quick opening + rangeability) or measured points 'travel %:Cv' separated by ; "
+       "e.g.  10:4.2; 25:11; 50:30; 75:58; 100:85.  Points win over the characteristic.  Blank cells use a flagged default.",
        bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
     ws.row_dimensions[1].height = 40
     _hdr(ws, _INSTR_DATA_HEADERS, row=2)
-    ex = [("TT-101", "Reactor effluent TT", None, 6.0, 1.0, 0.75, 0.26, "SS316", None, None, None, "example"),
-          ("RO-201", "Restriction orifice", 1.25, None, None, None, None, None, None, None, None, "example"),
-          ("FV-301", "Feed control valve", None, None, None, None, None, None, 85, 0.9, 0.7, "example")]
+    ex = [("TT-101", "Reactor effluent TT", None, 6.0, 1.0, 0.75, 0.26, "SS316", None, None, None, None, None, None, "example"),
+          ("RO-201", "Restriction orifice", 1.25, None, None, None, None, None, None, None, None, None, None, None, "example"),
+          ("FV-301", "Feed control valve", None, None, None, None, None, None, 85, 0.9, 0.7, "Equal %", 50, None, "example"),
+          ("FV-302", "Reflux control valve", None, None, None, None, None, None, 120, 0.85, 0.72, None, None,
+           "10:6; 20:11; 30:17; 40:25; 50:35; 60:50; 70:68; 80:90; 90:112; 100:120", "example — measured curve")]
     for i, rowv in enumerate(ex):
         for c, v in enumerate(rowv, 1):
             _c(ws, 3 + i, c, v, bg=AMBER, sz=9, italic=True, fg="808080")
     for r in range(6, 40):
-        for c in range(1, 13):
+        for c in range(1, 16):
             _c(ws, r, c, None, bg=AMBER, sz=9)
-    for c, w in enumerate([14, 24, 16, 14, 12, 12, 11, 12, 11, 8, 8, 24], 1):
+    for c, w in enumerate([14, 24, 16, 14, 12, 12, 11, 12, 11, 8, 8, 16, 12, 46, 24], 1):
         cw(ws, c, w)
+    dvc = DataValidation(type="list", formula1='"Equal %,Linear,Quick opening"', allow_blank=True)
+    ws.add_data_validation(dvc)
+    dvc.add("L3:L39")
     dv = DataValidation(type="list", formula1='"' + ",".join(_TW_MATERIALS) + '"',
                         allow_blank=True)
     ws.add_data_validation(dv)
@@ -10176,7 +10185,69 @@ def _cv_size(st, info: dict, data: dict) -> dict:
         out["flags"].append("two-phase inlet: Cv = vapour part + liquid part (additive screening) — vendor to confirm")
     rated = data.get("cv_rated")
     out["rated"] = rated
-    out["pct_open"] = (out["cv"] / rated * 100.0) if rated else None
+    out.update(_cv_travel(out["cv"], data))
+    out["pct_open"] = out.get("travel")
+    return out
+
+
+def _parse_cv_curve(txt_):
+    """'10:4.2; 25:11; 100:85' → sorted [(travel %, Cv)] (needs ≥ 2 numeric points)."""
+    pts = []
+    for tok in re.split(r"[;\n]+|,(?=\s*\d+\s*[:=])", str(txt_ or "")):
+        m = re.match(r"\s*([-+]?\d+(?:\.\d+)?)\s*[:=]\s*([-+]?\d+(?:\.\d+)?)\s*$", tok)
+        if m:
+            pts.append((float(m.group(1)), float(m.group(2))))
+    pts = sorted(set(pts))
+    return pts if len(pts) >= 2 else []
+
+
+def _cv_travel(cv_req: float, data: dict) -> dict:
+    """Valve travel (% open) that passes the required Cv.
+
+    Measured points (``CV curve points``) win; otherwise the inherent characteristic scaled to the
+    rated Cv at 100 % travel — Equal % (Cv = Cvr·R^(x−1)), Linear (Cv = Cvr·x), Quick opening
+    (Cv = Cvr·√x).  Travel > 100 % means the valve is undersized."""
+    rated = data.get("cv_rated")
+    out = dict(travel=None, travel_basis=None, travel_status=None)
+    pts = _parse_cv_curve(data.get("cv_curve"))
+    if pts:
+        if rated is None:
+            rated = max(c for _, c in pts)
+            out["rated"] = rated
+        xs, cs = [p[0] for p in pts], [p[1] for p in pts]
+        if cv_req <= cs[0]:
+            x = xs[0] * cv_req / cs[0] if cs[0] > 0 else xs[0]
+        elif cv_req >= cs[-1]:
+            x = xs[-1] + (cv_req - cs[-1]) / max(cs[-1] - cs[-2], 1e-9) * (xs[-1] - xs[-2])
+        else:
+            x = xs[-1]
+            for (x0, c0), (x1, c1) in zip(pts, pts[1:]):
+                if c0 <= cv_req <= c1:
+                    x = x0 + (cv_req - c0) / (c1 - c0) * (x1 - x0) if c1 > c0 else x0
+                    break
+        out["travel_basis"] = f"measured curve ({len(pts)} points)"
+    elif rated:
+        char = (data.get("cv_char") or "Equal %").strip().lower()
+        r_ = data.get("cv_range") or 50.0
+        ratio = cv_req / rated
+        if ratio <= 0:
+            x = 0.0
+        elif char.startswith("lin"):
+            x = ratio * 100.0
+        elif char.startswith("quick"):
+            x = ratio * ratio * 100.0
+        else:
+            char = "equal %"
+            x = (1.0 + math.log(ratio) / math.log(r_)) * 100.0 if r_ > 1 else ratio * 100.0
+        out["travel_basis"] = (f"{char.title()}" + (f", R = {r_:g}" if char == "equal %" else "")
+                               + ("" if data.get("cv_char") else " (default characteristic)"))
+    else:
+        return out
+    out["travel"] = x
+    out["travel_status"] = ("UNDERSIZED — needs > 100 % travel" if x > 100.0 else
+                            "Too open (> 90 %)" if x > 90.0 else
+                            "Too closed (< 10 %)" if x < 10.0 else
+                            "OK (10–90 %)")
     return out
 
 
@@ -10295,7 +10366,7 @@ def _datasheet(ws, title, cols, sections, label_w=34, col_w=17):
             _c(ws, r, 2, unit, bg=LGRAY, ha="center", fg="7F7F7F")
             for j, v in enumerate(vals):
                 bg = None
-                if isinstance(v, str) and (v.startswith("YES") or v.startswith("FAIL")
+                if isinstance(v, str) and (v.startswith("YES") or v.startswith("FAIL") or v.startswith("UNDERSIZED") or v.startswith("Too")
                                            or v.startswith("CHOKED")):
                     bg = RED
                 _c(ws, r, 3 + j, _fmt_or_dash(v), ha="center", bg=bg,
@@ -10393,6 +10464,7 @@ def _build_cv_datasheet(wb, items, idata, circuit_id, stream_name) -> None:
                    ("CHOKED / flashing-cavitating (liquid ΔP > ΔPmax)" if sz["choked_l"] else "") or "No")
         add("dpmax", u.disp("dP", sz.get("dP_max_liq"), 3) if sz.get("dP_max_liq") is not None else None)
         add("rated", sz.get("rated")); add("open", sz.get("pct_open"))
+        add("tbasis", sz.get("travel_basis")); add("tstat", sz.get("travel_status"))
         add("rec", sz["cv"] / 0.7 if sz["cv"] else None)
         # velocities / momentum
         vin = fs["vm"]
@@ -10462,7 +10534,10 @@ def _build_cv_datasheet(wb, items, idata, circuit_id, stream_name) -> None:
             ("  Cv — vapour portion", "-", L("cvg")), ("  Cv — liquid portion", "-", L("cvl")),
             ("Choked flow?", "", L("chk")), ("ΔP max (liquid choked limit)", dpu, L("dpmax")),
             ("Suggested rated Cv (required ÷ 0.7)", "-", L("rec")),
-            ("Rated Cv (Instrument_Data)", "-", L("rated")), ("% open at this flow", "%", L("open"))]),
+            ("Rated Cv at 100 % travel (Instrument_Data)", "-", L("rated")),
+            ("Cv curve basis", "", L("tbasis")),
+            ("Valve travel at this flow", "% open", L("open")),
+            ("Travel check", "", L("tstat"))]),
         ("7  VELOCITY / MOMENTUM (at valve port bore)", [
             ("Inlet mixture velocity", vu, L("vin")), ("Outlet mixture velocity", vu, L("vout")),
             ("Inlet vapour Mach", "-", L("mach1")), ("Outlet vapour Mach", "-", L("mach2")),
