@@ -3783,6 +3783,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     _build_composition_input_sheet(wb, usys)
     _build_pseudo_input_sheet(wb, usys)
     _build_stream_map_sheet(wb)
+    _build_flow_cases_sheet(wb)
     _build_instrument_data_sheet(wb)
 
     # ── Notes sheet ──────────────────────────────────────────────────
@@ -3854,6 +3855,10 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("", False),
         ("FIX PRESSURE  (Fitting = 'Fix Pressure')", True),
         ("  Enter dP (psi) in Fixed dP.  All hydraulics skipped; dP subtracted directly.", False),
+        ("", False),
+        ("FLOW CASES  (Flow_Cases sheet)", True),
+        ("  Normal 100 %, Maximum 110 %, Minimum 60 % by default — edit or add cases.  Every inlet flow is scaled and the whole", False),
+        ("  hydraulics is repeated per case: one output workbook per case; 'CV Datasheet' shows all cases side by side.", False),
         ("", False),
         ("STREAM MAP  (Stream Lookup)", True),
         ("  Type the ACTUAL stream number in Stream Lookup; the 'Stream_Map' sheet translates it to the", False),
@@ -8601,7 +8606,7 @@ def _build_pressure_profile_sheet(
        f"FLASH-COUPLED PRESSURE PROFILE  [{run_label}]   |   "
        f"Circuit {circuit_id}  ·  Lines: {line_nos_str}   |   "
        f"Stream: {stream_name}   |   {flash_mode}   |   units: {u.system}   |   "
-       f"{datetime.now():%d-%b-%Y %H:%M}",
+       f"{datetime.now():%d-%b-%Y %H:%M}" + _case_tag(),
        bg=NAVY, fg=WHITE, sz=10, bold=True)
     ws.row_dimensions[1].height = 22
 
@@ -9322,7 +9327,110 @@ def _build_input_sheet(
 # ════════════════════════════════════════════════════════════════════════
 #  Orchestration — one workbook per CIRCUIT
 # ════════════════════════════════════════════════════════════════════════
-def _make_stream_resolver(default_hmb: str, default_case: str, map_path, alias: dict | None = None):
+# ════════════════════════════════════════════════════════════════════════
+#  FLOW CASES  (Normal / Max / Min …) — every inlet flow × a multiplier, whole run repeated
+# ════════════════════════════════════════════════════════════════════════
+FLOW_CASES_SHEET = "Flow_Cases"
+_RUN_CTX: dict = {"name": "Normal", "mult": 1.0, "n": 1}     # flow case being written (for titles)
+
+
+def _case_tag() -> str:
+    """' | Flow case: Max (110 %)' for multi-case runs, '' for a single normal case."""
+    if _RUN_CTX.get("n", 1) <= 1:
+        return ""
+    return f"   |   Flow case: {_RUN_CTX['name']} ({_RUN_CTX['mult'] * 100:g} % of normal)"
+
+
+def _read_flow_cases(input_path) -> list:
+    """Flow_Cases sheet → [(name, factor)] with Normal (100 %) always first.  Blank rows are
+    skipped; a missing sheet gives the single Normal case."""
+    cases = []
+    try:
+        wb = load_workbook(input_path, read_only=True, data_only=True)
+    except Exception:
+        return [("Normal", 1.0)]
+    try:
+        if FLOW_CASES_SHEET in wb.sheetnames:
+            for r in wb[FLOW_CASES_SHEET].iter_rows(min_row=3, values_only=True):
+                if not r or r[0] is None or not str(r[0]).strip():
+                    continue
+                pct = num(r[1]) if len(r) > 1 else None
+                if pct is None or pct <= 0:
+                    continue
+                cases.append((str(r[0]).strip(), pct / 100.0))
+    finally:
+        wb.close()
+    if not cases:
+        return [("Normal", 1.0)]
+    if not any(abs(m_ - 1.0) < 1e-9 for _, m_ in cases):
+        cases.insert(0, ("Normal", 1.0))
+    seen, out = set(), []
+    for n_, m_ in cases:
+        if n_.upper() in seen:
+            continue
+        seen.add(n_.upper())
+        out.append((n_, m_))
+    out.sort(key=lambda t: 0 if abs(t[1] - 1.0) < 1e-9 else 1)      # Normal first, then as listed
+    return out
+
+
+def _scale_rows(rows: list, m: float) -> list:
+    """Copy of the input rows with every typed / composition flow × m."""
+    out = []
+    for r in rows:
+        r2 = dict(r)
+        for k in ("Vapor Mass Flow", "Liq Mass Flow (lb/h)"):
+            if r2.get(k) is not None:
+                r2[k] = r2[k] * m
+        if r2.get("_comp"):
+            r2["_comp"] = [dict(c, flow=(c["flow"] * m if c.get("flow") is not None else None))
+                           for c in r2["_comp"]]
+        out.append(r2)
+    return out
+
+
+def _scale_sp(sp, m: float):
+    if sp is None or m == 1.0:
+        return sp
+    f = {a: getattr(sp, a) * m
+         for a in ("total_mass", "vap_mass", "liq_mass", "total_std_liq", "total_std_vap",
+                   "vap_act_vol", "liq_act_rate") if getattr(sp, a, None) is not None}
+    return replace(sp, **f)
+
+
+def _scale_feed(feed, m: float):
+    if feed is None or m == 1.0:
+        return feed
+    return replace(feed, total_mass_lbhr=feed.total_mass_lbhr * m,
+                   total_moles_lbmolhr=feed.total_moles_lbmolhr * m)
+
+
+def _build_flow_cases_sheet(wb) -> None:
+    ws = wb.create_sheet(FLOW_CASES_SHEET)
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells("A1:C1")
+    _c(ws, 1, 1,
+       "FLOW CASES — every inlet flow (HMB stream, manual, Stream_Composition) is multiplied by the case "
+       "percentage and the WHOLE hydraulics is repeated: one workbook per circuit per case.  The CV Datasheet "
+       "lists Normal / Max / Min side by side.  Normal (100 %) is always run.  Blank rows are skipped.",
+       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
+    ws.row_dimensions[1].height = 54
+    _hdr(ws, ["Flow case", "Flow multiplier (% of normal)", "Note"], row=2)
+    rows = [("Normal", 100, "design / normal flow"), ("Maximum", 110, "e.g. 1.1 × normal"),
+            ("Minimum", 60, "turndown, e.g. 0.6 × normal")]
+    for i, rowv in enumerate(rows):
+        for c, v in enumerate(rowv, 1):
+            _c(ws, 3 + i, c, v, bg=AMBER, sz=10, bold=(c == 1))
+    for r in range(6, 14):
+        for c in range(1, 4):
+            _c(ws, r, c, None, bg=AMBER, sz=10)
+    for c, w in enumerate([22, 30, 44], 1):
+        cw(ws, c, w)
+    ws.freeze_panes = "A3"
+
+
+def _make_stream_resolver(default_hmb: str, default_case: str, map_path, alias: dict | None = None,
+                          mult: float = 1.0):
     """Return a memoised ``resolver(row) -> (StreamProps|None, feed|None)``.
 
     Resolution order per row:
@@ -9356,268 +9464,239 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path, alias: 
                 feed = FV.read_feed(hmb, sim, case, sp, is_casesheet=is_case)
             except Exception as exc:
                 print(f"  (feed load failed for {stream}@{case}: {exc})")
-        cache[key] = (sp, feed)
+        cache[key] = (_scale_sp(sp, mult), _scale_feed(feed, mult))
         return cache[key]
 
     return resolver
 
 
-def run_noiso(
-        input_path: str,
-        hmb_path: str,
-        circuit_id: str | None = None,   # process one circuit; None = all
-        stream_name: str | None = None,
-        out_path: str | None = None,
-        case: str = "Case 1",
-        map_path: str | None = None,
-        flash_mode: str = "isothermal",
-) -> list[tuple[str, list[HE.Station], list, HE.StreamProps]]:
-    """
-    Process hydraulic circuits from ``input_path``.
+def _circuit_case(cid, c, all_rows, input_path, hmb_path, case, map_path, flash_mode,
+                  stream_name, out_path, alias, mult, fcase, n_cases):
+    """March ONE circuit at ONE flow case (all inlet flows × ``mult``).
 
-    Each circuit (col A) is a series chain of lines.  All Main-run rows across
-    all lines are marched sequentially as ONE continuous pressure profile.
-    Branch rows per line are marched independently, each from its own Start P.
+    Returns ``(items, write)`` — the control-valve / instrument capture and a writer that builds
+    the workbook once every flow case of the circuit has been computed — or None to skip."""
+    sk  = _alias_stream(stream_name or c["stream_lookup"], alias)
+    p0  = c["start_p"]
+    lns = c["line_order"]
 
-    Returns list of (out_xlsx, main_stations, main_flashes, sp) — one per circuit.
-    """
-    # ── Display-units context: read the UNITS sheet of the input workbook ──
+    # ── Per-row stream resolver (HMB File / Case / manual) ────────────
+    def_hmb  = c["hmb_file"] or hmb_path
+    def_case = c["case"] or case
+    resolver = _make_stream_resolver(def_hmb, def_case, map_path, alias, mult)
+    # HMB COMP_CONSTANTS (MW/Tc/Pc/ω) — only needed for Stream_Composition
     try:
-        _uwb = load_workbook(input_path, read_only=True, data_only=True)
-        set_units(UN.UnitSystem.from_workbook(_uwb))
-        _uwb.close()
+        cmap = FV._read_comp_constants(def_hmb)
     except Exception:
-        set_units(UN.UnitSystem("FPS"))
-    print(f"  Units: {_u().system}"
-          + ("" if _u().is_fps else "  (engine internals FPS; I/O converted)"))
+        cmap = None
 
-    all_rows = read_pipeline_input(input_path)
-    if not all_rows:
-        raise SystemExit(f"No data rows found in {input_path}. "
-                         "Run with --template to create the blank workbook.")
-
-    circuits = _group_circuits(all_rows)
-    alias = _stream_alias(input_path, map_path)
-    target_ids = [circuit_id] if circuit_id else list(circuits.keys())
-    results = []
-
-    for cid in target_ids:
-        if cid not in circuits:
-            print(f"  WARNING: circuit '{cid}' not found — skipped.")
-            continue
-
-        c   = circuits[cid]
-        sk  = _alias_stream(stream_name or c["stream_lookup"], alias)
-        p0  = c["start_p"]
-        lns = c["line_order"]
-
-        # ── Per-row stream resolver (HMB File / Case / manual) ────────────
-        def_hmb  = c["hmb_file"] or hmb_path
-        def_case = c["case"] or case
-        resolver = _make_stream_resolver(def_hmb, def_case, map_path, alias)
-        # HMB COMP_CONSTANTS (MW/Tc/Pc/ω) — only needed for Stream_Composition
-        try:
-            cmap = FV._read_comp_constants(def_hmb)
-        except Exception:
-            cmap = None
-
-        # ── Circuit default StreamProps (drives the screening sheets) ─────
-        feed = None
-        if sk:
-            sp = HE.load_stream_props(def_hmb, sk, def_case)
-            if sp is None:
-                try:
-                    map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
-                    if map_row:
-                        sk = map_row.lookup_key
-                        sp = HE.load_stream_props(def_hmb, sk, def_case)
-                except Exception:
-                    pass
-            if sp is None:
-                print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
-                      f"(case '{def_case}') — circuit '{cid}' skipped.")
-                continue
-            is_case = HE.is_proii_export(def_hmb)
-            feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
-            if feed is None:
-                print("  WARNING: no composition for default stream — flash uses "
-                      "frozen split where applicable.")
-            else:
-                print(f"  Flash feed: {feed.n} components | β₀={feed.beta_ref:.4f} "
-                      f"| P_ref={feed.p_ref_psia:.2f} psia | mode: {flash_mode}")
-        else:
-            # No HMB stream at circuit level → manual mode.  Use the first main
-            # row carrying manual data as the representative StreamProps.
-            comp_row = next((r for r in c["main_rows"] if r.get("_comp")), None)
-            if comp_row is not None:
-                try:
-                    pl0 = _comp_payload(comp_row, p0 or 100.0, cmap)
-                except ValueError as exc:
-                    raise SystemExit(f"  ERROR (circuit {cid}, Line "
-                                     f"{comp_row.get('Line No')}, Seq "
-                                     f"{comp_row.get('Seq')}): {exc}")
-                sp, feed = pl0["sp"], pl0["feed"]
-                sk = "(manual composition)"
-                print(f"  Manual composition mode — {feed.n} components from "
-                      f"{_COMP_SHEET} | K basis: {feed.k_basis} | "
-                      f"β₀={feed.beta_ref:.4f}")
-            else:
-                sp = next((m for m in (_streamprops_from_manual(r)
-                                       for r in c["main_rows"]) if m), None)
-                if sp is None:
-                    print(f"  WARNING: circuit '{cid}' has no Stream Lookup and no "
-                          f"manual properties — skipped.")
-                    continue
-                sk = "(manual)"
-                print("  Manual stream mode — properties from yellow input cells.")
-
-        print(f"\n  Circuit {cid}  |  Lines: {', '.join(lns)}  |  "
-              f"Stream {sk}  |  {sp.phase}  "
-              f"T={_u().disp('T', sp.temp_f, 2)}{_u().label('T')}  "
-              f"P={_u().disp('P', sp.pres_psia)} {_u().label('P')}")
-
-        phase = HE.classify_phase(sp)
-        lc    = _line_color_map(lns)
-
-        def gdf(p, _sp=sp):
-            return (HE.vapor_density_kgm3(_sp, p) / LBFT3_TO_KGM3
-                    if _sp.mol_weight else (_sp.vap_density or 0.0))
-
-        main_rows     = c["main_rows"]
-        branch_blocks = c["branch_blocks"]
-        p_start = p0 or sp.pres_psia or 100.0
-
-        # ── Preliminary Main march (no branch injections) ────────────────
-        # Captures the flow/composition that leaves Main at every
-        # 'Tee Split Branch Flow N' row, so any Branch block that splits off
-        # of Main can be auto-seeded below (mirrors the Branch→Main join
-        # injection further down, but in the opposite direction).
-        splits_out: dict[tuple, dict] = {}
-        build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
-                              default_sp=sp, splits_out=splits_out,
-                              const_map=cmap)
-
-        # ── March branch blocks FIRST (independent sub-runs) ─────────────
-        # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
-        # the same line is INJECTED into the Main at that row (its outlet flow +
-        # composition merge in); others stay standalone Branch sheets.
-        # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
-        # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
-        # captured split-off flow/composition instead of marching standalone.
-        branch_runs: list = []            # (label, sts, fls, cmps, b_lns)
-        injections: dict[int, dict] = {}  # main_rows index → branch outlet
-        line_branch_count: dict[str, int] = {}
-        line_split_count: dict[str, int] = {}
-        for bi, block in enumerate(branch_blocks):
-            bp = _start_p_of_block(block) or p_start
-            b0 = block[0] if block else {}
-            up_line = b0.get("Upstream Line No")
-            up_seq  = b0.get("Upstream Seq")
-            split_cap = None
-            if up_line:
-                if up_seq is not None:
-                    split_cap = splits_out.get((up_line, up_seq))
-                else:
-                    line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
-                    split_n = line_split_count[up_line]
-                    split_row = next(
-                        (mr for mr in main_rows
-                         if mr.get("Line No") == up_line
-                         and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
-                        None)
-                    if split_row is not None:
-                        split_cap = splits_out.get((up_line, split_row.get("Seq")))
-                if split_cap is None and not b0.get("_Up_defaulted"):
-                    print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
-                          f"Upstream Line No '{up_line}' but no matching "
-                          f"'Tee Split Branch Flow N' output was found on Main.")
-
-            solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp,
-                                const_map=cmap)
-            if split_cap is not None:
-                solve_kwargs.update(default_feed=split_cap["feed"],
-                                     default_vap_cf=split_cap["vap_cf"],
-                                     default_liq_cf=split_cap["liq_cf"])
-                if split_cap.get("sp") is not None:
-                    solve_kwargs["default_sp"] = split_cap["sp"]
-            sts, fls, cmps, _bmw = build_profile_solved(block, resolver, bp, **solve_kwargs)
-            b_lns = [r["Line No"] for r in block]
-            label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
-            branch_runs.append((label, sts, fls, cmps, b_lns))
-            if split_cap is not None:
-                print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
-                      f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
-
-            bline  = block[0].get("Line No") if block else None
-            line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
-            join_n = line_branch_count[bline]
-            # A Main 'Tee Join Branch Flow N' row may name the joining Branch
-            # explicitly through its "Upstream Line No" cell; otherwise the Nth
-            # join row sharing the Branch's Line No is used.
-            join_idx = next(
-                (mi for mi, mr in enumerate(main_rows)
-                 if _is_tee_join(mr.get("Fitting Name")) is not None
-                 and mr.get("Upstream Line No") == bline
-                 and mr.get("Run Type") == "Main"),
-                None)
-            if join_idx is None:
-                join_idx = next(
-                    (mi for mi, mr in enumerate(main_rows)
-                     if mr.get("Line No") == bline
-                     and _is_tee_join(mr.get("Fitting Name")) == join_n),
-                    None)
-            if join_idx is not None and fls and fls[-1] is not None:
-                out_fr = fls[-1]
-                b_sp, b_feed = resolver(block[0]) if block else (None, None)
-                if b_feed is None and block and block[0].get("_comp"):
-                    _bpl = _comp_payload(block[0], bp, cmap)
-                    b_sp, b_feed = _bpl["sp"], _bpl["feed"]
-                injections[join_idx] = {
-                    "vap_mass": out_fr.vap_mass,
-                    "liq_mass": out_fr.liq_mass,
-                    "vmol":     out_fr.vap_moles,
-                    "lmol":     out_fr.liq_moles,
-                    "comp":     cmps[-1] if cmps else {},
-                    "feed":     b_feed,
-                    "sp":       b_sp,
-                    "T_out":    ((sts[-1].props or {}).get("T_out") if sts else None),
-                    "label":    label,
-                }
-                print(f"  Branch '{label}' (line {bline}) joins Main at "
-                      f"Tee Join Branch Flow {join_n}.")
-
-        # ── March the Main with branch injections ────────────────────────
-        main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
-            main_rows, resolver, p_start, flash_mode=flash_mode,
-            default_sp=sp, injections=injections, const_map=cmap)
-
-        # Manual circuit with joins: the screening sheets (FIV / AIV / regime / maps)
-        # should describe the MIXED stream at the end of the line, not the first inlet.
-        if (injections and main_stations and feed is None
-                and (main_stations[-1].props or None)):
-            pe = main_stations[-1].props
+    # ── Circuit default StreamProps (drives the screening sheets) ─────
+    feed = None
+    if sk:
+        sp = HE.load_stream_props(def_hmb, sk, def_case)
+        if sp is None:
             try:
-                sp = replace(
-                    sp, vap_mass=pe["m_vap"], liq_mass=pe["m_liq"],
-                    total_mass=pe["m_vap"] + pe["m_liq"],
-                    vap_mw=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.vap_mw),
-                    mol_weight=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.mol_weight),
-                    vap_visc=pe.get("visc_vap") or sp.vap_visc,
-                    liq_density=pe.get("rho_liq") or sp.liq_density,
-                    liq_visc=pe.get("visc_liq") or sp.liq_visc,
-                    vap_z=pe.get("z_vap") or sp.vap_z,
-                    vap_cp_cv=pe.get("cpcv_vap") or sp.vap_cp_cv)
-                phase = HE.classify_phase(sp)
-
-                def gdf(p_, _sp=sp):
-                    return (HE.vapor_density_kgm3(_sp, p_) / LBFT3_TO_KGM3
-                            if _sp.mol_weight else (_sp.vap_density or 0.0))
+                map_row = SMAP.resolve_from_line(lns[0] if lns else "", "", map_path)
+                if map_row:
+                    sk = map_row.lookup_key
+                    sp = HE.load_stream_props(def_hmb, sk, def_case)
             except Exception:
                 pass
+        if sp is None:
+            print(f"  WARNING: stream '{sk}' not found in {def_hmb} "
+                  f"(case '{def_case}') — circuit '{cid}' skipped.")
+            return None
+        is_case = HE.is_proii_export(def_hmb)
+        feed = FV.read_feed(def_hmb, sk, def_case, sp, is_casesheet=is_case)
+        sp, feed = _scale_sp(sp, mult), _scale_feed(feed, mult)
+        if feed is None:
+            print("  WARNING: no composition for default stream — flash uses "
+                  "frozen split where applicable.")
+        else:
+            print(f"  Flash feed: {feed.n} components | β₀={feed.beta_ref:.4f} "
+                  f"| P_ref={feed.p_ref_psia:.2f} psia | mode: {flash_mode}")
+    else:
+        # No HMB stream at circuit level → manual mode.  Use the first main
+        # row carrying manual data as the representative StreamProps.
+        comp_row = next((r for r in c["main_rows"] if r.get("_comp")), None)
+        if comp_row is not None:
+            try:
+                pl0 = _comp_payload(comp_row, p0 or 100.0, cmap)
+            except ValueError as exc:
+                raise SystemExit(f"  ERROR (circuit {cid}, Line "
+                                 f"{comp_row.get('Line No')}, Seq "
+                                 f"{comp_row.get('Seq')}): {exc}")
+            sp, feed = pl0["sp"], pl0["feed"]
+            sk = "(manual composition)"
+            print(f"  Manual composition mode — {feed.n} components from "
+                  f"{_COMP_SHEET} | K basis: {feed.k_basis} | "
+                  f"β₀={feed.beta_ref:.4f}")
+        else:
+            sp = next((m for m in (_streamprops_from_manual(r)
+                                   for r in c["main_rows"]) if m), None)
+            if sp is None:
+                print(f"  WARNING: circuit '{cid}' has no Stream Lookup and no "
+                      f"manual properties — skipped.")
+                return None
+            sk = "(manual)"
+            print("  Manual stream mode — properties from yellow input cells.")
 
-        # station_lines: map each station back to its source Line No
-        station_lines = [r["Line No"] for r in main_rows
-                         if r["Run Type"] == "Main"]
+    if n_cases > 1:
+        print(f"\n  ── Flow case {fcase}: {mult * 100:g} % of normal flow ──")
+    print(f"\n  Circuit {cid}  |  Lines: {', '.join(lns)}  |  "
+          f"Stream {sk}  |  {sp.phase}  "
+          f"T={_u().disp('T', sp.temp_f, 2)}{_u().label('T')}  "
+          f"P={_u().disp('P', sp.pres_psia)} {_u().label('P')}")
+
+    phase = HE.classify_phase(sp)
+    lc    = _line_color_map(lns)
+
+    def gdf(p, _sp=sp):
+        return (HE.vapor_density_kgm3(_sp, p) / LBFT3_TO_KGM3
+                if _sp.mol_weight else (_sp.vap_density or 0.0))
+
+    main_rows     = c["main_rows"]
+    branch_blocks = c["branch_blocks"]
+    p_start = p0 or sp.pres_psia or 100.0
+
+    # ── Preliminary Main march (no branch injections) ────────────────
+    # Captures the flow/composition that leaves Main at every
+    # 'Tee Split Branch Flow N' row, so any Branch block that splits off
+    # of Main can be auto-seeded below (mirrors the Branch→Main join
+    # injection further down, but in the opposite direction).
+    splits_out: dict[tuple, dict] = {}
+    build_profile_solved(main_rows, resolver, p_start, flash_mode=flash_mode,
+                          default_sp=sp, splits_out=splits_out,
+                          const_map=cmap)
+
+    # ── March branch blocks FIRST (independent sub-runs) ─────────────
+    # A branch whose outlet matches a Main 'Tee Join Branch Flow N' row on
+    # the same line is INJECTED into the Main at that row (its outlet flow +
+    # composition merge in); others stay standalone Branch sheets.
+    # A branch whose INLET matches a Main 'Tee Split Branch Flow N' row
+    # (via "Upstream Line No" / "Upstream Seq") is SEEDED from that row's
+    # captured split-off flow/composition instead of marching standalone.
+    branch_runs: list = []            # (label, sts, fls, cmps, b_lns)
+    injections: dict[int, dict] = {}  # main_rows index → branch outlet
+    line_branch_count: dict[str, int] = {}
+    line_split_count: dict[str, int] = {}
+    for bi, block in enumerate(branch_blocks):
+        bp = _start_p_of_block(block) or p_start
+        b0 = block[0] if block else {}
+        up_line = b0.get("Upstream Line No")
+        up_seq  = b0.get("Upstream Seq")
+        split_cap = None
+        if up_line:
+            if up_seq is not None:
+                split_cap = splits_out.get((up_line, up_seq))
+            else:
+                line_split_count[up_line] = line_split_count.get(up_line, 0) + 1
+                split_n = line_split_count[up_line]
+                split_row = next(
+                    (mr for mr in main_rows
+                     if mr.get("Line No") == up_line
+                     and _is_tee_split_branch(mr.get("Fitting Name")) == split_n),
+                    None)
+                if split_row is not None:
+                    split_cap = splits_out.get((up_line, split_row.get("Seq")))
+            if split_cap is None and not b0.get("_Up_defaulted"):
+                print(f"  WARNING: branch (line {b0.get('Line No')}) specifies "
+                      f"Upstream Line No '{up_line}' but no matching "
+                      f"'Tee Split Branch Flow N' output was found on Main.")
+
+        solve_kwargs = dict(flash_mode=flash_mode, default_sp=sp,
+                            const_map=cmap)
+        if split_cap is not None:
+            solve_kwargs.update(default_feed=split_cap["feed"],
+                                 default_vap_cf=split_cap["vap_cf"],
+                                 default_liq_cf=split_cap["liq_cf"])
+            if split_cap.get("sp") is not None:
+                solve_kwargs["default_sp"] = split_cap["sp"]
+        sts, fls, cmps, _bmw = build_profile_solved(block, resolver, bp, **solve_kwargs)
+        b_lns = [r["Line No"] for r in block]
+        label = f"Branch_{bi+1}" if len(branch_blocks) > 1 else "Branch"
+        branch_runs.append((label, sts, fls, cmps, b_lns))
+        if split_cap is not None:
+            print(f"  Branch '{label}' (line {b0.get('Line No')}) splits off "
+                  f"Main line {up_line} at Tee Split Branch Flow {split_cap['n']}.")
+
+        bline  = block[0].get("Line No") if block else None
+        line_branch_count[bline] = line_branch_count.get(bline, 0) + 1
+        join_n = line_branch_count[bline]
+        # A Main 'Tee Join Branch Flow N' row may name the joining Branch
+        # explicitly through its "Upstream Line No" cell; otherwise the Nth
+        # join row sharing the Branch's Line No is used.
+        join_idx = next(
+            (mi for mi, mr in enumerate(main_rows)
+             if _is_tee_join(mr.get("Fitting Name")) is not None
+             and mr.get("Upstream Line No") == bline
+             and mr.get("Run Type") == "Main"),
+            None)
+        if join_idx is None:
+            join_idx = next(
+                (mi for mi, mr in enumerate(main_rows)
+                 if mr.get("Line No") == bline
+                 and _is_tee_join(mr.get("Fitting Name")) == join_n),
+                None)
+        if join_idx is not None and fls and fls[-1] is not None:
+            out_fr = fls[-1]
+            b_sp, b_feed = resolver(block[0]) if block else (None, None)
+            if b_feed is None and block and block[0].get("_comp"):
+                _bpl = _comp_payload(block[0], bp, cmap)
+                b_sp, b_feed = _bpl["sp"], _bpl["feed"]
+            injections[join_idx] = {
+                "vap_mass": out_fr.vap_mass,
+                "liq_mass": out_fr.liq_mass,
+                "vmol":     out_fr.vap_moles,
+                "lmol":     out_fr.liq_moles,
+                "comp":     cmps[-1] if cmps else {},
+                "feed":     b_feed,
+                "sp":       b_sp,
+                "T_out":    ((sts[-1].props or {}).get("T_out") if sts else None),
+                "label":    label,
+            }
+            print(f"  Branch '{label}' (line {bline}) joins Main at "
+                  f"Tee Join Branch Flow {join_n}.")
+
+    # ── March the Main with branch injections ────────────────────────
+    main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
+        main_rows, resolver, p_start, flash_mode=flash_mode,
+        default_sp=sp, injections=injections, const_map=cmap)
+
+    # Manual circuit with joins: the screening sheets (FIV / AIV / regime / maps)
+    # should describe the MIXED stream at the end of the line, not the first inlet.
+    if (injections and main_stations and feed is None
+            and (main_stations[-1].props or None)):
+        pe = main_stations[-1].props
+        try:
+            sp = replace(
+                sp, vap_mass=pe["m_vap"], liq_mass=pe["m_liq"],
+                total_mass=pe["m_vap"] + pe["m_liq"],
+                vap_mw=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.vap_mw),
+                mol_weight=((pe["m_vap"] / pe["n_vap"]) if pe["n_vap"] else sp.mol_weight),
+                vap_visc=pe.get("visc_vap") or sp.vap_visc,
+                liq_density=pe.get("rho_liq") or sp.liq_density,
+                liq_visc=pe.get("visc_liq") or sp.liq_visc,
+                vap_z=pe.get("z_vap") or sp.vap_z,
+                vap_cp_cv=pe.get("cpcv_vap") or sp.vap_cp_cv)
+            phase = HE.classify_phase(sp)
+
+            def gdf(p_, _sp=sp):
+                return (HE.vapor_density_kgm3(_sp, p_) / LBFT3_TO_KGM3
+                        if _sp.mol_weight else (_sp.vap_density or 0.0))
+        except Exception:
+            pass
+
+
+    # station_lines: map each station back to its source Line No
+    station_lines = [r["Line No"] for r in main_rows if r["Run Type"] == "Main"]
+    runs_all = ([("Main", main_stations, station_lines)]
+                + [(lb_, sts_, bl_) for (lb_, sts_, _f, _c2, bl_) in branch_runs])
+    items = _collect_instruments(runs_all)
+
+
+    def _write(case_items):
+        _RUN_CTX.update(name=fcase, mult=mult, n=n_cases)
 
         wb = Workbook()
         pp_sheets, fp_sheets = [], []
@@ -9674,13 +9753,15 @@ def run_noiso(
 
         # ── Line Data / CV Datasheet / Inline Instruments ─────────────────
         try:
-            runs_all = ([("Main", main_stations, station_lines)]
-                        + [(lb_, sts_, bl_) for (lb_, sts_, _f, _c2, bl_) in branch_runs])
             _build_line_data_sheet(wb, runs_all, sp, gdf, cid, sk)
             _idata = _read_instrument_data(input_path)
-            _items = _collect_instruments(runs_all)
-            _cvs = [x for x in _items if x[1].instr["kind"] == "CV"]
-            _ins = [x for x in _items if x[1].instr["kind"] != "CV"]
+            _ins = [x for x in items if x[1].instr["kind"] != "CV"]
+            _order = list(case_items)
+            _cvs = sorted(
+                ((lb_, st_, ln_, fc_, case_items[fc_]["mult"])
+                 for fc_ in _order for (lb_, st_, ln_) in case_items[fc_]["items"]
+                 if st_.instr["kind"] == "CV"),
+                key=lambda t: (t[0], t[1].seq, t[1].instr["tag"], _order.index(t[3])))
             if _cvs:
                 _build_cv_datasheet(wb, _cvs, _idata, cid, sk)
             if _ins:
@@ -9725,15 +9806,20 @@ def run_noiso(
             _anchor = wb.sheetnames.index("Stream_Props") + 1
             wb._sheets[_anchor:_anchor] = _mv
 
+        safe_f = re.sub(r"[^A-Za-z0-9_-]", "_", str(fcase))
         if out_path is None:
             safe_c = re.sub(r"[^A-Za-z0-9_-]", "_", str(cid))
             safe_s = re.sub(r"[^A-Za-z0-9_-]", "_", str(sk))
-            op = f"hydraulics_flash_noiso_{safe_c}_{safe_s}.xlsx"
+            op = (f"hydraulics_flash_noiso_{safe_c}_{safe_s}"
+                  + (f"_{safe_f}" if n_cases > 1 else "") + ".xlsx")
+        elif n_cases > 1:
+            _b, _e = os.path.splitext(out_path)
+            op = f"{_b}_{safe_f}{_e or '.xlsx'}"
         else:
             op = out_path
 
         wb.save(op)
-        results.append((op, main_stations, main_flashes, sp))
+        _res = (op, main_stations, main_flashes, sp)
 
         if main_stations:
             u = _u()
@@ -9745,8 +9831,79 @@ def run_noiso(
             print(f"  Total ΔP : {tot_dp} {u.label('dP')}  "
                   f"({u.disp('P', main_stations[0].p_in_psia)} → "
                   f"{u.disp('P', main_stations[-1].p_out_psia)} {u.label('P')})")
+        return _res
+
+
+    return items, _write
+
+
+def run_noiso(
+        input_path: str,
+        hmb_path: str,
+        circuit_id: str | None = None,   # process one circuit; None = all
+        stream_name: str | None = None,
+        out_path: str | None = None,
+        case: str = "Case 1",
+        map_path: str | None = None,
+        flash_mode: str = "isothermal",
+) -> list[tuple[str, list[HE.Station], list, HE.StreamProps]]:
+    """
+    Process hydraulic circuits from ``input_path``.
+
+    Each circuit (col A) is a series chain of lines.  All Main-run rows across
+    all lines are marched sequentially as ONE continuous pressure profile.
+    Branch rows per line are marched independently, each from its own Start P.
+
+    Flow cases (Flow_Cases sheet: Normal 100 %, Max 110 %, Min 60 % …): every inlet flow is
+    multiplied by the case factor and the WHOLE hydraulics is repeated — one workbook per
+    circuit per case; the CV Datasheet in each shows all cases side by side.
+
+    Returns list of (out_xlsx, main_stations, main_flashes, sp) — one per circuit per flow case.
+    """
+    # ── Display-units context: read the UNITS sheet of the input workbook ──
+    try:
+        _uwb = load_workbook(input_path, read_only=True, data_only=True)
+        set_units(UN.UnitSystem.from_workbook(_uwb))
+        _uwb.close()
+    except Exception:
+        set_units(UN.UnitSystem("FPS"))
+    print(f"  Units: {_u().system}"
+          + ("" if _u().is_fps else "  (engine internals FPS; I/O converted)"))
+
+    all_rows = read_pipeline_input(input_path)
+    if not all_rows:
+        raise SystemExit(f"No data rows found in {input_path}. "
+                         "Run with --template to create the blank workbook.")
+
+    circuits = _group_circuits(all_rows)
+    alias = _stream_alias(input_path, map_path)
+    flow_cases = _read_flow_cases(input_path)
+    if len(flow_cases) > 1:
+        print("  Flow cases: " + ", ".join(f"{n_} {m_ * 100:g} %" for n_, m_ in flow_cases))
+    target_ids = [circuit_id] if circuit_id else list(circuits.keys())
+    results = []
+
+    for cid in target_ids:
+        if cid not in circuits:
+            print(f"  WARNING: circuit '{cid}' not found — skipped.")
+            continue
+        built = []
+        for fname, fmult in flow_cases:
+            circ_c = circuits if fmult == 1.0 else _group_circuits(_scale_rows(all_rows, fmult))
+            r_ = _circuit_case(cid, circ_c[cid], all_rows, input_path, hmb_path, case, map_path,
+                               flash_mode, stream_name, out_path, alias, fmult, fname, len(flow_cases))
+            if r_ is None:
+                built = []
+                break
+            built.append((fname, fmult, r_))
+        if not built:
+            continue
+        case_items = {fn_: dict(mult=fm_, items=r_[0]) for fn_, fm_, r_ in built}
+        for fn_, fm_, r_ in built:
+            results.append(r_[1](case_items))
 
     return results
+
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -10172,7 +10329,7 @@ def _build_cv_datasheet(wb, items, idata, circuit_id, stream_name) -> None:
 
     def add(key, v):
         rows.setdefault(key, []).append(v)
-    for label, st, ln in items:
+    for label, st, ln, fc, fm in items:
         info = st.instr
         pr = st.props or {}
         dn = info.get("dn") or {}
@@ -10181,7 +10338,8 @@ def _build_cv_datasheet(wb, items, idata, circuit_id, stream_name) -> None:
         fs = _flow_state(st)
         fl = _flashing_info(pr, dn)
         cm = _pr_comp_pct(pr)
-        cols.append(f"{info['tag']}")
+        cols.append(f"{info['tag']}\n{fc} ({fm * 100:g} %)")
+        add("fcase", fc); add("fmult", fm * 100.0)
         mt = (pr.get("m_vap") or 0.0) + (pr.get("m_liq") or 0.0)
         # general
         add("tag", info["tag"]); add("desc", data.get("desc"))
@@ -10260,7 +10418,8 @@ def _build_cv_datasheet(wb, items, idata, circuit_id, stream_name) -> None:
     ru = u.label("rho"); vu = u.label("v"); qu = u.label("qvol"); lu = u.label("Lin")
     sections = [
         ("1  GENERAL", [
-            ("Tag", "", L("tag")), ("Service / description", "", L("desc")),
+            ("Tag", "", L("tag")), ("Flow case", "", L("fcase")),
+            ("Flow multiplier", "% of normal", L("fmult")), ("Service / description", "", L("desc")),
             ("Line No", "", L("line")), ("Run", "", L("run")), ("Seq", "", L("seq")),
             ("Stream", "", L("stream")), ("Control type", "", L("ctype")),
             ("Valve port bore", lu, L("bore")), ("Upstream line bore (NPS)", lu, L("lbore")),
@@ -10371,7 +10530,7 @@ def _build_instruments_sheet(wb, items, idata, circuit_id, stream_name) -> None:
     ncol = len(_INSTR_COLS)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
     _c(ws, 1, 1, f"INLINE INSTRUMENTS (PT · TT · FT inline / orifice · RO)   |   Circuit {circuit_id}   |   "
-                 f"Stream {stream_name}   |   units: {u.system}   |   {datetime.now():%d-%b-%Y %H:%M}",
+                 f"Stream {stream_name}   |   units: {u.system}   |   {datetime.now():%d-%b-%Y %H:%M}" + _case_tag(),
        bg=NAVY, fg=WHITE, sz=11, bold=True)
     ws.row_dimensions[1].height = 22
     # group header row 2, header row 3
@@ -10538,7 +10697,7 @@ def _build_line_data_sheet(wb, runs, sp, gdf, circuit_id, stream_name) -> None:
     ncol = len(cols)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
     _c(ws, 1, 1, f"LINE DATA — straight pipe at the highest operating pressure per Line No   |   Circuit {circuit_id}   |   "
-                 f"Stream {stream_name}   |   units: {u.system}   |   {datetime.now():%d-%b-%Y %H:%M}",
+                 f"Stream {stream_name}   |   units: {u.system}   |   {datetime.now():%d-%b-%Y %H:%M}" + _case_tag(),
        bg=NAVY, fg=WHITE, sz=11, bold=True)
     ws.row_dimensions[1].height = 22
     groups: list = []
@@ -10704,6 +10863,7 @@ def _build_readme_noiso(wb, line_no, stream_name, sp, phase,
         f"Input file:   {os.path.basename(input_path)}",
         f"Phase (HMB):  {sp.phase}  ->  calc path '{phase}'",
         f"Flash mode:   {flash_mode}",
+        f"Flow case:    {_RUN_CTX['name']}  ({_RUN_CTX['mult'] * 100:g} % of normal flow)",
         f"Units:        {_u().system}  (input & results; engine internals FPS)",
         f"Generated:    {datetime.now():%d-%b-%Y %H:%M}",
         "",
