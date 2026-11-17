@@ -3,11 +3,10 @@
 
 This file merges the former  asme_data.py + hydraulics_engine.py +
 hydraulics_engine_flash_noiso.py + flash_vle.py + flow_pattern_data.py +
-flow_pattern_maps.py  into ONE engine.  Companion modules:
-
-  pms_classes.py        — piping spec / schedule data  (PROJECT-SPECIFIC)
-  hmbbuilder.py         — PRO/II dump → HMB workbook (also the optional HMB reader)
-  ../common/units.py    — FPS/SI units layer (UNITS sheet in the input workbook)
+flow_pattern_maps.py  into ONE engine.  Everything the engine needs is in this file: the units layer (UNITS sheet), the project piping
+classes (PMS_CLASSES — rename a class / change its schedule or wall thickness there), the
+stream map (actual stream number → simulation stream number) and the 98-component PR databank.
+The only companion is  hmbbuilder.py  (PRO/II dump → HMB workbook).
 
 Manual (no-HMB) streams may carry a mass/mole composition via the
 Stream_Composition input sheet; streams entering at different Seq are mixed.
@@ -287,14 +286,275 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference, Series
 
-import pms_classes as PMS
 import sys as _sys
 A = _sys.modules[__name__]   # asme_data merged into this file
 
-# ── Shared Procalc units layer (../common/units.py) ────────────────────────
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "common"))
-import units as UN
+# ════════════════════════════════════════════════════════════════════════
+#  UNITS LAYER  (embedded copy of the shared Procalc units layer, common/units.py)
+#  Every quantity is computed internally in FPS; the UNITS sheet of the input workbook
+#  decides how values are entered and presented.
+# ════════════════════════════════════════════════════════════════════════
+# ── conversion constants (exact / NIST) ────────────────────────────────────
+LB_PER_KG = 2.2046226218487757
+FT_PER_M = 3.2808398950131233
+IN_PER_MM = 1.0 / 25.4
+PSI_PER_KPA = 0.14503773773020922
+PSIA_ATM = 14.695948775513449
+KPA_ATM = 101.325
+BTU_PER_KJ = 0.9478171203133172
+
+# quantity → {unit: (to_internal(v), from_internal(v))}
+_LIN = lambda f: (lambda v: v * f, lambda v: v / f)  # noqa: E731
+
+_CONVERTERS: dict[str, dict[str, tuple]] = {
+    # absolute pressure → psia
+    "P": {
+        "psia": _LIN(1.0),
+        "psig": (lambda v: v + PSIA_ATM, lambda v: v - PSIA_ATM),
+        "kPa":  _LIN(PSI_PER_KPA),                      # kPa(a)
+        "kPag": (lambda v: (v + KPA_ATM) * PSI_PER_KPA,
+                 lambda v: v / PSI_PER_KPA - KPA_ATM),
+        "MPa":  _LIN(PSI_PER_KPA * 1000.0),
+        "bara": _LIN(PSI_PER_KPA * 100.0),
+        "barg": (lambda v: v * 100.0 * PSI_PER_KPA + PSIA_ATM,
+                 lambda v: (v - PSIA_ATM) / (100.0 * PSI_PER_KPA)),
+        "kg/cm2a": _LIN(14.223343307120154),
+        "kg/cm2g": (lambda v: v * 14.223343307120154 + PSIA_ATM,
+                    lambda v: (v - PSIA_ATM) / 14.223343307120154),
+    },
+    # differential pressure → psi
+    "dP": {
+        "psi":  _LIN(1.0),
+        "kPa":  _LIN(PSI_PER_KPA),
+        "bar":  _LIN(PSI_PER_KPA * 100.0),
+        "mbar": _LIN(PSI_PER_KPA / 10.0),
+        "kg/cm2": _LIN(14.223343307120154),
+    },
+    # temperature → °F
+    "T": {
+        "degF": _LIN(1.0), "°F": _LIN(1.0),
+        "degC": (lambda v: v * 1.8 + 32.0, lambda v: (v - 32.0) / 1.8),
+        "°C":   (lambda v: v * 1.8 + 32.0, lambda v: (v - 32.0) / 1.8),
+        "K":    (lambda v: (v - 273.15) * 1.8 + 32.0,
+                 lambda v: (v - 32.0) / 1.8 + 273.15),
+    },
+    # temperature difference → °F
+    "dT": {"degF": _LIN(1.0), "degC": _LIN(1.8), "K": _LIN(1.8)},
+    # mass flow → lb/hr
+    "mflow": {
+        "lb/hr": _LIN(1.0), "lb/h": _LIN(1.0),
+        "kg/hr": _LIN(LB_PER_KG), "kg/h": _LIN(LB_PER_KG),
+        "kg/s":  _LIN(LB_PER_KG * 3600.0),
+        "t/h":   _LIN(LB_PER_KG * 1000.0),
+    },
+    # molar flow → lb-mol/hr
+    "molflow": {
+        "lb-mol/hr": _LIN(1.0),
+        "kgmol/hr":  _LIN(LB_PER_KG), "kmol/h": _LIN(LB_PER_KG),
+    },
+    # density → lb/ft³
+    "rho": {
+        "lb/ft3": _LIN(1.0), "lb/ft³": _LIN(1.0),
+        "kg/m3":  _LIN(LB_PER_KG / FT_PER_M**3),
+        "kg/m³":  _LIN(LB_PER_KG / FT_PER_M**3),
+    },
+    # length → ft
+    "L": {"ft": _LIN(1.0), "m": _LIN(FT_PER_M), "mm": _LIN(FT_PER_M / 1000.0)},
+    # small length / diameter → in   (NPS stays in inches by convention)
+    "Lin": {"in": _LIN(1.0), "mm": _LIN(IN_PER_MM)},
+    # area → ft²
+    "A": {"ft2": _LIN(1.0), "ft²": _LIN(1.0),
+          "m2": _LIN(FT_PER_M**2), "m²": _LIN(FT_PER_M**2)},
+    # small area (orifice) → in²
+    "Ain": {"in2": _LIN(1.0), "in²": _LIN(1.0),
+            "cm2": _LIN((IN_PER_MM * 10.0)**2), "cm²": _LIN((IN_PER_MM * 10.0)**2),
+            "mm2": _LIN(IN_PER_MM**2), "mm²": _LIN(IN_PER_MM**2)},
+    # volume → ft³
+    "V": {"ft3": _LIN(1.0), "ft³": _LIN(1.0),
+          "m3": _LIN(FT_PER_M**3), "m³": _LIN(FT_PER_M**3),
+          "L": _LIN(FT_PER_M**3 / 1000.0)},
+    # heat duty → BTU/hr
+    "Q": {"BTU/hr": _LIN(1.0),
+          "kW": _LIN(BTU_PER_KJ * 3600.0),
+          "W":  _LIN(BTU_PER_KJ * 3.6),
+          "MW": _LIN(BTU_PER_KJ * 3.6e6),
+          "MMBTU/hr": _LIN(1.0e6), "kcal/h": _LIN(3.968320719312103)},
+    # specific enthalpy / latent heat → BTU/lb
+    "h": {"BTU/lb": _LIN(1.0), "kJ/kg": _LIN(BTU_PER_KJ / LB_PER_KG),
+          "kcal/kg": _LIN(1.7988310432962014)},
+    # velocity → ft/s
+    "v": {"ft/s": _LIN(1.0), "m/s": _LIN(FT_PER_M)},
+    # volumetric flow → ft³/hr
+    "qvol": {"ft3/hr": _LIN(1.0), "m3/h": _LIN(FT_PER_M**3),
+             "gpm": _LIN(8.020833333333334), "m3/hr": _LIN(FT_PER_M**3)},
+    # dimensionless / identical in both systems
+    "visc": {"cP": _LIN(1.0)},
+    "MW":   {"g/mol": _LIN(1.0)},
+    "-":    {"-": _LIN(1.0), "—": _LIN(1.0)},
+    "pct":  {"%": _LIN(1.0)},
+    "st":   {"dyn/cm": _LIN(1.0), "mN/m": _LIN(1.0)},   # numerically equal
+}
+
+# per-system default unit per quantity
+SYSTEM_DEFAULTS: dict[str, dict[str, str]] = {
+    "FPS": {
+        "P": "psia", "dP": "psi", "T": "degF", "dT": "degF",
+        "mflow": "lb/hr", "molflow": "lb-mol/hr", "rho": "lb/ft3",
+        "L": "ft", "Lin": "in", "A": "ft2", "Ain": "in2", "V": "ft3",
+        "Q": "BTU/hr", "h": "BTU/lb", "v": "ft/s", "qvol": "ft3/hr",
+        "visc": "cP", "MW": "g/mol", "-": "-", "pct": "%", "st": "dyn/cm",
+    },
+    "SI": {
+        "P": "kPa", "dP": "kPa", "T": "degC", "dT": "degC",
+        "mflow": "kg/hr", "molflow": "kgmol/hr", "rho": "kg/m3",
+        "L": "m", "Lin": "mm", "A": "m2", "Ain": "cm2", "V": "m3",
+        "Q": "kW", "h": "kJ/kg", "v": "m/s", "qvol": "m3/h",
+        "visc": "cP", "MW": "g/mol", "-": "-", "pct": "%", "st": "dyn/cm",
+    },
+}
+
+QUANTITY_NAMES = {
+    "P": "Pressure (absolute)", "dP": "Pressure drop", "T": "Temperature",
+    "dT": "Temperature difference", "mflow": "Mass flow", "molflow": "Molar flow",
+    "rho": "Density", "L": "Length / elevation", "Lin": "Bore / small length",
+    "A": "Surface area", "Ain": "Orifice area", "V": "Volume",
+    "Q": "Heat duty", "h": "Specific enthalpy / latent heat", "v": "Velocity",
+    "qvol": "Volumetric flow", "visc": "Viscosity", "MW": "Molecular weight",
+}
+
+UNITS_SHEET = "UNITS"
+
+
+class UnitSystem:
+    """Converts between user-facing units and internal FPS canonical units."""
+
+    def __init__(self, system: str = "FPS",
+                 overrides: dict[str, str] | None = None):
+        system = (system or "FPS").strip().upper()
+        if system not in SYSTEM_DEFAULTS:
+            system = "FPS"
+        self.system = system
+        self.sel: dict[str, str] = dict(SYSTEM_DEFAULTS[system])
+        for qty, unit in (overrides or {}).items():
+            if qty in _CONVERTERS and unit in _CONVERTERS[qty]:
+                self.sel[qty] = unit
+
+    # ── conversion ──────────────────────────────────────────────────────
+    def to_internal(self, qty: str, value):
+        if value is None or qty not in _CONVERTERS:
+            return value
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return value
+        return _CONVERTERS[qty][self.sel[qty]][0](v)
+
+    def from_internal(self, qty: str, value):
+        if value is None or qty not in _CONVERTERS:
+            return value
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return value
+        return _CONVERTERS[qty][self.sel[qty]][1](v)
+
+    def disp(self, qty: str, value, nd: int | None = 4):
+        """from_internal + optional rounding (None → no rounding)."""
+        out = self.from_internal(qty, value)
+        if nd is not None and isinstance(out, float):
+            out = round(out, nd)
+        return out
+
+    # ── labels ──────────────────────────────────────────────────────────
+    def label(self, qty: str) -> str:
+        u = self.sel.get(qty, "")
+        return {"degF": "°F", "degC": "°C"}.get(u, u)
+
+    def hdr(self, base: str, qty: str) -> str:
+        """'Start P', 'P'  →  'Start P (psia)' / 'Start P (kPa)'."""
+        lbl = self.label(qty)
+        return f"{base} ({lbl})" if lbl and lbl != "-" else base
+
+    @property
+    def is_fps(self) -> bool:
+        return self.system == "FPS"
+
+    # ── workbook I/O ────────────────────────────────────────────────────
+    @classmethod
+    def from_workbook(cls, wb) -> "UnitSystem":
+        """Read the UNITS sheet (graceful: absent sheet → FPS)."""
+        if UNITS_SHEET not in wb.sheetnames:
+            return cls("FPS")
+        ws = wb[UNITS_SHEET]
+        system, overrides = "FPS", {}
+        for row in ws.iter_rows(min_row=1, max_row=60, max_col=4,
+                                values_only=True):
+            if not row or row[0] is None:
+                continue
+            key = str(row[0]).strip()
+            if key.lower() in ("unit system", "system"):
+                system = str(row[1] or "FPS").strip().upper()
+            elif key in _CONVERTERS and row[2]:
+                unit = str(row[2]).strip()
+                # normalise pretty labels back to converter keys
+                unit = {"°F": "degF", "°C": "degC"}.get(unit, unit)
+                overrides[key] = unit
+        return cls(system, overrides)
+
+
+def add_units_sheet(wb, system: str = "FPS", position: int = 0):
+    """Insert a styled UNITS sheet into ``wb`` (openpyxl Workbook)."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    NAVY, WHITE, LGRAY, AMBER = "1F4973", "FFFFFF", "F2F2F2", "FFF2CC"
+    if UNITS_SHEET in wb.sheetnames:
+        del wb[UNITS_SHEET]
+    ws = wb.create_sheet(UNITS_SHEET, position)
+    ws.sheet_view.showGridLines = False
+    ws.sheet_properties.tabColor = "C00000"
+
+    def cell(r, c, v, bg=None, fg="000000", bold=False, sz=10):
+        x = ws.cell(row=r, column=c, value=v)
+        x.font = Font(name="Calibri", size=sz, bold=bold, color=fg)
+        if bg:
+            x.fill = PatternFill("solid", fgColor=bg)
+        x.alignment = Alignment(horizontal="left", vertical="center")
+        return x
+
+    ws.merge_cells("A1:D1")
+    cell(1, 1, "UNITS  —  choose FPS or SI; per-quantity overrides optional",
+         bg=NAVY, fg=WHITE, bold=True, sz=11)
+    ws.row_dimensions[1].height = 22
+
+    cell(3, 1, "Unit System", bg=LGRAY, bold=True)
+    c = cell(3, 2, (system or "FPS").upper(), bg=AMBER, bold=True)
+    dv = DataValidation(type="list", formula1='"FPS,SI"', allow_blank=False)
+    ws.add_data_validation(dv)
+    dv.add("B3")
+    cell(3, 3, "← FPS or SI.  All inputs read & all results written in these units.")
+
+    cell(5, 1, "Qty code", bg=NAVY, fg=WHITE, bold=True)
+    cell(5, 2, "Quantity", bg=NAVY, fg=WHITE, bold=True)
+    cell(5, 3, "Unit override (optional)", bg=NAVY, fg=WHITE, bold=True)
+    cell(5, 4, "Options", bg=NAVY, fg=WHITE, bold=True)
+    r = 6
+    sysd = SYSTEM_DEFAULTS.get((system or "FPS").upper(), SYSTEM_DEFAULTS["FPS"])
+    for qty, name in QUANTITY_NAMES.items():
+        cell(r, 1, qty, bg=LGRAY)
+        cell(r, 2, name)
+        cell(r, 3, None, bg=AMBER)   # blank = system default
+        opts = " | ".join(_CONVERTERS[qty].keys())
+        cell(r, 4, f"default: {sysd[qty]}   |   {opts}", fg="808080", sz=9)
+        r += 1
+    cell(r + 1, 1, "Leave overrides blank to use the system defaults. "
+         "Overrides apply per quantity (e.g. P = barg while system = SI).",
+         fg="808080", sz=9)
+    for col, w in (("A", 10), ("B", 30), ("C", 22), ("D", 70)):
+        ws.column_dimensions[col].width = w
+    return ws
+
+UN = _sys.modules[__name__]          # units layer lives in this file (UN.UnitSystem, UN.add_units_sheet …)
 
 _U = UN.UnitSystem("FPS")    # module-level display-units context
 
@@ -367,7 +627,291 @@ def txt(v):
 # ════════════════════════════════════════════════════════════════════════
 #  1.  INTERNAL DIAMETER from piping spec + bore (PMS catalogue + ASME)
 # ════════════════════════════════════════════════════════════════════════
-_CLASS_BY_NAME = {c.name.upper(): c for c in PMS.CLASSES}
+# ── PROJECT PIPING CLASSES (PMS) ────────────────────────────────────────────
+# One line per class:   "<class name>": ("<material of construction>", (rule, rule, …)),
+#   rule = (NPS from, NPS to, schedule-or-wall [, minimum schedule for 'CAL'])
+#   schedule-or-wall:  a B36.10 / B36.19 designation ("40S", "80", "160", "STD", "XS", "XXS" …),
+#                      or a WALL THICKNESS in inches (a number, e.g. 0.375) which overrides the
+#                      schedule table, or "CAL" (calculate — falls back to the minimum schedule).
+# Moving to a new project normally means two edits only:
+#   · rename the class (e.g. "G1A-3" → "A1S6") — the name must match 'Piping Spec' on Pipeline_Input;
+#   · change the schedule / wall thickness of its rules.
+# 'Piping Spec' may carry a one-off override:  "G1A-3/100"  (schedule 100)  or  "G1A-3/0.5"  (wall 0.5 in).
+# Source: GEMS catalogue extract (253 classes) with the G1S-1 / G1S-2 curated overrides.
+PMS_CLASSES: dict[str, tuple] = {
+    'G10Z-K': ('Type 304 Tubing (c,f)', ()),
+    'G10Z-L': ('Type 316 Tubing (c,f)', ()),
+    'G10Z-P': ('Allowance:', ()),
+    'G10Z-Q': ('Allowance:', ()),
+    'G12U-1': ('Nodular (Ductile) Iron,', (('4', '24', '350'),)),
+    'G12U-2': ('High Density Polyethylene', (('1/2', '2', '80'), ('1/2', '2', '80'), ('2', '24', 'CL 200'))),
+    'G15A-1': ('Carbon Steel', (('3/4', '3', '160'), ('4', '24', 'CAL'))),
+    'G15A-11': ('Carbon Steel', (('3/4', '2', 'XXS'), ('3', '24', 'CAL'))),
+    'G15A-15': ('Carbon Steel', (('1', '24', 'CAL'),)),
+    'G15A-17': ('Carbon Steel (21)', (('1', '24', 'CAL'),)),
+    'G15A-2': ('Carbon Steel', (('3/4', '3', '160'), ('4', '24', 'CAL'))),
+    'G15A-4': ('Carbon Steel', (('3/4', '2', 'XXS'), ('3', '24', '-'))),
+    'G15A-5': ('Carbon Steel', (('3/4', '2', 'XXS'), ('3', '24', 'CAL'))),
+    'G15A-7': ('Carbon Steel (21)', (('3/4', '2', 'XXS'), ('3', '24', 'CAL'))),
+    'G15B-2': ('0.125" (0.10" min.) (26)', (('3/4', '2', '160'), ('2', '2', 'XXS'), ('3', '12', '-'), ('3', '12', 'CAL'))),
+    'G15F-1': ('1 1/4% Cr-1/2% Mo', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15F-2': ('1 1/4% Cr-1/2% Mo', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15G-1': ('2 1/4% Cr-1% Mo', (('3/4', '4', '160'), ('6', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15G-2': ('2 1/4% Cr-1% Mo', (('1/2', '4', '160'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15H-1': ('5% Cr-1/2% Mo  (21)', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15H-2': ('5% Cr-1/2% Mo  (21)', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15J-1': ('9% Cr-1% Mo (21)', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15J-2': ('9% Cr-1% Mo  (21)', (('3/4', '3', '160'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G15K-1': ('Type 304', ()),
+    'G15K-10': ('Type 304 (76)', (('3/4', '4', '80S'), ('6', '8', 'CAL'), ('6', '8', 'CAL'), ('6', '8', 'CAL'))),
+    'G15K-2': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '3', '160'), ('4', '4', '120'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G15K-3': ('Type 304L', (('3/4', '1', '80S'), ('1-1/2', '3', '160'), ('4', '8', '120'), ('10', '24', 'CAL'), ('10', '24', 'CAL'), ('10', '24', 'CAL'))),
+    'G15L-4': ('Type 316L', (('3/4', '1', '160'), ('1-1/2', '1-1/2', 'XXH'), ('3/4', '1', '80S'), ('1-1/2', '3', '160'), ('4', '12', 'CAL'), ('4', '12', 'CAL'), ('4', '12', 'CAL'), ('4', '12', 'CAL'))),
+    'G15N-1': ('Type 321', (('3/4', '1', '80S'), ('1-1/2', '3', '160'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G15N-2': ('Type 321', (('3/4', '1', '80S'), ('1-1/2', '3', '160'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G15N-6': ('Type 347', (('3/4', '1', '80S'), ('1-1/2', '3', '160'), ('4', '6', '120'), ('8', '8', '120'), ('8', '8', '120'), ('10', '10', 'CAL'), ('10', '10', 'CAL'), ('10', '10', 'CAL'))),
+    'G15R-2': ('Alloy 825 (UNS N08825)', (('3/4', '2', '160'), ('3', '3', '80S'), ('4', '8', 'CAL'), ('10', '12', 'CAL'))),
+    'G1A-1': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1A-10': ('Carbon Steel', ()),
+    'G1A-11': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-13': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '8', '80'), ('10', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1A-15': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '8', '80'), ('10', '24', 'CAL'))),
+    'G1A-17': ('Carbon Steel (21)', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '8', '80'), ('10', '24', 'CAL'))),
+    'G1A-2': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-21': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1A-22': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-23': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1A-25': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-26': ('Carbon Steel   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-27': ('Carbon Steel  (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-28': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-3': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1A-35': ('Carbon Steel', (('1', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '6', '80'), ('10', '24', 'CAL'))),
+    'G1A-4': ('Carbon Steel', ()),
+    'G1A-40': ('Carbon Steel (g)', (('1', '2', '160'), ('3', '4', '80'), ('6', '16', 'Std'))),
+    'G1A-5': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-50': ('Carbon Steel - Lokring\uf8ea (#1)', ()),
+    'G1A-6': ('Carbon Steel   (21)', (('3/4', '1', '160'),)),
+    'G1A-7': ('Carbon Steel  (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1A-8': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'))),
+    'G1A-9': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '6', '80'), ('8', '8', '60'), ('10', '18', '40'))),
+    'G1B-1': ('0.125" (0.10" min.)', (('3/4', '2', '80S'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1B-21': ('0.125" (0.10" min.)', (('3/4', '1-1/2', '80S'), ('2', '2', '80'), ('2', '2', '80S'), ('3', '24', 'Std'))),
+    'G1B-3': ('0.125" (0.10" min.)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1C-1': ('Aluminum (a)', ()),
+    'G1D-1': ('Carbon Steel – PTFE Lined', (('1', '6', '40'), ('8', '10', '30'))),
+    'G1D-2': ('Carbon Steel – PVDF Lined', (('1', '6', '40'), ('8', '8', '30'))),
+    'G1D-3': ('Carbon Steel – PTFE Lined', (('1', '4', '40'), ('2', '4', '40'), ('installation,', 'installation,', 'inspection,'), ('joint', 'joint', 'make-up)'), ('the Owner’s', 'the Owner’s', 'Engineer'), ('Integrity', 'Integrity', 'Flange (HIF™)'), ('of and', 'of and', 'are provided'), ('torque', 'torque', 'and general'), ('type torque', 'type torque', 'wrenches'))),
+    'G1F-1': ('1 1/4%Cr-1/2% Mo', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1F-21': ('1 1/4%Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1G-1': ('2 1/4% Cr-1% Mo', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1G-21': ('2 1/4% Cr-1% Mo', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1H-1': ('5% Cr-1/2% Mo    (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1H-21': ('5% Cr-1/2% Mo   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1J-1': ('9% Cr-1% Mo   (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1J-21': ('9% Cr-1% Mo   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'Std'), ('12', '24', 'Std'))),
+    'G1K-1': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1K-10': ('Type 304 (76)', (('3/4', '1-1/2', '80S'), ('2', '4', '40S'), ('6', '8', '40S'), ('6', '8', 'CAL'))),
+    'G1K-14': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1K-3': ('Type 304L', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1K-4': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1K-40': ('Type 304', (('1', '1-1/2', '80S'), ('2', '16', '40S'))),
+    'G1K-5': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1K-6': ('Type 304L', (('1/2', '6', '40S'), ('1/2', '6', '40S'))),
+    'G1L-1': ('Type 316', (('3/4', '1-1/2', '80S'), ('2', '2', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1L-10': ('Type 316 (76)', ()),
+    'G1L-3': ('Type 316L', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1L-4': ('Type 316', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1L-50': ('Type 316 - Lokring\uf8ea (#1)', ()),
+    'G1M-1': ('Type 317L', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '6', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1M-2': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '80S'), ('3/4', '1-1/2', '40S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '24', '-'), ('8', '24', '-'))),
+    'G1M-3': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '80S'), ('3/4', '1-1/2', '40S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '24', '-'), ('8', '24', '-'))),
+    'G1N-1': ('Type 321', (('3/4', '2', '80S'), ('3', '6', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G1N-10': ('AL-6XN (UNS N08367)', (('3/4', '2', '40S'), ('3', '10', '10S'), ('3', '10', '10S'))),
+    'G1P-1': ('Alloy 400 (UNS N04400)', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '12', 'CAL'), ('8', '12', 'CAL'))),
+    'G1P-2': ('Alloy 400 (UNS N04400)', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '12', 'CAL'), ('8', '12', 'CAL'))),
+    'G1P-40': ('Alloy 400 (UNS N04400)', (('1', '2', '80S'), ('3', '16', '40S'))),
+    'G1P-5': ('Nickel 200 (UNS N02200)', (('3/4', '1-1/2', '80S'), ('2', '2', '40S'), ('2', '2', '40S'), ('3', '12', 'CAL'), ('3', '12', 'CAL'))),
+    'G1Q-10': ('Alloy C-276 (UNS N10276)', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '3', '40S'), ('3', '3', '40S'), ('4', '12', 'CAL'))),
+    'G1Q-11': ('Alloy C-276 (UNS N10276)', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '3', '40S'), ('3', '3', '40S'), ('4', '12', 'CAL'), ('4', '8', 'CAL'))),
+    'G1Q-40': ('Alloy 600 (UNS N06600)', (('1', '2', '80S'), ('3', '16', '40S'))),
+    'G1R-2': ('Alloy 825 (UNS N08825)', (('3/4', '1-1/2', '80S'), ('2', '8', '40S'), ('10', '18', 'CAL'))),
+    'G1S-1': ('Alloy 20 (UNS N08020)', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '18', 'CAL'))),
+    'G1S-2': ('Alloy 20 (UNS N08020)', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '18', 'CAL'))),
+    'G1T-1': ('Titanium (UNS R50400) (c)', (('2', '16', 'CAL'), ('2', '16', 'CAL'))),
+    'G1U-1': ('Carbon Steel', (('1/2', '2', '80'), ('1/2', '2', '80'), ('3', '12', 'Std'))),
+    'G1U-10': ('Carbon Steel', (('1/2', '2', '40'), ('1/2', '2', '40'))),
+    'G1U-14': ('Carbon Steel', (('1/2', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '6', '80'), ('8', '16', '40'), ('18', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1U-15': ('Carbon Steel', (('1/2', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '6', '80'), ('8', '24', 'CAL'))),
+    'G1U-2': ('Carbon Steel', (('1/2', '2', '80'), ('1/2', '2', '80'), ('3', '3', '80'), ('3', '3', '80'), ('3', '12', 'Std'))),
+    'G1U-3': ('Carbon Steel', (('1/2', '2', '80'), ('1/2', '2', '80'), ('2', '2', '80'), ('3', '24', 'Std'))),
+    'G1U-4': ('Carbon Steel', (('1/2', '2', '80'), ('3', '24', 'Std'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G1U-5': ('Carbon Steel', (('1/2', '2', '80'), ('1/2', '2', '80'), ('3', '24', 'Std'), ('3', '24', 'Std'), ('3', '24', 'Std'), ('3', '24', 'Std'))),
+    'G1U-7': ('Carbon Steel', (('1/2', '2', '80'), ('3', '24', 'Std'))),
+    'G1U-8': ('Carbon Steel', (('1/2', '2', '80'), ('1/2', '2', '80'), ('3', '4', '40'), ('3', '4', '40'), ('6', '24', 'Std'))),
+    'G1U-9': ('Carbon Steel', (('3/4', '2', '80'), ('3', '3', '40'), ('GP 03-06-01', 'GP 03-06-01', 'or engineering'), ('temperatures', 'temperatures', 'less'))),
+    'G25G-2': ('2 1/4% Cr-1% Mo', (('1/2', '3', 'XXS'), ('4', '12', 'CAL'), ('4', '12', 'CAL'))),
+    'G3A-1': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G3A-10': ('Carbon Steel', ()),
+    'G3A-15': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '4', '120'), ('6', '8', '80'), ('10', '24', 'CAL'))),
+    'G3A-17': ('Carbon Steel  (21)', (('3/4', '1-1/2', 'XXS'), ('2', '3', '160'), ('4', '4', '120'), ('6', '8', '80'), ('10', '24', 'CAL'))),
+    'G3A-2': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-21': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G3A-22': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-23': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G3A-25': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-26': ('Carbon Steel   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-27': ('Carbon Steel  (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-28': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-3': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('26', '48', 'CAL'), ('26', '48', 'CAL'))),
+    'G3A-4': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', '-'), ('26', '48', '-'))),
+    'G3A-40': ('Carbon Steel', (('1', '2', '160'), ('3', '4', '80'), ('6', '10', 'Std'), ('12', '16', 'CAL'))),
+    'G3A-45': ('Carbon Steel', (('1', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('16', '24', 'CAL'))),
+    'G3A-46': ('Carbon Steel', (('1', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('16', '24', 'CAL'))),
+    'G3A-5': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-50': ('Carbon Steel - Lokring\uf8ea (#1)', ()),
+    'G3A-6': ('Carbon Steel   (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-7': ('Carbon Steel  (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3A-8': ('Carbon Steel', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'))),
+    'G3B-1': ('0.125" (0.10" min.)', (('3/4', '2', '80S'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', '-'))),
+    'G3B-2': ('0.125" (0.10" min.)', (('3/4', '3/4', '160'), ('1', '2', '80'), ('3', '14', '40'), ('16', '24', '-'))),
+    'G3B-21': ('0.125" (0.10" min.)', (('3/4', '1-1/2', '80S'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', '-'))),
+    'G3B-22': ('0.125" (0.10" min.)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '14', '40'), ('16', '24', '-'))),
+    'G3B-3': ('0.125" (0.10" min.)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', '-'))),
+    'G3D-1': ('Carbon Steel – PTFE Lined', (('1', '6', '40'), ('8', '8', '30'))),
+    'G3F-1': ('1 1/4% Cr-1/2% Mo', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('18', '24', 'CAL'))),
+    'G3F-21': ('1 1/4% Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('18', '24', 'CAL'))),
+    'G3G-1': ('2 1/4% Cr-1% Mo', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('18', '24', 'CAL'))),
+    'G3G-21': ('2 1/4% Cr-1% Mo', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '16', '40'), ('18', '24', 'CAL'), ('18', '24', 'CAL'))),
+    'G3H-1': ('5% Cr-1/2% Mo    (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '12', 'XS'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G3H-2': ('5% Cr-1/2% Mo (21)', (('3/4', '3/4', '160'), ('1', '2', '80'), ('3', '10', '40'), ('12', '24', 'CAL'), ('12', '24', 'CAL'))),
+    'G3H-21': ('5% Cr-1/2% Mo (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '12', 'XS'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G3H-22': ('5% Cr-1/2% Mo  (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'CAL'), ('12', '24', 'CAL'))),
+    'G3J-1': ('9% Cr-1% Mo   (21)', (('3/4', '1', '160'), ('1-1/2', '2', '80'), ('3', '10', '40'), ('12', '12', 'XS'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G3J-2': ('9% Cr-1% Mo   (21)', (('3/4', '3/4', '160'), ('1', '2', '80'), ('3', '10', '40'), ('12', '24', 'CAL'), ('12', '24', 'CAL'))),
+    'G3J-21': ('9% Cr-1% Mo   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '12', 'XS'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G3J-22': ('9%Cr-1% Mo   (21)', (('3/4', '1-1/2', '160'), ('2', '2', '80'), ('3', '10', '40'), ('12', '24', 'CAL'), ('12', '24', 'CAL'))),
+    'G3K-1': ('Type 304', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3K-10': ('Type 304 (76)', (('3/4', '1-1/2', '80S'), ('2', '4', '40S'), ('6', '8', '40S'))),
+    'G3K-3': ('Type 304L', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3K-4': ('Type 304', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3K-40': ('Type 304', (('1', '1-1/2', '80S'), ('2', '16', '40S'))),
+    'G3K-5': ('Type 304', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3K-6': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '10', '40S'), ('12', '12', 'Std'), ('12', '12', 'Std'), ('14', '24', 'CAL'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G3K-7': ('Type 304H', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '10', '40S'), ('12', '16', 'CAL'), ('12', '16', 'CAL'), ('12', '16', 'CAL'))),
+    'G3K-8': ('Type 304H', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '10', '40S'), ('12', '16', 'CAL'), ('12', '16', 'CAL'), ('12', '16', 'CAL'))),
+    'G3L-1': ('Type 316', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3L-3': ('Type 316L', (('3/4', '1-1/2', '80S'), ('2', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3L-50': ('Type 316 - Lokring\uf8ea (#1)', ()),
+    'G3L-7': ('Type 316H', (('3/4', '1-1/2', '80S'), ('3/4', '6', '40S'), ('8', '16', 'CAL'), ('8', '16', 'CAL'), ('8', '16', 'CAL'))),
+    'G3L-8': ('Type 316H', (('3/4', '1-1/2', '80S'), ('3/4', '6', '40S'), ('8', '16', 'CAL'), ('8', '16', 'CAL'), ('8', '16', 'CAL'))),
+    'G3M-1': ('Type 317L', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '6', '40S'), ('3', '6', '40S'), ('8', '24', '-'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3M-2': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '80S'), ('3/4', '1-1/2', '40S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '24', '-'), ('8', '24', '-'))),
+    'G3M-3': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '80S'), ('3/4', '1-1/2', '40S'), ('2', '6', '40S'), ('2', '6', '40S'), ('8', '24', '-'), ('8', '24', '-'))),
+    'G3N-1': ('Type 321', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3N-6': ('Type 347', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3N-7': ('Type 347', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3P-1': ('Alloy 400 (UNS N04400)', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '12', 'CAL'), ('8', '12', 'CAL'))),
+    'G3P-2': ('Alloy 400 (UNS N04400)', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '12', 'CAL'), ('8', '12', 'CAL'))),
+    'G3P-40': ('Alloy 400 (UNS N04400)', (('1', '2', '80S'), ('3', '16', '40S'))),
+    'G3P-45': ('Alloy 400 (UNS N04400)', (('1', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3P-46': ('Alloy 400 (UNS N04400)', (('1', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G3P-47': ('Alloy 400 (UNS N04400) (21)', (('1', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', '-'))),
+    'G3Q-10': ('Alloy C-276 (UNS N10276)', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '3', '40S'), ('3', '3', '40S'), ('4', '12', 'CAL'), ('4', '8', 'CAL'))),
+    'G3Q-11': ('Alloy C-276 (UNS N10276)', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '3', '40S'), ('3', '3', '40S'), ('4', '12', 'CAL'), ('4', '8', 'CAL'))),
+    'G3Q-40': ('Alloy 600 (UNS N06600)', (('1', '2', '80S'), ('3', '16', '40S'))),
+    'G3R-2': ('Alloy 825 (UNS N08825)', (('3/4', '1-1/2', '80S'), ('2', '8', '40S'), ('10', '18', 'CAL'))),
+    'G6A-1': ('Carbon Steel', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'))),
+    'G6A-15': ('Carbon Steel', (('3/4', '2', 'XXS'), ('3', '4', '160'), ('6', '6', '120'), ('8', '24', 'CAL'))),
+    'G6A-17': ('Carbon Steel (21)', (('3/4', '2', 'XXS'), ('3', '4', '160'), ('6', '6', '120'), ('8', '24', 'CAL'))),
+    'G6A-21': ('Carbon Steel', (('3/4', '2', '160'), ('3', '24', '80'))),
+    'G6A-23': ('Carbon Steel', (('3/4', '2', '160'), ('3', '24', '80'))),
+    'G6A-25': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('2', '2', '160'), ('3', '24', '80'))),
+    'G6A-27': ('Carbon Steel  (21)', (('3/4', '1-1/2', 'XXS'), ('2', '2', '160'), ('3', '24', '80'))),
+    'G6A-3': ('Carbon Steel', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'))),
+    'G6A-4': ('Carbon Steel', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', '-'))),
+    'G6A-5': ('Carbon Steel', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'))),
+    'G6A-50': ('Carbon Steel - Lokring\uf8ea (#1)', ()),
+    'G6A-7': ('Carbon Steel  (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'))),
+    'G6B-1': ('0.125" (0.10" min.)', (('3/4', '2', '80S'), ('2', '2', '160'), ('3', '8', '80'), ('10', '24', '-'))),
+    'G6B-21': ('0.125" (0.10" min.)', (('3/4', '1-1/2', '80S'), ('2', '8', '80'), ('10', '24', '-'))),
+    'G6B-3': ('0.125" (0.10" min.)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', '-'))),
+    'G6F-1': ('1 1/4% Cr-1/2% Mo', (('3/4', '2', '160'), ('3', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6F-2': ('1 1/4% Cr-1/2% Mo', (('3/4', '2', '160'), ('3', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6F-21': ('1 1/4% Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('2', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6F-22': ('1 1/4% Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('2', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6G-1': ('2 1/4% Cr-1% Mo', (('3/4', '1', '160'), ('1-1/2', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6G-21': ('2 1/4% Cr-1% Mo', (('3/4', '1-1/2', '160'), ('2', '6', '80'), ('8', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6H-1': ('5% Cr-1/2% Mo    (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6H-2': ('5% Cr-1/2% Mo    (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6H-21': ('5% Cr-1/2% Mo    (21)', (('3/4', '1-1/2', '160'), ('2', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6H-22': ('5% Cr-1/2% Mo    (21)', (('3/4', '1-1/2', '160'), ('2', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6J-1': ('9% Cr-1% Mo   (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6J-2': ('9% Cr-1% Mo  (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6J-21': ('9% Cr-1% Mo   (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6J-22': ('9% Cr-1% Mo   (21)', (('3/4', '2', '160'), ('3', '8', '80'), ('10', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G6K-1': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '4', '40S'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G6K-10': ('Type 304 (76)', (('3/4', '1-1/2', '80S'), ('2', '4', '40S'), ('6', '8', 'CAL'), ('6', '8', 'CAL'))),
+    'G6K-3': ('Type 304L', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6K-4': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '4', '40S'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G6K-5': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6L-1': ('Type 316', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '4', '40S'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G6L-3': ('Type 316L', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6L-50': ('Type 316 - Lokring\uf8ea (#1)', ()),
+    'G6M-3': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '80S'), ('3/4', '1-1/2', '40S'), ('2', '4', '40S'), ('2', '4', '40S'), ('6', '24', '-'), ('6', '24', '-'))),
+    'G6N-1': ('Type 321', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6N-6': ('Type 347', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6N-7': ('Type 347', (('3/4', '1-1/2', '80S'), ('3/4', '2', '40S'), ('3', '6', '40S'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'), ('8', '24', 'CAL'))),
+    'G6P-1': ('Alloy 400 (UNS N04400)', (('3/4', '2', '80S'), ('3', '6', '40S'), ('8', '12', 'CAL'), ('8', '12', 'CAL'))),
+    'G6P-40': ('Alloy 400 (UNS N04400)', (('1', '2', '80S'), ('3', '6', '40S'), ('8', '16', 'CAL'))),
+    'G6R-2': ('Alloy 825 (UNS N08825)', (('3/4', '1-1/2', '160'), ('3/4', '2', '40S'), ('3', '4', '40S'), ('6', '8', 'CAL'), ('10', '18', 'CAL'))),
+    'G9A-1': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '4', '80'), ('6', '24', 'CAL'))),
+    'G9A-11': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('3/4', '2', '160'), ('3', '3', '160'), ('4', '6', '120'), ('8', '24', 'CAL'))),
+    'G9A-15': ('Carbon Steel', (('1', '4', 'XXS'), ('6', '6', '160'), ('8', '24', 'CAL'))),
+    'G9A-3': ('Carbon Steel', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('2', '4', '80'), ('6', '24', 'CAL'))),
+    'G9A-4': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('3/4', '2', '160'), ('3', '3', '160'), ('4', '6', '120'), ('8', '24', '-'))),
+    'G9A-5': ('Carbon Steel', (('3/4', '1-1/2', 'XXS'), ('3/4', '2', '160'), ('3', '3', '160'), ('4', '6', '120'), ('8', '24', 'CAL'))),
+    'G9A-7': ('Carbon Steel  (21)', (('3/4', '1-1/2', 'XXS'), ('3/4', '2', '160'), ('3', '3', '160'), ('4', '6', '120'), ('8', '24', 'CAL'))),
+    'G9B-1': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('2', '4', '80'), ('6', '24', '-'))),
+    'G9F-1': ('1 1/4% Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '3', '80'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9F-2': ('1 1/4% Cr-1/2% Mo', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '4', '80'), ('6', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9G-2': ('2 1/4% Cr-1% Mo (73)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '4', '80'), ('6', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9G-3': ('2 1/4% Cr-1% Mo', (('1/2', '4', '80'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('14', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9H-1': ('5% Cr-1/2% Mo  (21)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '3', '80'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9H-2': ('5% Cr-1/2% Mo    (21)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '3', '80'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9J-1': ('9% Cr-1% Mo   (21)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '3', '80'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9J-2': ('9% Cr-1% Mo (21)', (('3/4', '1-1/2', '160'), ('3/4', '2', '80'), ('3', '3', '80'), ('4', '24', 'CAL'), ('14', '24', 'CAL'))),
+    'G9K-1': ('Type 304', (('3/4', '1-1/2', '160'),)),
+    'G9K-2': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '4', '80S'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G9K-3': ('Type 304L', ()),
+    'G9K-4': ('Type 304', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '3', '80S'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G9K-40': ('Type 304', (('3/4', '2', '80S'), ('3', '4', '80S'), ('6', '12', 'CAL'))),
+    'G9L-2': ('Type 316', (('1/2', '2', '80S'), ('3', '3', '40S'), ('4', '4', '80S'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'), ('6', '24', 'CAL'))),
+    'G9M-3': ('0.063" (0.05" min.)', (('3/4', '1-1/2', '160'), ('3/4', '1-1/2', '40S'), ('2', '2', '80S'), ('3', '3', '40S'), ('4', '24', '-'), ('4', '24', '-'))),
+    'G9N-1': ('Type 321', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '3', '40S'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G9N-2': ('Type 321', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '3', '40S'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G9N-6': ('Type 347', (('3/4', '1-1/2', '160'), ('3/4', '2', '80S'), ('3', '3', '40S'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'), ('4', '24', 'CAL'))),
+    'G9R-2': ('Alloy 825 (UNS N08825)', (('3/4', '1-1/2', '160'), ('3/4', '1', '80S'), ('1-1/2', '4', '80S'), ('6', '8', 'CAL'), ('10', '12', 'CAL'))),
+}
+
+
+class _PmsRule:
+    __slots__ = ("nps_low", "nps_high", "schedule", "min_schedule")
+
+    def __init__(self, nps_low, nps_high, schedule, min_schedule="STD"):
+        self.nps_low, self.nps_high = nps_low, nps_high
+        self.schedule, self.min_schedule = schedule, min_schedule
+
+
+class _PmsClass:
+    __slots__ = ("name", "moc", "pipe_rules")
+
+    def __init__(self, name, moc, rules):
+        self.name, self.moc = name, moc
+        self.pipe_rules = tuple(_PmsRule(*r) for r in rules)
+
+
+_CLASS_BY_NAME = {k.upper(): _PmsClass(k, v[0], v[1]) for k, v in PMS_CLASSES.items()}
 
 # Map a numeric bore to the canonical NPS string used by asme_data.
 _NPS_BY_FLOAT = {
@@ -423,7 +967,8 @@ def resolve_id(spec: str | None, bore) -> IDResult:
     sched_ov = None
     if "/" in spec_raw:
         spec_raw, _ov = spec_raw.split("/", 1)
-        sched_ov = _ov.strip().upper().replace("SCH", "").replace(".", "").strip() or None
+        _o = _ov.strip().upper().replace("SCH", "").strip()
+        sched_ov = (_o if re.fullmatch(r"\d*\.\d+", _o) else _o.replace(".", "")) or None
         spec = spec_raw.strip()
     cls = _CLASS_BY_NAME.get((spec or "").upper())
     sched = None
@@ -442,6 +987,18 @@ def resolve_id(spec: str | None, bore) -> IDResult:
     if sched is None:
         sched = "STD"
         basis += " (spec n/a -> STD)"
+    wall_given = None
+    try:                                   # a number = wall thickness in inches
+        w_ = float(str(sched).replace("IN", "").strip())
+        if 0.01 < w_ < 3.0:
+            wall_given = w_
+    except ValueError:
+        pass
+    if wall_given is not None:
+        if od - 2 * wall_given <= 0:
+            return IDResult(None, od, wall_given, f"{wall_given:g}\"", nps, basis + " (wall > OD/2)")
+        return IDResult(round(od - 2 * wall_given, 4), od, wall_given, f"t={wall_given:g}\"", nps,
+                        basis + f" wall {wall_given:g}\" (thickness)")
     wall = A.wall_for(nps, str(sched).upper())
     if wall is None:
         wall = A.wall_for(nps, "STD")
@@ -460,10 +1017,228 @@ try:
     import hmbbuilder as HMBPROII          # optional — PRO/II case-sheet exports
 except ImportError:                        # pragma: no cover
     HMBPROII = None
-try:
-    import stream_map as SMAP              # optional — line→stream mapping
-except ImportError:                        # pragma: no cover
-    SMAP = None
+
+# ════════════════════════════════════════════════════════════════════════
+#  STREAM MAP  — actual (plant) stream number  →  Simulation Stream Number in the HMB
+# ════════════════════════════════════════════════════════════════════════
+# No-ISO input : type the ACTUAL stream number in 'Stream Lookup'; the 'Stream_Map' sheet of the
+#                input workbook (Stream Number | Simulation Stream Number) translates it to the
+#                stream name used in the HMB.  A stream not listed is looked up by its own name.
+# ISO / PCF    : stream_map.xlsx (next to this file) keys the line (Fluid Code + Sequence No +
+#                Material Class) to the same two stream numbers.
+# Both files are write-once templates — never overwritten.
+import types as _types
+
+_SM_FILENAME = "stream_map.xlsx"
+_SM_SHEET = "STREAM_MAP"
+_SM_HEADERS = ["Fluid Code", "Sequence No", "Material Class", "Stream Number", "Simulation Stream Number"]
+STREAM_MAP_INPUT_SHEET = "Stream_Map"
+
+
+@dataclass(frozen=True)
+class _SmRow:
+    fluid_code: str
+    seq_no: str
+    material_class: str
+    stream_number: str          # plant / actual name
+    sim_stream_number: str      # id present in the HMB (may be "")
+
+    @property
+    def lookup_key(self) -> str:
+        """Preferred key into the HMB."""
+        return self.sim_stream_number or self.stream_number
+
+
+class StreamMapError(RuntimeError):
+    """Raised when a line cannot be resolved (map-only, no interactive fallback)."""
+
+
+def _sm_norm(v) -> str:
+    return re.sub(r"\s+", " ", str(v).strip()).upper() if v is not None else ""
+
+
+def _sm_norm_seq(v) -> str:
+    s = "" if v is None else str(v).strip()
+    if not s:
+        return ""
+    m = re.match(r"^0*(\d+)(?:\.0+)?$", s)
+    return m.group(1) if m else s.upper()
+
+
+def _sm_parse_line_no(line_no: str) -> tuple[str, str]:
+    """'ER-162' -> ('ER','162').  Tolerates 'ER 162', 'ER162', 'ER-162-H12'."""
+    s = str(line_no).strip()
+    m = re.match(r"^\s*([A-Za-z]+)[\s\-_]*0*(\d+)", s)
+    if m:
+        return m.group(1).upper(), m.group(2)
+    parts = re.split(r"[\s\-_]+", s, maxsplit=1)
+    return (parts[0].upper(), parts[1] if len(parts) > 1 else "")
+
+
+def _sm_default_path(base_dir=None) -> Path:
+    return (Path(base_dir) if base_dir else Path(__file__).resolve().parent) / _SM_FILENAME
+
+
+def _sm_ensure_template(path=None) -> Path:
+    """Create the write-once stream_map.xlsx template if absent."""
+    p = Path(path) if path else _sm_default_path()
+    if p.exists():
+        return p
+    wb = Workbook()
+    ws = wb.active
+    ws.title = _SM_SHEET
+    ws.sheet_view.showGridLines = False
+    for ci, (h, w) in enumerate(zip(_SM_HEADERS, [14, 13, 16, 22, 24]), start=1):
+        ws.column_dimensions[get_column_letter(ci)].width = w
+        c = ws.cell(row=1, column=ci, value=h)
+        c.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4973")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 28
+    for ci, v in enumerate(["ER", "162", "G1A-5", "T-801 OH", "T801-OH"], start=1):
+        c = ws.cell(row=2, column=ci, value=v)
+        c.font = Font(name="Calibri", size=10, italic=True, color="A6A6A6")
+        c.fill = PatternFill("solid", fgColor="FFF2CC")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.cell(row=4, column=1, value="↑ example row — edit or delete, then add your own.  Leave 'Simulation "
+            "Stream Number' blank if the plant stream is not in the HMB.").font = Font(
+        name="Calibri", size=9, italic=True, color="A6A6A6")
+    ws.freeze_panes = "A2"
+    wb.save(p)
+    return p
+
+
+def _sm_load_map(path=None) -> list:
+    p = Path(path) if path else _sm_default_path()
+    if not p.exists():
+        return []
+    wb = load_workbook(p, read_only=True, data_only=True)
+    try:
+        ws = wb[_SM_SHEET] if _SM_SHEET in wb.sheetnames else wb.worksheets[0]
+        rows = []
+        for r in ws.iter_rows(min_row=2, values_only=True):
+            if r is None:
+                continue
+            fc, seq, mc, sn, sim = (list(r) + [None] * 5)[:5]
+            if not (fc and seq and mc):
+                continue
+            rows.append(_SmRow(str(fc).strip(), str(seq).strip(), str(mc).strip(),
+                               str(sn).strip() if sn else "", str(sim).strip() if sim else ""))
+    finally:
+        wb.close()
+    return rows
+
+
+def _sm_resolve(fluid_code, seq_no, material_class, path=None):
+    fc, sq, mc = _sm_norm(fluid_code), _sm_norm_seq(seq_no), _sm_norm(material_class)
+    for row in _sm_load_map(path):
+        if (_sm_norm(row.fluid_code) == fc and _sm_norm_seq(row.seq_no) == sq
+                and _sm_norm(row.material_class) == mc):
+            return row
+    return None
+
+
+def _sm_resolve_from_line(line_no, material_class, path=None):
+    fc, seq = _sm_parse_line_no(line_no)
+    return _sm_resolve(fc, seq, material_class, path)
+
+
+def _sm_require(line_no, material_class, path=None):
+    """Resolve or raise with an actionable message."""
+    p = Path(path) if path else _sm_default_path()
+    if not p.exists():
+        _sm_ensure_template(p)
+        raise StreamMapError(f"stream_map not found — created template at {p}. "
+                             f"Fill in the row for {line_no} / {material_class} and re-run.")
+    row = _sm_resolve_from_line(line_no, material_class, p)
+    if row is None:
+        fc, seq = _sm_parse_line_no(line_no)
+        raise StreamMapError(f"No stream_map entry for Fluid Code='{fc}', Sequence No='{seq}', "
+                             f"Material Class='{material_class}' in {p}. Add a row and re-run.")
+    if not row.lookup_key:
+        raise StreamMapError(f"stream_map row for {line_no}/{material_class} has neither a "
+                             f"Stream Number nor a Simulation Stream Number.")
+    return row
+
+
+SMAP = _types.SimpleNamespace(
+    MapRow=_SmRow, StreamMapError=StreamMapError, ensure_template=_sm_ensure_template,
+    load_map=_sm_load_map, resolve=_sm_resolve, resolve_from_line=_sm_resolve_from_line,
+    require=_sm_require, default_path=_sm_default_path, parse_line_no=_sm_parse_line_no)
+
+
+def _read_stream_map_sheet(input_path) -> dict:
+    """'Stream_Map' sheet of the input workbook → {NORM(actual stream number): simulation stream}."""
+    out: dict = {}
+    try:
+        wb = load_workbook(input_path, read_only=True, data_only=True)
+    except Exception:
+        return out
+    try:
+        if STREAM_MAP_INPUT_SHEET not in wb.sheetnames:
+            return out
+        for r in wb[STREAM_MAP_INPUT_SHEET].iter_rows(min_row=3, values_only=True):
+            if not r or r[0] is None or not str(r[0]).strip():
+                continue
+            sim = str(r[1]).strip() if len(r) > 1 and r[1] is not None else ""
+            if sim:
+                out[_sm_norm(r[0])] = sim
+    finally:
+        wb.close()
+    return out
+
+
+def _stream_alias(input_path, map_path=None) -> dict:
+    """{NORM(actual stream number): simulation stream} from the input workbook's Stream_Map sheet,
+    then (lower priority) the legacy stream_map.xlsx rows."""
+    out: dict = {}
+    try:
+        for row in _sm_load_map(map_path):
+            if row.stream_number and row.sim_stream_number:
+                out[_sm_norm(row.stream_number)] = row.sim_stream_number
+    except Exception:
+        pass
+    out.update(_read_stream_map_sheet(input_path))
+    return out
+
+
+_ALIAS_NOTED: set = set()
+
+
+def _alias_stream(name, alias):
+    """Simulation stream name for an actual stream number (unchanged when not mapped)."""
+    if not name or not alias:
+        return name
+    sim = alias.get(_sm_norm(name))
+    if sim and sim != name:
+        if name not in _ALIAS_NOTED:
+            _ALIAS_NOTED.add(name)
+            print(f"  stream map: '{name}'  ->  simulation stream '{sim}'")
+        return sim
+    return name
+
+
+def _build_stream_map_sheet(wb) -> None:
+    ws = wb.create_sheet(STREAM_MAP_INPUT_SHEET)
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells("A1:C1")
+    _c(ws, 1, 1,
+       "STREAM MAP — actual (plant) stream number → Simulation Stream Number in the HMB.  "
+       "Type the ACTUAL stream number in 'Stream Lookup' on Pipeline_Input; it is translated here.  "
+       "A stream not listed is looked up by its own name.",
+       bg=NAVY, fg=WHITE, sz=10, bold=True, wrap=True)
+    ws.row_dimensions[1].height = 42
+    _hdr(ws, ["Stream Number (actual)", "Simulation Stream Number", "Description"], row=2)
+    ex = [("T-801 OH", "T801-OH", "example — T-801 overhead"), ("D-703 CV OUT", "D703-CV-OUT", "example")]
+    for i, rowv in enumerate(ex):
+        for c, v in enumerate(rowv, 1):
+            _c(ws, 3 + i, c, v, bg=AMBER, sz=9, italic=True, fg="808080")
+    for r in range(5, 60):
+        for c in range(1, 4):
+            _c(ws, r, c, None, bg=AMBER, sz=9)
+    for c, w in enumerate([26, 28, 40], 1):
+        cw(ws, c, w)
+    ws.freeze_panes = "A3"
 
 SKIP_SHEETS = {"UNITS", "COMPONENTS", "INPUT", "OUTPUT", "Summary",
                "Component Index", "Legend", "CASES", "README"}
@@ -3007,6 +3782,7 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
     # ── Stream_Composition sheet (manual mass/mole composition, no HMB) ──
     _build_composition_input_sheet(wb, usys)
     _build_pseudo_input_sheet(wb, usys)
+    _build_stream_map_sheet(wb)
     _build_instrument_data_sheet(wb)
 
     # ── Notes sheet ──────────────────────────────────────────────────
@@ -3078,6 +3854,10 @@ def create_input_template(out_path: str = "pipeline_input_noiso.xlsx",
         ("", False),
         ("FIX PRESSURE  (Fitting = 'Fix Pressure')", True),
         ("  Enter dP (psi) in Fixed dP.  All hydraulics skipped; dP subtracted directly.", False),
+        ("", False),
+        ("STREAM MAP  (Stream Lookup)", True),
+        ("  Type the ACTUAL stream number in Stream Lookup; the 'Stream_Map' sheet translates it to the", False),
+        ("  Simulation Stream Number used in the HMB.  A stream that is not listed is looked up by its own name.", False),
         ("", False),
         ("INSTRUMENTS  (Instr Type = PT / TT / FT / FO / RO)", True),
         ("  PT / TT: pressure / temperature transmitter taps — no pressure drop; listed on 'Inline Instruments'.", False),
@@ -8542,7 +9322,7 @@ def _build_input_sheet(
 # ════════════════════════════════════════════════════════════════════════
 #  Orchestration — one workbook per CIRCUIT
 # ════════════════════════════════════════════════════════════════════════
-def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
+def _make_stream_resolver(default_hmb: str, default_case: str, map_path, alias: dict | None = None):
     """Return a memoised ``resolver(row) -> (StreamProps|None, feed|None)``.
 
     Resolution order per row:
@@ -8564,12 +9344,16 @@ def _make_stream_resolver(default_hmb: str, default_case: str, map_path):
         if key in cache:
             return cache[key]
 
-        sp = HE.load_stream_props(hmb, stream, case)
+        sim = _alias_stream(stream, alias)
+        sp = HE.load_stream_props(hmb, sim, case)
+        if sp is None and sim != stream:              # not in the HMB under the mapped name → try as typed
+            sim = stream
+            sp = HE.load_stream_props(hmb, sim, case)
         feed = None
         if sp is not None:
             try:
                 is_case = HE.is_proii_export(hmb)
-                feed = FV.read_feed(hmb, stream, case, sp, is_casesheet=is_case)
+                feed = FV.read_feed(hmb, sim, case, sp, is_casesheet=is_case)
             except Exception as exc:
                 print(f"  (feed load failed for {stream}@{case}: {exc})")
         cache[key] = (sp, feed)
@@ -8613,6 +9397,7 @@ def run_noiso(
                          "Run with --template to create the blank workbook.")
 
     circuits = _group_circuits(all_rows)
+    alias = _stream_alias(input_path, map_path)
     target_ids = [circuit_id] if circuit_id else list(circuits.keys())
     results = []
 
@@ -8622,14 +9407,14 @@ def run_noiso(
             continue
 
         c   = circuits[cid]
-        sk  = stream_name or c["stream_lookup"]
+        sk  = _alias_stream(stream_name or c["stream_lookup"], alias)
         p0  = c["start_p"]
         lns = c["line_order"]
 
         # ── Per-row stream resolver (HMB File / Case / manual) ────────────
         def_hmb  = c["hmb_file"] or hmb_path
         def_case = c["case"] or case
-        resolver = _make_stream_resolver(def_hmb, def_case, map_path)
+        resolver = _make_stream_resolver(def_hmb, def_case, map_path, alias)
         # HMB COMP_CONSTANTS (MW/Tc/Pc/ω) — only needed for Stream_Composition
         try:
             cmap = FV._read_comp_constants(def_hmb)
