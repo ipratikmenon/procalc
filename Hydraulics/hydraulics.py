@@ -6,7 +6,7 @@ hydraulics_engine_flash_noiso.py + flash_vle.py + flow_pattern_data.py +
 flow_pattern_maps.py  into ONE engine.  Companion modules:
 
   pms_classes.py        — piping spec / schedule data  (PROJECT-SPECIFIC)
-  comp_constants.py     — component property constants (project data)
+  hmbbuilder.py         — PRO/II dump → HMB workbook (also the optional HMB reader)
   ../common/units.py    — FPS/SI units layer (UNITS sheet in the input workbook)
 
 Manual (no-HMB) streams may carry a mass/mole composition via the
@@ -457,7 +457,7 @@ def resolve_id(spec: str | None, bore) -> IDResult:
 from openpyxl import load_workbook
 
 try:
-    import hmb_proii_reader as HMBPROII   # optional — PRO/II case-sheet exports
+    import hmbbuilder as HMBPROII          # optional — PRO/II case-sheet exports
 except ImportError:                        # pragma: no cover
     HMBPROII = None
 try:
@@ -8982,8 +8982,44 @@ _TW_MATERIALS = {
     "SS316L": (28.3e6, -5660.0, 0.290), "CS":    (29.5e6, -4500.0, 0.284),
     "C276":   (29.8e6, -5000.0, 0.321), "MONEL": (26.0e6, -4000.0, 0.319),
     "DUPLEX": (29.0e6, -5200.0, 0.280), "INC625": (30.1e6, -5300.0, 0.305),
-    "1.25CR": (30.0e6, -4800.0, 0.284),
+    "1.25CR": (30.0e6, -4800.0, 0.284), "2.25CR": (30.0e6, -4800.0, 0.284),
+    "5CR":    (30.0e6, -4800.0, 0.280), "9CR":    (30.0e6, -4800.0, 0.280),
+    "ALLOY825": (28.3e6, -5000.0, 0.294), "ALLOY600": (31.0e6, -5000.0, 0.304),
+    "ALLOY20": (28.0e6, -5000.0, 0.292),
 }
+
+# Thermowell defaults PER PIPING CLASS.  Key = piping class (the part of 'Piping Spec' before
+# the '/', e.g. 'G9A-3').  Any of: tw_root, tw_tip, tw_bore, tw_u (all inches), tw_mat (a key of
+# _TW_MATERIALS).  Edit this table for the project; a tag typed in 'Instrument_Data' still wins.
+# When a class is not listed, the thermowell MATERIAL follows the class's MOC (see _TW_MOC_RULES)
+# and the stem geometry falls back to the generic screening default.
+THERMOWELL_BY_CLASS: dict[str, dict] = {
+    # "G9A-3": {"tw_root": 1.0, "tw_tip": 0.75, "tw_bore": 0.26, "tw_u": 6.0, "tw_mat": "SS316"},
+}
+_TW_MOC_RULES = [          # (text found in the class MOC, upper-case) → thermowell material
+    ("C-276", "C276"), ("ALLOY 400", "MONEL"), ("ALLOY 825", "ALLOY825"),
+    ("ALLOY 600", "ALLOY600"), ("ALLOY 20", "ALLOY20"), ("DUPLEX", "DUPLEX"), ("2205", "DUPLEX"),
+    ("316", "SS316"), ("304", "SS304"), ("321", "SS304"), ("347", "SS304"), ("317", "SS316"),
+    ("9% CR", "9CR"), ("5% CR", "5CR"), ("2 1/4% CR", "2.25CR"), ("1 1/4% CR", "1.25CR"),
+    ("1 1/4%CR", "1.25CR"), ("CARBON STEEL", "CS"),
+]
+
+
+def _tw_class_data(spec) -> dict:
+    """Thermowell defaults for a piping spec: THERMOWELL_BY_CLASS entry, else MOC-derived material."""
+    cls = (spec or "").split("/")[0].strip().upper()
+    d = dict(THERMOWELL_BY_CLASS.get(cls, {}))
+    if d:
+        d["_src"] = f"THERMOWELL_BY_CLASS[{cls}]"
+    if "tw_mat" not in d:
+        pc = _CLASS_BY_NAME.get(cls)
+        moc = (getattr(pc, "moc", "") or "").upper() if pc else ""
+        for txt_, mat in _TW_MOC_RULES:
+            if txt_ in moc:
+                d["tw_mat"] = mat
+                d["_mat_src"] = f"piping class {cls} MOC '{pc.moc}'"
+                break
+    return d
 
 
 def _read_instrument_data(path) -> dict:
@@ -9208,6 +9244,13 @@ def _tw_wake(st, info: dict, data: dict) -> dict:
     fs = _flow_state(st)
     id_in = st.id_in or 0.0
     out = dict(flags=[])
+    cls_d = _tw_class_data(st.spec)
+    user = {k: v for k, v in (data or {}).items() if v is not None}
+    data = {**{k: v for k, v in cls_d.items() if not k.startswith("_")}, **user}
+    if cls_d.get("_src"):
+        out["flags"].append(f"class defaults from {cls_d['_src']}")
+    if "tw_mat" not in user and cls_d.get("_mat_src") and "tw_mat" in cls_d and not cls_d.get("_src"):
+        out["flags"].append(f"material from {cls_d['_mat_src']}")
     mat = (data.get("tw_mat") or "SS316").upper()
     if mat not in _TW_MATERIALS:
         mat = "SS316"
@@ -10501,8 +10544,8 @@ def _read_comp_constants_hmb(hmb_path) -> dict:
     """Read the COMP_CONSTANTS sheet embedded in the HMB (if present) →
     {NAME_UPPER: {'tc_f','pc_psia','omega','mw'}}.  Cached per file.
 
-    Falls back to comp_constants.load + Constants.xlsx auto-locate if the sheet
-    is absent.  Returns {} if nothing is available (flash stays isothermal-y/x).
+    If the sheet is absent the built-in pure library + embedded PR databank still
+    resolve the common components (build the HMB with hmbbuilder.py to get the rest).
     """
     key = str(hmb_path)
     if key in _CONST_CACHE:
@@ -10541,29 +10584,6 @@ def _read_comp_constants_hmb(hmb_path) -> dict:
         wb.close()
     except Exception:
         pass
-
-    # 2) fallback: comp_constants + Constants.xlsx
-    if not out:
-        try:
-            import comp_constants as _CC
-            from pathlib import Path
-            near = Path(key).resolve().parent
-            cpath = None
-            for d in (near, Path.cwd()):
-                hits = sorted(d.glob("Constants*.xlsx")) + sorted(d.glob("*onstants*.xlsx"))
-                if hits:
-                    cpath = hits[0]; break
-            if cpath is not None:
-                for c in _CC.read_constants(str(cpath)):
-                    out[c["name"].upper()] = {
-                        "name":    c["name"],
-                        "mw":      c.get("MW"),
-                        "tc_f":    c.get("Tc_F"),
-                        "pc_psia": c.get("Pc_psia"),
-                        "omega":   c.get("omega"),
-                    }
-        except Exception:
-            pass
 
     for k, v in _pure_library().items():      # fallback: HMB entries win
         out.setdefault(k, v)
