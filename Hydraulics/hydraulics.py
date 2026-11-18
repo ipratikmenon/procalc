@@ -7787,6 +7787,40 @@ def _apply_property_overrides(sp, fr, overrides: dict, feed_mode: bool = False):
     return sp, fr
 
 
+def _fill_vapor_props(sp, fr, feed, cmap, p_psia):
+    """A liquid HMB stream carries no vapour properties, so vapour created by flashing has no μ, Z or
+    Cp/Cv — friction would silently vanish (Re = 0).  Fill the missing ones for THIS station only:
+    first from the component correlations (needs complete constants), else a flagged generic
+    dilute-hydrocarbon-gas fallback.  Returns (sp, note)."""
+    miss = [a for a in ("vap_visc", "vap_z", "vap_cp_cv") if getattr(sp, a, None) is None]
+    if not miss or fr is None or (fr.vap_mass or 0) <= 0:
+        return sp, ""
+    upd, how = {}, ""
+    T = fr.temp_f if fr.temp_f is not None else sp.temp_f
+    names = list(getattr(feed, "names", None) or [])
+    if feed is not None and names and fr.y and fr.x is not None and T is not None:
+        try:
+            est = _est_props(cmap or {}, names, fr.y, fr.x, fr.vap_moles, fr.liq_moles, T, p_psia)
+            for a, k in (("vap_visc", "visc_vap"), ("vap_z", "z_vap"), ("vap_cp_cv", "cpcv_vap")):
+                if a in miss and est.get(k) is not None:
+                    upd[a] = est[k]
+            if upd:
+                how = "component correlations"
+        except Exception:
+            pass
+    left = [a for a in miss if a not in upd]
+    if left and T is not None:
+        mw = fr.vap_mw or sp.vap_mw or sp.mol_weight or 30.0
+        fb = {"vap_visc": 0.0111 * (mw / 16.0) ** -0.3 * (((T + 459.67) / 1.8) / 300.0) ** 0.8,
+              "vap_z": 1.0, "vap_cp_cv": 1.1}
+        for a in left:
+            upd[a] = fb[a]
+        how = (how + " + " if how else "") + "generic gas fallback"
+    if not upd:
+        return sp, ""
+    return replace(sp, **upd), f" | vapour {', '.join(sorted(upd))} not in HMB → {how}"
+
+
 def build_profile_flash_noiso(
         block_rows: list[dict],
         resolver,
@@ -8219,6 +8253,10 @@ def build_profile_flash_noiso(
                 "vap_cf": pending_split_scale * vap_cf,
                 "liq_cf": pending_split_scale * liq_cf,
             }
+        if (fr is not None and sp is not None and (fr.vap_mass or 0) > 0
+                and (sp.vap_visc is None or sp.vap_z is None or sp.vap_cp_cv is None)):
+            sp, _fill_note = _fill_vapor_props(sp, fr, a_feed, const_map, p_eval)
+            scale_tag += _fill_note
         if override_state:
             sp, fr = _apply_property_overrides(sp, fr, override_state,
                                                 feed_mode=(a_feed is not None))
