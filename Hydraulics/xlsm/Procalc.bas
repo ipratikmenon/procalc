@@ -44,6 +44,7 @@ Private hnames() As String, nH As Long
 Private kNames As Variant, kVals As Variant, nK As Long
 Private odNps As Variant, odNum As Variant, odVal As Variant, nOD As Long
 Private pwNps As Variant, pwSch As Variant, pwWall As Variant, nPW As Long
+Private pmMoc As Variant, stLine() As String
 Private pmCls As Variant, pmLo As Variant, pmHi As Variant, pmSch As Variant, pmMin As Variant, nPM As Long
 
 '---- output buffer -----------------------------------------------------------
@@ -73,10 +74,11 @@ Public Sub RunHydraulics()
     gMult = Val(Worksheets("Control").Range("C4").Value) / 100#
     useFlash = (UCase$(Trim$(CStr(Worksheets("Control").Range("C7").Value))) <> "OFF")
     ReadConstants
+    ReadInstData
     InitCompSheets
     If gMult <= 0 Then gMult = 1#
     ReDim out(1 To nRow + 10, 1 To 28): nOut = 0
-    ReDim cvOut(1 To nRow + 10, 1 To 14): nCV = 0
+    ReDim cvOut(1 To nRow + 10, 1 To 20): nCV = 0
     InitStations
 
     Dim r As Long, r1 As Long, cid As String, nCirc As Long
@@ -94,6 +96,7 @@ Public Sub RunHydraulics()
     WriteOutputs
     WriteFivAiv
     WriteRegime
+    WriteInstr
     Worksheets("Control").Range("C8").Value = nCirc & " circuit(s), " & nOut & " rows  -  " & _
         Format(Timer - t0, "0.00") & " s  -  " & Format(Now, "yyyy-mm-dd hh:nn:ss")
     Worksheets("Control").Range("C8").Font.Color = RGB(0, 128, 0)
@@ -144,11 +147,11 @@ Private Sub LoadTables()
     For i = 1 To nPW: pwNps(i) = CStr(v(i, 1)): pwSch(i) = UCase$(CStr(v(i, 2))): pwWall(i) = CDbl(v(i, 3)): Next i
     Set ws = Worksheets("Data_PMS")
     lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    v = ws.Range("A2:E" & lr).Value: nPM = lr - 1
-    ReDim pmCls(1 To nPM): ReDim pmLo(1 To nPM): ReDim pmHi(1 To nPM): ReDim pmSch(1 To nPM): ReDim pmMin(1 To nPM)
+    v = ws.Range("A2:F" & lr).Value: nPM = lr - 1
+    ReDim pmMoc(1 To nPM): ReDim pmCls(1 To nPM): ReDim pmLo(1 To nPM): ReDim pmHi(1 To nPM): ReDim pmSch(1 To nPM): ReDim pmMin(1 To nPM)
     For i = 1 To nPM
         pmCls(i) = UCase$(Trim$(CStr(v(i, 1)))): pmLo(i) = CStr(v(i, 2)): pmHi(i) = CStr(v(i, 3))
-        pmSch(i) = UCase$(CStr(v(i, 4))): pmMin(i) = UCase$(CStr(v(i, 5)))
+        pmSch(i) = UCase$(CStr(v(i, 4))): pmMin(i) = UCase$(CStr(v(i, 5))): pmMoc(i) = CStr(v(i, 6))
     Next i
 End Sub
 
@@ -1004,33 +1007,7 @@ End Function
 '==========================================================================
 '  Control-valve datasheet (ISA 75.01 / IEC 60534-2-1, simplified)
 '==========================================================================
-Private Sub RecordCV(ByVal r As Long, ByVal cid As String, ByVal p1 As Double, ByVal dp As Double, ByVal basis As String)
-    Dim wl As Double, wv As Double, q As Double, sg As Double, cvv As Double, rho1 As Double
-    Dim x As Double, fk As Double, y As Double, FL As Double, p2 As Double, tag As String
-    FL = 0.9: p2 = p1 - dp: tag = GetS(r, "Instr Tag"): If tag = "" Then tag = GetS(r, "Comp ID")
-    wl = eLiq: wv = eVap
-    nCV = nCV + 1
-    cvOut(nCV, 1) = cid: cvOut(nCV, 2) = tag: cvOut(nCV, 3) = sStream: cvOut(nCV, 4) = ePhase
-    cvOut(nCV, 5) = p1: cvOut(nCV, 6) = p2: cvOut(nCV, 7) = dp: cvOut(nCV, 8) = wl + wv: cvOut(nCV, 9) = sT
-    If dp <= 0 Then cvOut(nCV, 13) = "dP = 0: valve fully open / no dP basis": Exit Sub
-    If ePhase = "LIQUID" Then
-        q = wl / (sLrho * 7.48052 * 60#): sg = sLrho / 62.428
-        cvOut(nCV, 10) = q * Sqr(sg / dp): cvOut(nCV, 11) = sg
-        cvOut(nCV, 12) = "gpm = " & Format(q, "0.0")
-        cvOut(nCV, 13) = "Liquid Cv = Q*sqrt(SG/dP); FL=0.9 assumed; check choking (Pv) with fluid data"
-    ElseIf ePhase = "VAPOR" Then
-        rho1 = GasRho(p1) / LBFT3_TO_KGM3
-        fk = IIf(eGam > 0, eGam, 1.3) / 1.4: x = dp / p1
-        If x > fk * 0.7 Then x = fk * 0.7: cvOut(nCV, 13) = "CHOKED (x>Fk*xT, xT=0.7 assumed). "
-        y = 1# - x / (3# * fk * 0.7)
-        cvOut(nCV, 10) = wv / (63.3 * y * Sqr(x * p1 * rho1)): cvOut(nCV, 11) = rho1
-        cvOut(nCV, 12) = "rho1 = " & Format(rho1, "0.000") & " lb/ft3"
-        cvOut(nCV, 13) = cvOut(nCV, 13) & "Gas Cv (ISA 75.01 W-form), Fk=gamma/1.4, xT=0.7 assumed"
-    Else
-        cvOut(nCV, 13) = "Two-phase valve: size per vendor / HEM method (not computed in v1)"
-    End If
-    If IsNumeric(cvOut(nCV, 10)) And Not IsEmpty(cvOut(nCV, 10)) Then cvOut(nCV, 14) = cvOut(nCV, 10) / 0.7
-End Sub
+
 
 '==========================================================================
 '  Output sheets
@@ -1097,6 +1074,8 @@ Private Sub InitStations()
     ReDim stMach(1 To n): ReDim stRv2V(1 To n): ReDim stRv2L(1 To n): ReDim stCum(1 To n): ReDim stPin(1 To n)
     ReDim stDp(1 To n): ReDim stHasMom(1 To n): ReDim stLen(1 To n): ReDim stDz(1 To n): ReDim stSig(1 To n): ReDim stMuL(1 To n)
     ReDim regOut(1 To n, 1 To 19): nReg = 0
+    ReDim stKind(1 To n): ReDim stTag(1 To n): ReDim stSpec(1 To n): ReDim stT(1 To n): ReDim stGm(1 To n): ReDim stLine(1 To n)
+    ReDim instOut(1 To n, 1 To 24): nInst = 0: ReDim twOut(1 To n, 1 To 21): nTw = 0
     ReDim fivOut(1 To n, 1 To 32): nFiv = 0
     ReDim aivOut(1 To n + 20, 1 To 14): nAiv = 0
     stN = 0
@@ -1114,6 +1093,8 @@ Private Sub RecStn(ByVal cid As String, ByVal r As Long, ByVal fit As String, By
     stCum(stN) = cum: stPin(stN) = pIn: stDp(stN) = dPt
     stMg(stN) = eVap: stMl(stN) = eLiq: stMu(stN) = eMuG: stMuL(stN) = eMuL: stSig(stN) = sSig
     stLen(stN) = lenFt: stDz(stN) = dzFt
+    stKind(stN) = InstKindOf(fit, GetS(r, "Instr Type")): stTag(stN) = GetS(r, "Instr Tag"): If stTag(stN) = "" Then stTag(stN) = stComp(stN)
+    stSpec(stN) = GetS(r, "Piping Spec"): stT(stN) = sT: stGm(stN) = eGam: stLine(stN) = GetS(r, "Line No")
     rg = GasRho(pIn) / LBFT3_TO_KGM3: rl = sLrho
     stRg(stN) = rg: stRl(stN) = rl
     stHasMom(stN) = False
@@ -1316,6 +1297,7 @@ NextF:
         aivOut(nAiv, 12) = eiS: aivOut(nAiv, 13) = dyn
     Next i
     RegimeRows cid
+    InstrRows cid
     stN = 0
 End Sub
 Private Function FitLoss(ByVal fit As String) As Double
@@ -1636,6 +1618,400 @@ End Sub
 
 
 '==========================================================================
+'  Instrument_Data, control-valve travel, inline instruments and thermowell wake check
+'==========================================================================
+Private idat As Variant, nID As Long, tcls As Variant, nTC As Long
+Private stKind() As String, stTag() As String, stSpec() As String, stT() As Double, stGm() As Double
+Private instOut() As Variant, nInst As Long, twOut() As Variant, nTw As Long
+
+Private Sub ReadInstData()
+    Dim ws As Worksheet, lr As Long
+    nID = 0: nTC = 0
+    On Error Resume Next
+    Set ws = Worksheets("Instrument_Data")
+    On Error GoTo 0
+    If Not ws Is Nothing Then
+        lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+        If lr >= 3 Then idat = ws.Range("A3:O" & lr).Value: nID = lr - 2
+    End If
+    Set ws = Nothing
+    On Error Resume Next
+    Set ws = Worksheets("Data_TWClass")
+    On Error GoTo 0
+    If Not ws Is Nothing Then
+        lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+        If lr >= 2 Then tcls = ws.Range("A2:F" & lr).Value: nTC = lr - 1
+    End If
+End Sub
+Private Function IDRow(ByVal tag As String) As Long
+    Dim i As Long
+    tag = UCase$(Trim$(tag))
+    If Len(tag) = 0 Then Exit Function
+    For i = 1 To nID
+        If UCase$(Trim$(CStr(idat(i, 1)))) = tag Then IDRow = i: Exit Function
+    Next i
+End Function
+Private Function IDNum(ByVal row As Long, ByVal col As Long) As Double
+    Dim ok As Boolean
+    If row > 0 Then IDNum = NumOf(idat(row, col), ok)
+End Function
+Private Function IDHas(ByVal row As Long, ByVal col As Long) As Boolean
+    Dim ok As Boolean, x As Double
+    If row > 0 Then x = NumOf(idat(row, col), ok): IDHas = ok
+End Function
+
+Private Function ParseCurve(ByVal txt As String, xs() As Double, cs() As Double) As Long
+    Dim parts() As String, i As Long, j As Long, p As Long, n As Long, a As Double, b As Double, tx As Double, tc As Double
+    Dim tok As String
+    ReDim xs(1 To 60): ReDim cs(1 To 60)
+    txt = Replace(txt, vbLf, ";")
+    parts = Split(txt, ";")
+    For i = 0 To UBound(parts)
+        tok = Trim$(parts(i))
+        p = InStr(tok, ":"): If p = 0 Then p = InStr(tok, "=")
+        If p > 1 Then
+            If IsNumeric(Trim$(Left$(tok, p - 1))) And IsNumeric(Trim$(Mid$(tok, p + 1))) And n < 60 Then
+                n = n + 1: xs(n) = Val(Trim$(Left$(tok, p - 1))): cs(n) = Val(Trim$(Mid$(tok, p + 1)))
+            End If
+        End If
+    Next i
+    For i = 1 To n - 1
+        For j = i + 1 To n
+            If xs(j) < xs(i) Then
+                tx = xs(i): xs(i) = xs(j): xs(j) = tx: tc = cs(i): cs(i) = cs(j): cs(j) = tc
+            End If
+        Next j
+    Next i
+    If n >= 2 Then ParseCurve = n
+End Function
+
+' valve travel (%) for the required Cv; returns -1 when no rated Cv / curve
+Private Function CvTravel(ByVal cvReq As Double, ByVal rated As Double, ByVal ch As String, ByVal rng As Double, _
+                          ByVal curve As String, ByRef basis As String, ByRef status As String, ByRef ratedOut As Double) As Double
+    Dim xs() As Double, cs() As Double, n As Long, i As Long, x As Double, ratio As Double
+    CvTravel = -1: basis = "": status = "": ratedOut = rated
+    n = ParseCurve(curve, xs, cs)
+    If n >= 2 Then
+        If rated <= 0 Then ratedOut = cs(n)
+        If cvReq <= cs(1) Then
+            If cs(1) > 0 Then x = xs(1) * cvReq / cs(1) Else x = xs(1)
+        ElseIf cvReq >= cs(n) Then
+            x = xs(n) + (cvReq - cs(n)) / IIf(cs(n) - cs(n - 1) > 0.000000001, cs(n) - cs(n - 1), 0.000000001) * (xs(n) - xs(n - 1))
+        Else
+            x = xs(n)
+            For i = 1 To n - 1
+                If cs(i) <= cvReq And cvReq <= cs(i + 1) Then
+                    If cs(i + 1) > cs(i) Then x = xs(i) + (cvReq - cs(i)) / (cs(i + 1) - cs(i)) * (xs(i + 1) - xs(i)) Else x = xs(i)
+                    Exit For
+                End If
+            Next i
+        End If
+        basis = "measured curve (" & n & " points)"
+    ElseIf rated > 0 Then
+        If Len(ch) = 0 Then ch = "equal %"
+        If rng <= 0 Then rng = 50
+        ratio = cvReq / rated
+        If ratio <= 0 Then
+            x = 0
+        ElseIf LCase$(Left$(ch, 3)) = "lin" Then
+            x = ratio * 100#
+        ElseIf LCase$(Left$(ch, 5)) = "quick" Then
+            x = ratio * ratio * 100#
+        Else
+            If rng > 1 Then x = (1# + Log(ratio) / Log(rng)) * 100# Else x = ratio * 100#
+        End If
+        basis = ch & IIf(LCase$(Left$(ch, 3)) <> "lin" And LCase$(Left$(ch, 5)) <> "quick", ", R = " & rng, "")
+    Else
+        Exit Function
+    End If
+    CvTravel = x
+    If x > 100 Then
+        status = "UNDERSIZED - needs > 100 % travel"
+    ElseIf x > 90 Then
+        status = "Too open (> 90 %)"
+    ElseIf x < 10 Then
+        status = "Too closed (< 10 %)"
+    Else
+        status = "OK (10-90 %)"
+    End If
+End Function
+
+' bubble-point pressure at the line temperature for a liquid-only inlet (0 if none)
+Private Function BubbleP(ByVal p1 As Double) As Double
+    Dim lo As Double, hi As Double, i As Long, mdp As Double
+    If Not flashOn Then Exit Function
+    FlashAt 0.05
+    If eVap <= 0 Then FlashAt IIf(p1 < 0.05, 0.05, p1): Exit Function
+    lo = 0.05: hi = IIf(p1 > 0.05, p1, 0.05)
+    For i = 1 To 24
+        mdp = 0.5 * (lo + hi)
+        FlashAt mdp
+        If eVap > 0 Then lo = mdp Else hi = mdp
+    Next i
+    BubbleP = 0.5 * (lo + hi)
+    FlashAt IIf(p1 < 0.05, 0.05, p1)
+End Function
+
+Private Sub RecordCV(ByVal r As Long, ByVal cid As String, ByVal p1 As Double, ByVal dp As Double, ByVal basis As String)
+    Dim wl As Double, wv As Double, q As Double, sg As Double, rho1 As Double, cvg As Double, cvl As Double
+    Dim x As Double, fk As Double, y As Double, FL As Double, xT As Double, p2 As Double, tag As String, xmax As Double, xe As Double
+    Dim dpe As Double, pv As Double, ff As Double, dpmax As Double, ir As Long, notes As String, chk As String
+    Dim trv As Double, tb As String, ts As String, rated As Double, rOut As Double
+    p2 = p1 - dp: tag = GetS(r, "Instr Tag"): If tag = "" Then tag = GetS(r, "Comp ID")
+    ir = IDRow(tag)
+    FL = 0.9: xT = 0.7
+    If IDHas(ir, 10) Then FL = IDNum(ir, 10)
+    If IDHas(ir, 11) Then xT = IDNum(ir, 11)
+    wl = eLiq: wv = eVap
+    nCV = nCV + 1
+    cvOut(nCV, 1) = cid: cvOut(nCV, 2) = tag: cvOut(nCV, 3) = sStream: cvOut(nCV, 4) = ePhase
+    cvOut(nCV, 5) = p1: cvOut(nCV, 6) = p2: cvOut(nCV, 7) = dp: cvOut(nCV, 8) = wl + wv: cvOut(nCV, 9) = sT
+    cvOut(nCV, 15) = FL: cvOut(nCV, 16) = xT
+    If dp <= 0 Then cvOut(nCV, 13) = "dP = 0: valve fully open / no dP basis": Exit Sub
+    If wv > 0 And p1 > 0 Then
+        rho1 = GasRho(p1) / LBFT3_TO_KGM3
+        fk = IIf(eGam > 0, eGam, 1.3) / 1.4: x = dp / p1: xmax = fk * xT
+        xe = x: If xe > xmax Then xe = xmax: chk = "CHOKED (gas, x >= Fk*xT)"
+        y = 1# - xe / (3# * fk * xT)
+        If xe > 0 And rho1 > 0 Then cvg = wv / (63.3 * y * Sqr(xe * p1 * rho1))
+        cvOut(nCV, 12) = "rho1 = " & Format(rho1, "0.000") & " lb/ft3"
+        cvOut(nCV, 11) = rho1
+    End If
+    If wl > 0 And sLrho > 0 Then
+        q = wl / sLrho * 0.124675: sg = sLrho / 62.428: dpe = dp
+        If wv <= 0 Then
+            pv = BubbleP(p1)
+            If pv > 0 Then
+                ff = 0.96 - 0.28 * Sqr(pv / 3208#)
+                dpmax = FL * FL * (p1 - ff * pv)
+                If dp > dpmax And dpmax > 0 Then dpe = dpmax: chk = "CHOKED (liquid, dP > FL^2 (P1 - FF Pv))"
+                notes = "Pv = " & Format(pv, "0.000") & " psia"
+            End If
+        End If
+        If dpe > 0 Then cvl = q * Sqr(sg / dpe)
+        If wv <= 0 Then cvOut(nCV, 11) = sg
+        cvOut(nCV, 12) = cvOut(nCV, 12) & IIf(Len(cvOut(nCV, 12)) > 0, "; ", "") & "gpm = " & Format(q, "0.0")
+    End If
+    cvOut(nCV, 10) = cvg + cvl
+    notes = notes & IIf(Len(notes) > 0, "; ", "") & "ISA 75.01 / IEC 60534-2-1 screening" & IIf(wv > 0 And wl > 0, "; two-phase inlet: vapour part + liquid part (additive) - vendor to confirm", "")
+    cvOut(nCV, 13) = notes: cvOut(nCV, 20) = chk
+    If cvg + cvl > 0 Then cvOut(nCV, 14) = (cvg + cvl) / 0.7
+    rated = IDNum(ir, 9)
+    If ir > 0 Then
+        trv = CvTravel(cvg + cvl, rated, CStr(idat(ir, 12)), IDNum(ir, 13), CStr(idat(ir, 14)), tb, ts, rOut)
+        If trv >= 0 Then
+            cvOut(nCV, 17) = rOut: cvOut(nCV, 18) = trv: cvOut(nCV, 19) = ts & " [" & tb & "]"
+        End If
+    End If
+End Sub
+
+'---- thermowell materials: E70 (psi), dE/dT (psi/F), density (lb/in3) -------
+Private Sub TwMat(ByVal m As String, ByRef e0 As Double, ByRef de As Double, ByRef rm As Double, ByRef ok As Boolean)
+    ok = True
+    Select Case UCase$(m)
+        Case "SS316", "SS316L": e0 = 28300000#: de = -5660: rm = 0.29
+        Case "SS304": e0 = 28300000#: de = -5660: rm = 0.289
+        Case "CS": e0 = 29500000#: de = -4500: rm = 0.284
+        Case "C276": e0 = 29800000#: de = -5000: rm = 0.321
+        Case "MONEL": e0 = 26000000#: de = -4000: rm = 0.319
+        Case "DUPLEX": e0 = 29000000#: de = -5200: rm = 0.28
+        Case "INC625": e0 = 30100000#: de = -5300: rm = 0.305
+        Case "1.25CR", "2.25CR": e0 = 30000000#: de = -4800: rm = 0.284
+        Case "5CR", "9CR": e0 = 30000000#: de = -4800: rm = 0.28
+        Case "ALLOY825": e0 = 28300000#: de = -5000: rm = 0.294
+        Case "ALLOY600": e0 = 31000000#: de = -5000: rm = 0.304
+        Case "ALLOY20": e0 = 28000000#: de = -5000: rm = 0.292
+        Case Else: ok = False
+    End Select
+End Sub
+Private Function MocMat(ByVal moc As String) As String
+    Dim a As Variant, i As Long, m As String
+    m = UCase$(moc)
+    a = Array("C-276", "C276", "ALLOY 400", "MONEL", "ALLOY 825", "ALLOY825", "ALLOY 600", "ALLOY600", "ALLOY 20", "ALLOY20", _
+              "DUPLEX", "DUPLEX", "2205", "DUPLEX", "316", "SS316", "304", "SS304", "321", "SS304", "347", "SS304", "317", "SS316", _
+              "9% CR", "9CR", "5% CR", "5CR", "2 1/4% CR", "2.25CR", "1 1/4% CR", "1.25CR", "1 1/4%CR", "1.25CR", "CARBON STEEL", "CS")
+    For i = 0 To UBound(a) Step 2
+        If InStr(m, a(i)) > 0 Then MocMat = a(i + 1): Exit Function
+    Next i
+End Function
+
+Private Function InstKindOf(ByVal fit As String, ByVal it As String) As String
+    Dim f As String, u As String: f = LCase$(Trim$(fit)): u = UCase$(Trim$(it))
+    If f = "control valve" Then InstKindOf = "CV": Exit Function
+    Select Case u
+        Case "PT", "PI", "PRESSURE TRANSMITTER": InstKindOf = "PT"
+        Case "TT", "TE", "TW", "TEMPERATURE TRANSMITTER", "THERMOWELL": InstKindOf = "TT"
+        Case "FT", "FT-I", "FT INLINE", "FT (INLINE)", "INLINE FT", "FLOW TRANSMITTER", "MAG", "CORIOLIS", "VORTEX": InstKindOf = "FT"
+        Case "FO", "FT-O", "FT ORIFICE", "FT (ORIFICE)", "ORIFICE", "FLOW ORIFICE", "FE": InstKindOf = "FO"
+        Case "RO", "RESTRICTION ORIFICE": InstKindOf = "RO"
+        Case Else
+            If f = "orifice" Then InstKindOf = "FO"
+    End Select
+End Function
+
+Private Sub InstrRows(ByVal cid As String)
+    Dim i As Long, k As String, ir As Long, area As Double, qv As Double, ql As Double, vm As Double, mt As Double, rhoh As Double
+    Dim P1 As Double, dP As Double, dor As Double, Din As Double, crit As Double, ratio As Double, chk As String, kk As Double
+    For i = 1 To stN
+        k = stKind(i)
+        If Len(k) = 0 Or k = "CV" Then GoTo NextI
+        ir = IDRow(stTag(i))
+        area = PI / 4# * (stID(i) / 12#) ^ 2
+        qv = 0: ql = 0
+        If stRg(i) > 0 Then qv = stMg(i) / stRg(i)
+        If stRl(i) > 0 Then ql = stMl(i) / stRl(i)
+        vm = 0: If area > 0 Then vm = (qv + ql) / 3600# / area
+        mt = stMg(i) + stMl(i)
+        rhoh = 0: If qv + ql > 0 Then rhoh = mt / (qv + ql)
+        P1 = stPin(i): dP = stDp(i): dor = IDNum(ir, 3): Din = stID(i)
+        crit = 0: ratio = 0: chk = ""
+        kk = IIf(stGm(i) > 0, stGm(i), 1.3)
+        If stMg(i) > 0 Then
+            If kk > 1 Then crit = (2# / (kk + 1#)) ^ (kk / (kk - 1#)) Else crit = 0.5283
+        End If
+        If P1 > 0 Then ratio = (P1 - dP) / P1
+        If (k = "FO" Or k = "RO") And crit > 0 Then chk = IIf(ratio < crit, "CHOKED (P2/P1 < critical)", "No")
+        nInst = nInst + 1
+        instOut(nInst, 1) = cid: instOut(nInst, 2) = stTag(i): instOut(nInst, 3) = k & IIf(k = "FT", " (inline)", IIf(k = "FO", " (orifice FT)", ""))
+        instOut(nInst, 4) = stLine(i): instOut(nInst, 5) = stSeq(i): instOut(nInst, 6) = stComp(i): instOut(nInst, 7) = stNps(i): instOut(nInst, 8) = stID(i)
+        instOut(nInst, 9) = P1: instOut(nInst, 10) = stT(i)
+        instOut(nInst, 11) = IIf(stMg(i) > 0 And stMl(i) > 0, "TWO-PHASE", IIf(stMg(i) > 0, "VAPOR", "LIQUID"))
+        instOut(nInst, 12) = mt: instOut(nInst, 13) = stMg(i): instOut(nInst, 14) = stMl(i)
+        instOut(nInst, 15) = vm: instOut(nInst, 16) = rhoh * LBFT3_TO_KGM3 * (vm * FT_TO_M) ^ 2
+        instOut(nInst, 17) = dP: If P1 > 0 Then instOut(nInst, 18) = dP / P1 * 100#
+        instOut(nInst, 19) = P1 - dP
+        If dor > 0 Then
+            instOut(nInst, 20) = dor
+            If Din > 0 Then instOut(nInst, 21) = dor / Din
+        End If
+        If crit > 0 Then instOut(nInst, 22) = crit
+        instOut(nInst, 23) = ratio: instOut(nInst, 24) = chk
+        If k = "TT" Then TwRow cid, i, ir
+NextI:
+    Next i
+End Sub
+
+Private Sub TwRow(ByVal cid As String, ByVal i As Long, ByVal ir As Long)
+    Dim root As Double, tip As Double, bore As Double, U As Double, mat As String, e0 As Double, de As Double, rm As Double, ok As Boolean
+    Dim cl As String, j As Long, moc As String, dflt As String, flags As String, dAvg As Double
+    Dim qv As Double, ql As Double, rhof As Double, mu As Double, phase As String, area As Double, V As Double
+    Dim Re As Double, S As Double, fw As Double, Iin As Double, Am As Double, mpl As Double, wn As Double, fn As Double
+    Dim ratio As Double, vlim As Double, verdict As String, E As Double
+    cl = UCase$(Trim$(Split(stSpec(i) & "/", "/")(0)))
+    root = 0: tip = 0: bore = 0: U = -1: mat = ""
+    For j = 1 To nTC
+        If UCase$(Trim$(CStr(tcls(j, 1)))) = cl Then
+            If IsNumeric(tcls(j, 2)) And Not IsEmpty(tcls(j, 2)) Then root = tcls(j, 2)
+            If IsNumeric(tcls(j, 3)) And Not IsEmpty(tcls(j, 3)) Then tip = tcls(j, 3)
+            If IsNumeric(tcls(j, 4)) And Not IsEmpty(tcls(j, 4)) Then bore = tcls(j, 4)
+            If IsNumeric(tcls(j, 5)) And Not IsEmpty(tcls(j, 5)) Then U = tcls(j, 5)
+            If Len(Trim$(CStr(tcls(j, 6)))) > 0 Then mat = Trim$(CStr(tcls(j, 6)))
+            flags = "class defaults from Data_TWClass[" & cl & "]"
+            Exit For
+        End If
+    Next j
+    If Len(mat) = 0 Then
+        moc = ClassMoc(cl)
+        If Len(moc) > 0 Then
+            mat = MocMat(moc)
+            If Len(mat) > 0 Then flags = "material from piping class " & cl & " MOC '" & moc & "'"
+        End If
+    End If
+    If IDHas(ir, 5) Then root = IDNum(ir, 5)
+    If IDHas(ir, 6) Then tip = IDNum(ir, 6)
+    If IDHas(ir, 7) Then bore = IDNum(ir, 7)
+    If IDHas(ir, 4) Then U = IDNum(ir, 4)
+    If ir > 0 Then If Len(Trim$(CStr(idat(ir, 8)))) > 0 Then mat = Trim$(CStr(idat(ir, 8)))
+    If root <= 0 Then root = 1#: dflt = dflt & "root OD, "
+    If tip <= 0 Then tip = 0.75: dflt = dflt & "tip OD, "
+    If bore <= 0 Then bore = 0.26: dflt = dflt & "bore, "
+    If U < 0 Then
+        U = 0.5 * stID(i): If U < 3 Then U = 3
+        If U > 12 Then U = 12
+        dflt = dflt & "U, "
+    End If
+    If Len(mat) = 0 Then dflt = dflt & "material, ": mat = "SS316"
+    TwMat mat, e0, de, rm, ok
+    If Not ok Then mat = "SS316": TwMat mat, e0, de, rm, ok: flags = flags & "; unknown material -> SS316"
+    E = e0 + de * (stT(i) - 70#): If E < 10000000# Then E = 10000000#
+    dAvg = 0.5 * (root + tip)
+    qv = 0: ql = 0
+    If stRg(i) > 0 Then qv = stMg(i) / stRg(i)
+    If stRl(i) > 0 Then ql = stMl(i) / stRl(i)
+    If qv >= ql And stRg(i) > 0 Then
+        rhof = stRg(i): mu = stMu(i): phase = "vapour"
+    ElseIf stRl(i) > 0 Then
+        rhof = stRl(i): mu = stMuL(i): phase = "liquid"
+    Else
+        rhof = stRg(i): mu = stMu(i): phase = "vapour"
+    End If
+    If qv > 0 And ql > 0 Then flags = flags & "; two-phase at TW: wake check uses the larger-volume phase"
+    area = PI / 4# * (stID(i) / 12#) ^ 2
+    If area > 0 Then V = (qv + ql) / 3600# / area
+    nTw = nTw + 1
+    twOut(nTw, 1) = cid: twOut(nTw, 2) = stTag(i): twOut(nTw, 3) = stLine(i): twOut(nTw, 4) = phase
+    If V <= 0 Or rhof <= 0 Or mu <= 0 Then
+        twOut(nTw, 19) = "no velocity / fluid properties at this station": twOut(nTw, 20) = flags
+        Exit Sub
+    End If
+    twOut(nTw, 5) = V * FT_TO_M: twOut(nTw, 6) = rhof * LBFT3_TO_KGM3: twOut(nTw, 7) = mu
+    twOut(nTw, 8) = mat: twOut(nTw, 9) = E: twOut(nTw, 10) = root: twOut(nTw, 11) = tip: twOut(nTw, 12) = bore: twOut(nTw, 13) = U
+    Re = rhof * LBFT3_TO_KGM3 * (V * FT_TO_M) * (dAvg * IN_TO_M) / (mu * 0.001)
+    If Re <= 200000# Then
+        S = 0.2
+    ElseIf Re >= 3500000# Then
+        S = 0.27
+    Else
+        S = 0.2 + 0.07 * Ln10(Re / 200000#) / Ln10(3500000# / 200000#)
+    End If
+    fw = S * (V * FT_TO_M) / (tip * IN_TO_M)
+    Iin = PI / 64# * (dAvg ^ 4 - bore ^ 4): Am = PI / 4# * (dAvg ^ 2 - bore ^ 2)
+    mpl = rm * Am + (rhof / 1728#) * PI / 4# * dAvg ^ 2
+    wn = 1.875 ^ 2 * Sqr(E * Iin / ((mpl / 386.088) * U ^ 4))
+    fn = wn / (2# * PI): ratio = fw / fn
+    vlim = 0.8 * fn * (tip * IN_TO_M) / S / FT_TO_M
+    If ratio < 0.4 Then
+        verdict = "PASS (fs/fn < 0.4)"
+    ElseIf ratio < 0.8 Then
+        verdict = "CHECK - in-line drag resonance band (0.4-0.8): ASME PTC 19.3 TW stress check"
+    Else
+        verdict = "FAIL (fs/fn >= 0.8) - shorten U / thicken stem / lower velocity"
+    End If
+    twOut(nTw, 14) = Re: twOut(nTw, 15) = S: twOut(nTw, 16) = fw: twOut(nTw, 17) = fn: twOut(nTw, 18) = ratio
+    twOut(nTw, 19) = vlim * FT_TO_M: twOut(nTw, 20) = verdict
+    If Len(dflt) > 0 Then flags = flags & "; DEFAULT used for: " & Left$(dflt, Len(dflt) - 2) & " - enter real data in Instrument_Data / Data_TWClass"
+    twOut(nTw, 21) = flags
+End Sub
+Private Function ClassMoc(ByVal cl As String) As String
+    Dim i As Long
+    For i = 1 To nPM
+        If pmCls(i) = cl Then ClassMoc = pmMoc(i): Exit Function
+    Next i
+End Function
+
+Private Sub WriteInstr()
+    Dim ws As Worksheet, h As Variant, i As Long
+    h = Array("Circuit", "Tag", "Type", "Line", "Seq", "Comp ID", "NPS", "ID (in)", "P in (psia)", "T (F)", "Phase", "Mass flow (lb/h)", _
+        "Vapour (lb/h)", "Liquid (lb/h)", "Vm (ft/s)", "rho v2 (kg/m s2)", "dP (psi)", "dP % of P1", "P out (psia)", "Orifice d (in)", _
+        "beta (d/D)", "Critical P2/P1", "P2/P1", "Choked?")
+    Set ws = FreshSheet("Inline_Instruments")
+    ws.Range("A1").Resize(1, 24).Value = h: StyleHeader ws.Range("A1").Resize(1, 24)
+    If nInst > 0 Then ws.Range("A2").Resize(nInst, 24).Value = instOut: ws.Range("H2:W" & nInst + 1).NumberFormat = "0.000"
+    ws.Columns("A:X").ColumnWidth = 13
+    i = nInst + 4
+    If nTw > 0 Then
+        ws.Cells(i, 1).Value = "THERMOWELL WAKE-FREQUENCY CHECK (TT) - simplified Euler-Bernoulli cantilever, average stem diameter, fluid added mass | final check: ASME PTC 19.3 TW by the vendor"
+        ws.Cells(i, 1).Font.Bold = True
+        h = Array("Circuit", "Tag", "Line", "Fluid used", "Velocity (m/s)", "Fluid rho (kg/m3)", "Fluid mu (cP)", "Material", "E at T (psi)", "Root OD (in)", _
+            "Tip OD (in)", "Bore (in)", "Insertion U (in)", "Reynolds", "Strouhal S", "Wake fs (Hz)", "Natural fn (Hz)", "fs / fn", "Max V for fs/fn=0.8 (m/s)", "Verdict", "Notes")
+        ws.Range(ws.Cells(i + 1, 1), ws.Cells(i + 1, 21)).Value = h: StyleHeader ws.Range(ws.Cells(i + 1, 1), ws.Cells(i + 1, 21))
+        ws.Range(ws.Cells(i + 2, 1), ws.Cells(i + 1 + nTw, 21)).Value = twOut
+        ws.Range(ws.Cells(i + 2, 5), ws.Cells(i + 1 + nTw, 19)).NumberFormat = "0.000"
+    End If
+End Sub
+
+
+'==========================================================================
 Private Sub WriteOutputs()
     Dim ws As Worksheet, hdr As Variant, i As Long, nc As Long
     hdr = Array("Circuit", "Line No", "Comp ID", "Fitting", "Spec", "NPS", "Sch", "ID (in)", "Length (ft)", "Elev (ft)", _
@@ -1657,14 +2033,14 @@ Private Sub WriteOutputs()
     ws.Activate: ActiveWindow.FreezePanes = False: ws.Range("D2").Select: ActiveWindow.FreezePanes = True
     ws.Range("A1").Select
     hdr = Array("Circuit", "CV Tag", "Stream", "Phase", "P1 (psia)", "P2 (psia)", "dP (psi)", "Flow (lb/h)", "T (degF)", _
-        "Calc Cv", "SG / rho1", "Flow info", "Notes", "Suggested rated Cv (70% travel)")
+        "Calc Cv", "SG / rho1", "Flow info", "Notes", "Suggested rated Cv (70% travel)", "FL", "xT", "Rated Cv", "Travel (%)", "Travel status", "Choked?")
     Set ws = FreshSheet("CV_Summary")
-    ws.Range("A1").Resize(1, 14).Value = hdr
-    StyleHeader ws.Range("A1").Resize(1, 14)
-    If nCV > 0 Then ws.Range("A2").Resize(nCV, 14).Value = cvOut
+    ws.Range("A1").Resize(1, 20).Value = hdr
+    StyleHeader ws.Range("A1").Resize(1, 20)
+    If nCV > 0 Then ws.Range("A2").Resize(nCV, 20).Value = cvOut
     ws.Range("E2:G" & nCV + 2).NumberFormat = "0.000": ws.Range("J2:K" & nCV + 2).NumberFormat = "0.00"
     ws.Range("N2:N" & nCV + 2).NumberFormat = "0.0"
-    ws.Columns("A:N").ColumnWidth = 13: ws.Columns("M").ColumnWidth = 60
+    ws.Columns("A:T").ColumnWidth = 13: ws.Columns("M").ColumnWidth = 60: ws.Columns("S").ColumnWidth = 40
     Worksheets("Control").Activate
 End Sub
 Private Function FreshSheet(ByVal nm As String) As Worksheet

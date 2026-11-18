@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--vba")
     a = ap.parse_args()
     wb = xlsxwriter.Workbook(a.out)
-    NSHEETS = 14
+    NSHEETS = 16
     if a.out.lower().endswith(".xlsm"):
         import tempfile
         import ovba
@@ -169,12 +169,27 @@ def main():
     for n in H.A.NPS_ORDER:
         for sch, wl in H.A.PIPE_WALL_IN.get(n, {}).items():
             d.write(i, 0, n); d.write(i, 1, str(sch).upper()); d.write(i, 2, wl); i += 1
-    d = wb.add_worksheet("Data_PMS"); d.write_row(0, 0, ["Class", "NPS low", "NPS high", "Schedule", "Min schedule"], navy)
+    d = wb.add_worksheet("Data_PMS"); d.write_row(0, 0, ["Class", "NPS low", "NPS high", "Schedule", "Min schedule", "MOC"], navy)
     i = 1
     for name, (moc, rules) in H.PMS_CLASSES.items():
         for r in rules:
             d.write(i, 0, name); d.write(i, 1, r[0]); d.write(i, 2, r[1]); d.write(i, 3, str(r[2]))
-            d.write(i, 4, r[3] if len(r) > 3 else "STD"); i += 1
+            d.write(i, 4, r[3] if len(r) > 3 else "STD"); d.write(i, 5, moc); i += 1
+    idn = wb.add_worksheet("Instrument_Data")
+    idn.write_row(1, 0, H._INSTR_DATA_HEADERS, navy)
+    idn.write(0, 0, "Optional per-tag data: TT thermowell geometry, FO/RO orifice d, control-valve rated Cv / FL / xT / characteristic / curve points ('10:4.2; 25:11; ...').", txt)
+    ex = [("TT-101", "Reactor effluent TT", None, 6.0, 1.0, 0.75, 0.26, "SS316", None, None, None, None, None, None, "example"),
+          ("FE-101", "Flow orifice", 2.5, None, None, None, None, None, None, None, None, None, None, None, "example"),
+          ("FV-101", "Flow control valve", None, None, None, None, None, None, 20, 0.9, 0.7, "Equal %", 50, None, "example")]
+    for i, rw in enumerate(ex):
+        for j, v in enumerate(rw):
+            if v is not None:
+                idn.write(2 + i, j, v)
+    idn.set_column(0, 14, 13); idn.set_row(1, 40)
+    tw = wb.add_worksheet("Data_TWClass")
+    tw.write_row(0, 0, ["Piping class", "TW root OD (in)", "TW tip OD (in)", "TW bore (in)", "TW insertion U (in)", "TW material"], navy)
+    tw.write_row(1, 0, ["G9A-3", 1.0, 0.75, 0.26, 6.0, "SS316"])
+    tw.set_column(0, 5, 16)
     wb.close()
     print("wrote", a.out, os.path.getsize(a.out), "bytes")
 
