@@ -65,6 +65,32 @@ Private ePhase As String, eBeta As Double, eGam As Double, eY() As Double, eNote
 '==========================================================================
 '  Entry point - assigned to the RUN button on the Control sheet
 '==========================================================================
+'---- module-level state (moved here: declarations must precede procedures) ----
+Private stN As Long
+Private stSeq() As String, stFit() As String, stCid() As String, stComp() As String, stNps() As String
+Private stOD() As Double, stWall() As Double, stID() As Double, stRho() As Double, stV() As Double
+Private stRg() As Double, stRl() As Double, stMg() As Double, stMl() As Double, stMu() As Double
+Private stMach() As Double, stRv2V() As Double, stRv2L() As Double, stCum() As Double, stPin() As Double, stDp() As Double
+Private stHasMom() As Boolean
+Private fivOut() As Variant, nFiv As Long, aivOut() As Variant, nAiv As Long, lastOD As Double, lastWall As Double
+Private mdotCirc As Double
+Private regOut() As Variant, nReg As Long
+Private stLen() As Double, stDz() As Double, stSig() As Double, stMuL() As Double
+Private idat As Variant, nID As Long, tcls As Variant, nTC As Long
+Private stKind() As String, stTag() As String, stSpec() As String, stT() As Double, stGm() As Double
+Private instOut() As Variant, nInst As Long, twOut() As Variant, nTw As Long
+Private rowMap() As Long, rowSeq() As Long
+Private fScale As Double, vCf As Double, lCf As Double, capSplit As Boolean, useInj As Boolean
+Private nSplit As Long, spLine(1 To 60) As String, spSeq(1 To 60) As Long, spN(1 To 60) As Long, spV(1 To 60) As Double, spL(1 To 60) As Double
+Private nInj As Long, injRow(1 To 20) As Long, injLbl(1 To 20) As String, injVap(1 To 20) As Double, injLiq(1 To 20) As Double
+Private injN(1 To 20) As Long, injPref(1 To 20) As Double, injFlash(1 To 20) As Boolean
+Private injNm(1 To 20, 1 To 600) As String, injMol(1 To 20, 1 To 600) As Double, injK(1 To 20, 1 To 600) As Double
+Private injMW(1 To 20, 1 To 600) As Double, injTc(1 To 20, 1 To 600) As Double, injOm(1 To 20, 1 To 600) As Double
+Private bkN(0 To 3) As Long, bkNm(0 To 3, 1 To 600) As String, bkZ(0 To 3, 1 To 600) As Double, bkK(0 To 3, 1 To 600) As Double
+Private bkMW(0 To 3, 1 To 600) As Double, bkTc(0 To 3, 1 To 600) As Double, bkOm(0 To 3, 1 To 600) As Double
+Private bkHas(0 To 3) As Boolean, bkPref(0 To 3) As Double, bkTref(0 To 3) As Double, bkTot(0 To 3) As Double
+Private bkVap(0 To 3) As Double, bkLiq(0 To 3) As Double, bkFlash(0 To 3) As Boolean
+
 Public Sub RunHydraulics()
     Dim t0 As Double: t0 = Timer
     On Error GoTo EH
@@ -1128,14 +1154,6 @@ End Sub
 '==========================================================================
 '  FIV (EI T2.2) and AIV (source attenuation) - ports of build_fiv_sheet / build_aiv_sheet
 '==========================================================================
-Private stN As Long
-Private stSeq() As String, stFit() As String, stCid() As String, stComp() As String, stNps() As String
-Private stOD() As Double, stWall() As Double, stID() As Double, stRho() As Double, stV() As Double
-Private stRg() As Double, stRl() As Double, stMg() As Double, stMl() As Double, stMu() As Double
-Private stMach() As Double, stRv2V() As Double, stRv2L() As Double, stCum() As Double, stPin() As Double, stDp() As Double
-Private stHasMom() As Boolean
-Private fivOut() As Variant, nFiv As Long, aivOut() As Variant, nAiv As Long, lastOD As Double, lastWall As Double
-Private mdotCirc As Double
 
 Private Sub InitStations()
     Dim n As Long: n = nRow + 10
@@ -1434,8 +1452,6 @@ End Sub
 '==========================================================================
 '  Two-phase flow-regime maps (ports of the six correlations in hydraulics.py)
 '==========================================================================
-Private regOut() As Variant, nReg As Long
-Private stLen() As Double, stDz() As Double, stSig() As Double, stMuL() As Double
 
 Private Sub TdGeom(ByVal hd As Double, ByRef al As Double, ByRef ag As Double, ByRef sl As Double, ByRef sg As Double, ByRef si As Double)
     Dim g As Double, ac As Double, rt As Double
@@ -1691,9 +1707,6 @@ End Sub
 '==========================================================================
 '  Instrument_Data, control-valve travel, inline instruments and thermowell wake check
 '==========================================================================
-Private idat As Variant, nID As Long, tcls As Variant, nTC As Long
-Private stKind() As String, stTag() As String, stSpec() As String, stT() As Double, stGm() As Double
-Private instOut() As Variant, nInst As Long, twOut() As Variant, nTw As Long
 
 Private Sub ReadInstData()
     Dim ws As Worksheet, lr As Long
@@ -2085,17 +2098,6 @@ End Sub
 '==========================================================================
 '  Phase 2: tees and branches (split / merge / carry-over / branch runs / join re-flash)
 '==========================================================================
-Private rowMap() As Long, rowSeq() As Long
-Private fScale As Double, vCf As Double, lCf As Double, capSplit As Boolean, useInj As Boolean
-Private nSplit As Long, spLine(1 To 60) As String, spSeq(1 To 60) As Long, spN(1 To 60) As Long, spV(1 To 60) As Double, spL(1 To 60) As Double
-Private nInj As Long, injRow(1 To 20) As Long, injLbl(1 To 20) As String, injVap(1 To 20) As Double, injLiq(1 To 20) As Double
-Private injN(1 To 20) As Long, injPref(1 To 20) As Double, injFlash(1 To 20) As Boolean
-Private injNm(1 To 20, 1 To 600) As String, injMol(1 To 20, 1 To 600) As Double, injK(1 To 20, 1 To 600) As Double
-Private injMW(1 To 20, 1 To 600) As Double, injTc(1 To 20, 1 To 600) As Double, injOm(1 To 20, 1 To 600) As Double
-Private bkN(0 To 3) As Long, bkNm(0 To 3, 1 To 600) As String, bkZ(0 To 3, 1 To 600) As Double, bkK(0 To 3, 1 To 600) As Double
-Private bkMW(0 To 3, 1 To 600) As Double, bkTc(0 To 3, 1 To 600) As Double, bkOm(0 To 3, 1 To 600) As Double
-Private bkHas(0 To 3) As Boolean, bkPref(0 To 3) As Double, bkTref(0 To 3) As Double, bkTot(0 To 3) As Double
-Private bkVap(0 To 3) As Double, bkLiq(0 To 3) As Double, bkFlash(0 To 3) As Boolean
 
 Private Function IsTeeF(ByVal f As String) As Boolean
     IsTeeF = (InStr(f, "tee") > 0 Or InStr(f, "stub") > 0 Or InStr(f, "branch") > 0)
