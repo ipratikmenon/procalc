@@ -13,5 +13,5 @@ fi
 if [ "$1" = "gui" ]; then
   exec "$PY" run_hydraulics.py --gui
 else
-  exec "$PY" run_hydraulics.py
+  exec "$PY" run_hydraulics.py "$@"
 fi

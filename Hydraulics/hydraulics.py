@@ -17,6 +17,7 @@ Run:
     python hydraulics.py --template --si       # create blank SI input
     python hydraulics.py pipeline_input_noiso.xlsx HMB.xlsx
     python hydraulics.py input.xlsx HMB.xlsx --isenthalpic
+    python hydraulics.py input.xlsx HMB.xlsx --light      # light Technip Energies theme + TEN logo
 or simply use  run_hydraulics.py  (menu / GUI front end).
 """
 from __future__ import annotations
@@ -3049,7 +3050,7 @@ def run(pcf_path, hmb_path, line_no=None, stream_name=None, out_path=None,
         safe_l = re.sub(r"[^A-Za-z0-9_-]", "_", line_no)
         safe_s = re.sub(r"[^A-Za-z0-9_-]", "_", stream_name)
         out_path = f"hydraulics_{safe_l}_{safe_s}.xlsx"
-    _apply_light_theme(wb)
+    _finish_workbook(wb)
     wb.save(out_path)
     return out_path, stations, sp, phase
 
@@ -9819,7 +9820,7 @@ def _circuit_case(cid, c, all_rows, input_path, hmb_path, case, map_path, flash_
         else:
             op = out_path
 
-        _apply_light_theme(wb)
+        _finish_workbook(wb)
         wb.save(op)
         _res = (op, main_stations, main_flashes, sp)
 
@@ -11160,6 +11161,21 @@ _TEN_LOGO_B64 = (
 )
 
 
+_OUTPUT_THEME = os.environ.get("HYD_THEME", "colored").strip().lower()   # 'colored' (default) | 'light'
+
+
+def set_output_theme(name: str) -> None:
+    """'colored' = the original dark-banner colour coding (default); 'light' = Technip Energies light
+    tones + TEN logo on every sheet."""
+    global _OUTPUT_THEME
+    _OUTPUT_THEME = "light" if str(name).strip().lower().startswith("l") else "colored"
+
+
+def _finish_workbook(wb) -> None:
+    if _OUTPUT_THEME == "light":
+        _apply_light_theme(wb)
+
+
 def _lum(h6: str) -> float:
     r, g, b = int(h6[0:2], 16), int(h6[2:4], 16), int(h6[4:6], 16)
     return 0.299 * r + 0.587 * g + 0.114 * b
@@ -11318,6 +11334,8 @@ def main():
     ) else "isothermal"
     global _COMP_ISOTHERMAL
     _COMP_ISOTHERMAL = any(f.lower() == "--isothermal-comp" for f in flags)
+    if any(f.lower() == "--light" for f in flags):
+        set_output_theme("light")
 
     input_path = args[0] if len(args) > 0 else "pipeline_input_noiso.xlsx"
     hmb_path   = args[1] if len(args) > 1 else None

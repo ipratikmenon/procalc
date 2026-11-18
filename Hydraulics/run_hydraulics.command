@@ -13,7 +13,7 @@ fi
 if [ "$1" = "gui" ]; then
   "$PY" run_hydraulics.py --gui
 else
-  "$PY" run_hydraulics.py
+  "$PY" run_hydraulics.py "$@"
 fi
 
 echo

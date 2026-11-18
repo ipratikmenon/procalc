@@ -4,6 +4,11 @@
     python run_hydraulics.py          # interactive console menu
     python run_hydraulics.py --gui    # tkinter GUI
 
+  command line (no questions):
+    python run_hydraulics.py build DUMP.xlsx [HMB_OUT.xlsx] [--sheet CASE2] [--constants C.xlsx]
+    python run_hydraulics.py run   INPUT.xlsx HMB.xlsx [CIRCUIT] [--case "Case 1"] [--isenthalpic] [--light]
+    python run_hydraulics.py all   DUMP.xlsx INPUT.xlsx [CIRCUIT]   # build the HMB, then run the hydraulics
+
 Engine lives in hydraulics.py (one file: dP marching, flash VLE, FIV/AIV, flow-pattern maps).
 """
 from __future__ import annotations
@@ -29,6 +34,7 @@ Run it with:   python3 hydraulics_launcher.py
 """
 
 import os
+import re
 import sys
 import glob
 import traceback
@@ -91,11 +97,70 @@ def is_input_wb(path: str) -> bool:
         return False
 
 
+def _sheetnames(path: str) -> list[str]:
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+_KIND_CACHE: dict = {}
+
+
+def kind_of(path: str) -> str:
+    """'input' (Pipeline_Input) | 'dump' (raw PRO/II property dump) | 'hmb' (built HMB) | 'other'."""
+    if path in _KIND_CACHE:
+        return _KIND_CACHE[path]
+    k = "other"
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True)
+        try:
+            names = list(wb.sheetnames)
+            if "Pipeline_Input" in names:
+                k = "input"
+            else:
+                for n in names[:3]:                       # a PRO/II dump has a 'Stream Name' row in col A
+                    hit = False
+                    for r in wb[n].iter_rows(min_row=1, max_row=12, max_col=1, values_only=True):
+                        if r and r[0] is not None and str(r[0]).strip() == "Stream Name":
+                            hit = True
+                            break
+                    if hit:
+                        k = "dump"
+                        break
+                if k == "other":
+                    up = {x.upper() for x in names}
+                    if "COMP_CONSTANTS" in up or ("UNITS" in up and "COMPONENTS" in up):
+                        k = "hmb"
+        finally:
+            wb.close()
+    except Exception:
+        k = "other"
+    _KIND_CACHE[path] = k
+    return k
+
+
 def categorise(files: list[str]) -> tuple[list[str], list[str]]:
+    """(input workbooks, everything else)."""
     inputs, others = [], []
     for f in files:
-        (inputs if is_input_wb(f) else others).append(f)
+        (inputs if kind_of(f) == "input" else others).append(f)
     return inputs, others
+
+
+def ask_path(title: str) -> str | None:
+    """Type a path to a workbook anywhere on disk (quotes allowed; Enter cancels)."""
+    raw = ask(title + " (full path, Enter = cancel)")
+    raw = raw.strip().strip('"').strip("'")
+    if not raw:
+        return None
+    if not os.path.isfile(raw):
+        print(red(f"  Not found: {raw}"))
+        return None
+    return raw
 
 
 def choose_from(title: str, items: list[str], allow_blank=False,
@@ -121,15 +186,16 @@ def choose_from(title: str, items: list[str], allow_blank=False,
 
 # ── HMB case picker (search-driven; HMBs can hold hundreds of cases) ─────────
 def choose_case(hmb_path: str) -> str:
+    """Only workbooks with 'Case N' sheets (PRO/II case export) need a case; a built per-stream HMB does not."""
     try:
-        import hmb_proii_reader as H
-        cases = H.list_cases(hmb_path)
+        import hmbbuilder as H
+        cases = [c for c in H.list_cases(hmb_path) if re.match(r"(?i)case", c)]
     except Exception as exc:
         print(dim(f"  (could not read cases from {hmb_path}: {exc})"))
         cases = []
 
     if not cases:
-        return ask("HMB case", default="Case 1")
+        return "Case 1"
 
     print()
     print(bold(f"HMB cases available: {len(cases)}"))
@@ -202,17 +268,73 @@ def make_template():
     usys = "SI" if usys == "SI" else "FPS"
     out = N.create_input_template(name, unit_system=usys)
     print(green(f"  Template created: {out}  (units: {usys})"))
-    print(dim("  Fill the Pipeline_Input sheet, then run option 1."))
+    print(dim("  Fill the Pipeline_Input sheet (and Flow_Cases / Stream_Map / Instrument_Data if used), then run option 1."))
     print(dim("  Flip FPS/SI any time on the workbook's UNITS sheet."))
+
+
+def default_hmb_name(dump: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.splitext(os.path.basename(dump))[0])[:55]
+    return f"HMB_{stem}.xlsx"
+
+
+def build_hmb_action(dump: str | None = None, out: str | None = None,
+                     sheet: str | None = None, constants: str | None = None,
+                     interactive: bool = True) -> str | None:
+    """PRO/II dump  →  HMB workbook (hmbbuilder.py).  Returns the HMB path (None if cancelled)."""
+    try:
+        import hmbbuilder as B
+    except ImportError:
+        print(red("  hmbbuilder.py was not found next to this launcher."))
+        return None
+    if dump is None:
+        dumps = [f for f in list_xlsx() if kind_of(f) == "dump"]
+        pick = choose_from("PRO/II dump workbook:", dumps, allow_blank=True,
+                           extra=[("p", "type a path to the dump")])
+        if pick is None:
+            return None
+        dump = ask_path("Path to the PRO/II dump") if pick == "p" else pick
+        if not dump:
+            return None
+    if out is None:
+        out = default_hmb_name(dump)
+        if interactive:
+            out = ask("HMB file to write", default=out)
+            if os.path.exists(out) and ask(f"{out} exists — rebuild it? (y/n)", default="y").lower() not in ("y", "yes"):
+                print(green(f"  Using the existing {out}"))
+                return out
+            sheet = sheet or (ask("Dump sheet name (Enter = auto-detect)") or None)
+            if constants is None:
+                constants = ask("Optional Constants.xlsx for pseudo-component overrides (Enter = none)") or None
+    print(dim("  Building the HMB (about 80 s for ~460 streams) …"))
+    try:
+        res = B.build_hmb(dump, out, sheet, constants)
+    except SystemExit as exc:
+        print(red(f"  Stopped: {exc}"))
+        return None
+    except Exception:
+        print(red("  Error while building the HMB:"))
+        traceback.print_exc()
+        return None
+    print(green(f"  HMB ready: {res}"))
+    return res
+
+
+def choose_theme() -> str:
+    t = choose_from("Output workbook colours:",
+                    ["coloured  (default — dark banners, original colour coding)",
+                     "light  (Technip Energies light theme + TEN logo)"])
+    return "light" if t.startswith("light") else "colored"
 
 
 def run_engine():
     files = list_xlsx()
     inputs, others = categorise(files)
+    hmbs = [f for f in others if kind_of(f) == "hmb"]
+    dumps = [f for f in others if kind_of(f) == "dump"]
 
     if not inputs:
         print(red("  No input workbook (with a 'Pipeline_Input' sheet) found here."))
-        print(dim("  Use option 2 to create one first."))
+        print(dim("  Create one from the template first (menu option 3)."))
         return
 
     input_path = (inputs[0] if len(inputs) == 1
@@ -220,16 +342,38 @@ def run_engine():
     if len(inputs) == 1:
         print(green(f"  Input: {input_path}"))
 
-    # HMB is optional (manual circuits need none) — offer a 'none' choice.
+    # HMB: an existing one, or build it from a PRO/II dump right now.  Optional for manual circuits.
     hmb_path = None
-    if others:
-        pick = choose_from("HMB workbook (Enter to skip if all circuits are manual):",
-                           others, allow_blank=True,
-                           extra=[("n", "no HMB (manual only)")])
-        if pick not in (None, "n"):
-            hmb_path = pick
+    labels = {}
+    for f in hmbs:
+        labels[f"{f}   (HMB workbook)"] = ("hmb", f)
+    for f in dumps:
+        labels[f"{f}   (PRO/II dump → build the HMB first)"] = ("dump", f)
+    if labels:
+        pick = choose_from("HMB for this run (Enter to skip if all circuits are manual):",
+                           list(labels), allow_blank=True,
+                           extra=[("p", "type a path to an HMB or a PRO/II dump"),
+                                  ("n", "no HMB (manual only)")])
+        kind = path = None
+        if pick == "p":
+            path = ask_path("Path to the HMB or dump")
+            kind = kind_of(path) if path else None
+            kind = "dump" if kind == "dump" else "hmb"
+        elif pick not in (None, "n"):
+            kind, path = labels[pick]
+        if kind == "dump":
+            hmb_path = build_hmb_action(path)
+            if hmb_path is None:
+                return
+        elif kind == "hmb":
+            hmb_path = path
     else:
-        print(dim("  No HMB workbook found — manual-property circuits only."))
+        print(dim("  No HMB workbook or PRO/II dump found here — manual-property circuits only."))
+        p_ = ask("Type a path to an HMB / dump, or press Enter to continue without one")
+        if p_.strip().strip('"'):
+            path = p_.strip().strip('"')
+            if os.path.isfile(path):
+                hmb_path = build_hmb_action(path) if kind_of(path) == "dump" else path
 
     case = choose_case(hmb_path) if hmb_path else "Case 1"
     circuit = choose_circuit(input_path)
@@ -237,6 +381,7 @@ def run_engine():
     mode = choose_from("Flash mode:",
                        ["isothermal  (default)", "isenthalpic  (Joule-Thomson)"])
     flash_mode = "isenthalpic" if mode.startswith("isenthalpic") else "isothermal"
+    theme = choose_theme()
 
     # ── summary ──
     print()
@@ -247,18 +392,23 @@ def run_engine():
     print(f"    Case    : {green(case)}")
     print(f"    Circuit : {green(circuit or 'ALL')}")
     print(f"    Mode    : {green(flash_mode)}")
+    print(f"    Colours : {green(theme)}")
+    print(dim("    Flow cases (Normal / Max / Min) come from the Flow_Cases sheet of the input."))
     rule()
     if ask("Proceed? (y/n)", default="y").lower() not in ("y", "yes"):
         print(dim("  Cancelled."))
         return
+    execute_run(input_path, hmb_path, circuit, case, flash_mode, theme)
 
+
+def execute_run(input_path, hmb_path, circuit=None, case="Case 1",
+                flash_mode="isothermal", theme="colored") -> bool:
     if hmb_path is None:
-        # The engine needs a path argument; pass a placeholder that won't be
-        # used because manual circuits resolve from the yellow cells.
-        hmb_path = next((f for f in others), "HMB.xlsx")
-
+        # The engine needs a path argument; manual circuits resolve from the yellow cells.
+        hmb_path = ""
     try:
         import hydraulics as N
+        N.set_output_theme(theme)
         results = N.run_noiso(input_path, hmb_path,
                               circuit_id=circuit, case=case,
                               flash_mode=flash_mode)
@@ -266,11 +416,59 @@ def run_engine():
         print(green(bold(f"  Done — {len(results)} workbook(s) written:")))
         for op, *_ in results:
             print(f"    • {op}")
+        return True
     except SystemExit as exc:
         print(red(f"  Stopped: {exc}"))
     except Exception:
         print(red("  Error while running the engine:"))
         traceback.print_exc()
+    return False
+
+
+def build_and_run():
+    """Menu option 3: build the HMB from a PRO/II dump, then run the hydraulics on it."""
+    hmb = build_hmb_action()
+    if hmb:
+        print(dim("  Now the hydraulics run — pick the generated HMB in the next list."))
+        run_engine()
+
+
+# ── command line (no questions) ─────────────────────────────────────────────
+def _opt(argv, name, flag=False):
+    if name in argv:
+        i = argv.index(name)
+        if flag:
+            return True, [a for j, a in enumerate(argv) if j != i]
+        if i + 1 < len(argv):
+            return argv[i + 1], [a for j, a in enumerate(argv) if j not in (i, i + 1)]
+    return (False if flag else None), argv
+
+
+def cli_main(argv: list[str]) -> int:
+    cmd, rest = argv[0].lower(), argv[1:]
+    sheet, rest = _opt(rest, "--sheet")
+    consts, rest = _opt(rest, "--constants")
+    case, rest = _opt(rest, "--case")
+    iso, rest = _opt(rest, "--isenthalpic", flag=True)
+    light, rest = _opt(rest, "--light", flag=True)
+    args = [a for a in rest if not a.startswith("--")]
+    mode = "isenthalpic" if iso else "isothermal"
+    theme = "light" if light else "colored"
+    case = case or "Case 1"
+    if cmd == "build" and args:
+        out = args[1] if len(args) > 1 else default_hmb_name(args[0])
+        return 0 if build_hmb_action(args[0], out, sheet, consts, interactive=False) else 1
+    if cmd == "run" and len(args) >= 2:
+        return 0 if execute_run(args[0], args[1], args[2] if len(args) > 2 else None,
+                                case, mode, theme) else 1
+    if cmd == "all" and len(args) >= 2:
+        hmb = build_hmb_action(args[0], default_hmb_name(args[0]), sheet, consts, interactive=False)
+        if not hmb:
+            return 1
+        return 0 if execute_run(args[1], hmb, args[2] if len(args) > 2 else None,
+                                case, mode, theme) else 1
+    print(__doc__)
+    return 2
 
 
 def open_output_folder():
@@ -290,9 +488,11 @@ def open_output_folder():
 def console_main():
     banner()
     actions = {
-        "1": ("Run hydraulics", run_engine),
-        "2": ("Create blank input template", make_template),
-        "3": ("Open this folder", open_output_folder),
+        "1": ("Run hydraulics (pick an HMB, or build it from a PRO/II dump first)", run_engine),
+        "2": ("Build the HMB from a PRO/II dump  →  then run hydraulics", build_and_run),
+        "3": ("Build the HMB from a PRO/II dump only", build_hmb_action),
+        "4": ("Create blank input template", make_template),
+        "5": ("Open this folder", open_output_folder),
         "q": ("Quit", None),
     }
     while True:
@@ -362,8 +562,8 @@ def split_files():
 
 def hmb_cases(path: str) -> list[str]:
     try:
-        import hmb_proii_reader as H
-        return H.list_cases(path)
+        import hmbbuilder as H
+        return [c for c in H.list_cases(path) if re.match(r"(?i)case", c)]
     except Exception:
         return []
 
@@ -592,7 +792,10 @@ def gui_main():
 
 
 def main():
-    if any(a.lower() in ("--gui", "-g") for a in sys.argv[1:]):
+    argv = sys.argv[1:]
+    if argv and argv[0].lower() in ("build", "run", "all"):
+        sys.exit(cli_main(argv))
+    if any(a.lower() in ("--gui", "-g") for a in argv):
         gui_main()
     else:
         console_main()
