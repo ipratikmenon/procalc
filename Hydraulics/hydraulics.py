@@ -8328,7 +8328,7 @@ def build_profile_flash_noiso(
                 src_tag = (f"ΔP back-calculated from Set P = {set_p:.3f} psia (outlet)"
                            if p > set_p else
                            f"Set P {set_p:.3f} ≥ upstream {p:.3f} psia → valve fully open, ΔP = 0")
-            elif dest_p is not None:
+            elif dest_p is not None and not fixed_dp:
                 ov = (cv_overrides or {}).get(ridx)
                 if ov is not None:
                     base_dp = ov
@@ -9698,10 +9698,63 @@ def _circuit_case(cid, c, all_rows, input_path, hmb_path, case, map_path, flash_
             print(f"  Branch '{label}' (line {bline}) joins Main at "
                   f"Tee Join Branch Flow {join_n}.")
 
+    # ── Source pressure back-calculated from the Destination pressure ─────────
+    # Source row WITHOUT a Set P (and no Start P) + a Destination WITH a Set P: find the pressure the
+    # source (e.g. a pump discharge) must deliver so the line arrives at the Destination pressure.
+    back_note = ""
+    src_row = main_rows[0] if main_rows else None
+    dest_row = next((r for r in reversed(main_rows)
+                     if _is_destination(r.get("Fitting Name"))
+                     and num(r.get("Set P (psia)")) is not None), None)
+    if (src_row is not None and dest_row is not None and not p0
+            and _is_source(src_row.get("Fitting Name"))
+            and num(src_row.get("Set P (psia)")) is None):
+        target = num(dest_row.get("Set P (psia)"))
+        bad_cv = [r.get("Comp ID") for r in main_rows if _is_control_valve(r.get("Fitting Name"))
+                  and not num(r.get("Fixed dP (psi)")) and num(r.get("Set P (psia)")) is None
+                  and num(r.get("Fixed K")) is None]
+        if bad_cv:
+            print(f"  WARNING: source pressure cannot be back-calculated while control valve(s) "
+                  f"{', '.join(str(b) for b in bad_cv)} have no Fixed dP / Fixed K (a flow-control valve "
+                  f"floats to the Destination) — give the valve a fixed ΔP.")
+        else:
+            guess = target + 25.0
+            conv = False
+            for _it in range(14):
+                _st, _fl, _cm, _mw = build_profile_solved(
+                    main_rows, resolver, guess, flash_mode=flash_mode,
+                    default_sp=sp, injections=injections, const_map=cmap)
+                arrive = _st[-1].p_out_psia if _st else guess
+                err = target - arrive
+                if abs(err) < 0.005:
+                    conv = True
+                    break
+                guess = max(guess + err, target)
+            p_start = guess
+            back_note = (f"Source (pump discharge) pressure BACK-CALCULATED: {p_start:.3f} psia needed to arrive "
+                         f"at Destination {target:g} psia" + ("" if conv else " (not fully converged)"))
+            # pump duty: suction = the stream's own pressure, liquid service
+            try:
+                p_suc = sp.pres_psia
+                rho_l = (_st[0].props or {}).get("rho_liq") if _st else None
+                q_l = (_st[0].props or {}).get("q_liq") if _st else None
+                if p_suc and rho_l and q_l and (_st[0].props or {}).get("m_vap", 0) in (0, None):
+                    dpp = p_start - p_suc
+                    gpm = q_l * 0.124675
+                    head = dpp * 144.0 / rho_l
+                    hp = gpm * dpp / 1714.0
+                    back_note += (f"  |  pump: suction {p_suc:.1f} psia, differential {dpp:.1f} psi = {head:.0f} ft "
+                                  f"of liquid at {gpm:.0f} gpm, hydraulic power {hp:.1f} hp")
+            except Exception:
+                pass
+            print(f"  {back_note}")
+
     # ── March the Main with branch injections ────────────────────────
     main_stations, main_flashes, main_comps, main_mw = build_profile_solved(
         main_rows, resolver, p_start, flash_mode=flash_mode,
         default_sp=sp, injections=injections, const_map=cmap)
+    if back_note and main_stations:
+        main_stations[0].note = back_note + "  |  " + (main_stations[0].note or "")
 
     # Manual circuit with joins: the screening sheets (FIV / AIV / regime / maps)
     # should describe the MIXED stream at the end of the line, not the first inlet.
