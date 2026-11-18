@@ -9706,9 +9706,18 @@ def _circuit_case(cid, c, all_rows, input_path, hmb_path, case, map_path, flash_
     dest_row = next((r for r in reversed(main_rows)
                      if _is_destination(r.get("Fitting Name"))
                      and num(r.get("Set P (psia)")) is not None), None)
-    if (src_row is not None and dest_row is not None and not p0
+    if dest_row is not None and not (src_row is not None and _is_source(src_row.get("Fitting Name"))
+                                     and num(src_row.get("Set P (psia)")) is None):
+        why = ("the first Main row is not a 'Source'" if not (src_row is not None and _is_source(src_row.get("Fitting Name")))
+               else f"the Source row has Set P = {num(src_row.get('Set P (psia)')):g}")
+        print(f"  Note: Destination Set P ({num(dest_row.get('Set P (psia)')):g}) is only a target here — "
+              f"{why}, so the source pressure is NOT back-calculated.")
+    if (src_row is not None and dest_row is not None
             and _is_source(src_row.get("Fitting Name"))
             and num(src_row.get("Set P (psia)")) is None):
+        if p0:
+            print(f"  Note: Start P ({p0:g}) is ignored — the Source has no Set P and the Destination has one, "
+                  f"so the source pressure is back-calculated.")
         target = num(dest_row.get("Set P (psia)"))
         bad_cv = [r.get("Comp ID") for r in main_rows if _is_control_valve(r.get("Fitting Name"))
                   and not num(r.get("Fixed dP (psi)")) and num(r.get("Set P (psia)")) is None
