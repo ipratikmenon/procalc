@@ -2451,6 +2451,11 @@ def build_aiv_sheet(wb, stations, sp, line_no, stream_name, efficiency=1e-4,
     if src is not None:
         dp_src_pa = src.dp_total_psi * PSIA_TO_PA
         rho_src = (src.rho_lbft3 or 0.0) * LBFT3_TO_KGM3
+        if rho_src <= 0:       # valve / orifice rows carry no density: use the nearest upstream flowing station
+            for _k in range(src_idx - 1, -1, -1):
+                if (stations[_k].rho_lbft3 or 0.0) > 0:
+                    rho_src = stations[_k].rho_lbft3 * LBFT3_TO_KGM3
+                    break
         W_ac = acoustic_power(mdot, dp_src_pa, rho_src, efficiency)
         lw_src = sound_power_level(W_ac)
     else:

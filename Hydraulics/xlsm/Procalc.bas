@@ -64,6 +64,7 @@ Public Sub RunHydraulics()
     If gMult <= 0 Then gMult = 1#
     ReDim out(1 To nRow + 10, 1 To 28): nOut = 0
     ReDim cvOut(1 To nRow + 10, 1 To 14): nCV = 0
+    InitStations
 
     Dim r As Long, r1 As Long, cid As String, nCirc As Long
     r = 1
@@ -78,6 +79,7 @@ Public Sub RunHydraulics()
         nCirc = nCirc + 1
     Loop
     WriteOutputs
+    WriteFivAiv
     Worksheets("Control").Range("C8").Value = nCirc & " circuit(s), " & nOut & " rows  -  " & _
         Format(Timer - t0, "0.00") & " s  -  " & Format(Now, "yyyy-mm-dd hh:nn:ss")
     Worksheets("Control").Range("C8").Font.Color = RGB(0, 128, 0)
@@ -195,9 +197,10 @@ Private Function ResolveID(ByVal spec As String, ByVal bore As Double, ByRef nps
                            ByRef sch As String, ByRef basis As String) As Double
     Dim ix As Long, od As Double, wall As Double, ov As String, p As Long, i As Long, j As Long
     Dim jlo As Long, jhi As Long, t As String
+    lastOD = 0: lastWall = 0
     ix = NpsIndex(bore)
     If ix = 0 Then basis = "bore not recognised": Exit Function
-    nps = odNps(ix): od = odVal(ix)
+    nps = odNps(ix): od = odVal(ix): lastOD = od
     p = InStr(spec, "/")
     If p > 0 Then ov = UCase$(Replace(Trim$(Mid$(spec, p + 1)), "SCH", "")): spec = Trim$(Left$(spec, p - 1))
     sch = ""
@@ -221,12 +224,13 @@ Private Function ResolveID(ByVal spec As String, ByVal bore As Double, ByRef nps
     If Len(sch) = 0 Then sch = "STD": basis = basis & " (spec n/a -> STD)"
     If IsNumeric(sch) Then
         If CDbl(sch) > 0.01 And CDbl(sch) < 3 And InStr(sch, ".") > 0 Then
-            wall = CDbl(sch): ResolveID = od - 2 * wall: Exit Function
+            wall = CDbl(sch): lastWall = wall: ResolveID = od - 2 * wall: Exit Function
         End If
     End If
     wall = WallFor(nps, sch)
     If wall = 0 Then wall = WallFor(nps, "STD"): basis = basis & " (sched n/a -> STD)"
     If wall = 0 Then basis = basis & " (no wall)": Exit Function
+    lastWall = wall
     ResolveID = Round(od - 2 * wall, 4)
 End Function
 
@@ -856,6 +860,7 @@ Private Sub SolveCircuit(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String
         note = "Source P back-calculated from Destination Set P = " & Format(dstP, "0.000") & " psia"
     End If
     pEnd = March(r1, r2, cid, startP, True, 0)
+    FlushStations cid
     If flashOn Then note = note & IIf(Len(note) > 0, " | ", "") & "Flash model: " & fSrc & " (" & sStream & ")"
     If Len(note) > 0 And nOut > nStart Then out(nStart + 1, 24) = note & " | " & out(nStart + 1, 24)
 End Sub
@@ -873,7 +878,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
     Dim rho As Double, v As Double, Re As Double, f As Double, eF As Double, eK As Double, eZ As Double
     Dim dPf As Double, dPk As Double, dPz As Double, dPt As Double, k As Double, note As String, d As Double
     Dim ctype As String, dstP As Double, hasDst As Boolean, rr As Long, lo As Double, hi As Double, mdp As Double
-    Dim j As Long, pe As Double, isCV As Boolean, bdp As Double, tmp As String
+    Dim j As Long, pe As Double, isCV As Boolean, bdp As Double, tmp As String, stdRow As Boolean
     p = pStart
     For r = r1 To r2
         fit = GetS(r, "Fitting Name"): fl = LCase$(fit)
@@ -886,7 +891,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
         fixK = GetN(r, "Fixed K", hasFK): instDp = GetN(r, "Instr dP (psi)", hasID)
         idIn = 0: nps = "": sch = "": basis = ""
         If bore > 0 Then idIn = ResolveID(spec, bore, nps, sch, basis)
-        rho = 0: v = 0: Re = 0: f = 0: dPf = 0: dPk = 0: dPz = 0: dPt = 0: note = "": isCV = False
+        rho = 0: v = 0: Re = 0: f = 0: dPf = 0: dPk = 0: dPz = 0: dPt = 0: note = "": isCV = False: stdRow = False
         If fl = "fix pressure" Then
             dPt = fixedDp: note = "Fix Pressure"
         ElseIf fl = "orifice" Or UCase$(GetS(r, "Instr Type")) = "FO" Or UCase$(GetS(r, "Instr Type")) = "RO" Then
@@ -951,7 +956,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
                 d = idIn * IN_TO_M
                 DpKernel d, lenFt * FT_TO_M, dzFt * FT_TO_M, k, p, rho, v, Re, f, eF, eK, eZ
                 dPf = eF * PA_TO_PSI: dPk = eK * PA_TO_PSI: dPz = eZ * PA_TO_PSI
-                dPt = dPf + dPk + dPz: note = basis & eNote
+                dPt = dPf + dPk + dPz: note = basis & eNote: stdRow = True
             End If
         End If
         pOut = p - dPt: cum = cum + lenFt
@@ -972,6 +977,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             out(nOut, 25) = IIf(eVap + eLiq > 0, eVap / (eVap + eLiq), 0)
             out(nOut, 26) = eBeta: out(nOut, 27) = eVap: out(nOut, 28) = eLiq
             If flashOn Then WriteComp cid, fit, p, pOut
+            RecStn cid, r, fit, nps, idIn, cum, p, dPt, rho, v, stdRow
         End If
         p = pOut
 NextRow:
@@ -1054,6 +1060,304 @@ Private Sub WriteComp(ByVal cid As String, ByVal fit As String, ByVal pIn As Dou
     wsD.Range(wsD.Cells(4, cdCol), wsD.Cells(3 + fN, cdCol + 1)).Value = d
     cdCol = cdCol + 2
 End Sub
+
+'==========================================================================
+'  FIV (EI T2.2) and AIV (source attenuation) - ports of build_fiv_sheet / build_aiv_sheet
+'==========================================================================
+Private stN As Long
+Private stSeq() As String, stFit() As String, stCid() As String, stComp() As String, stNps() As String
+Private stOD() As Double, stWall() As Double, stID() As Double, stRho() As Double, stV() As Double
+Private stRg() As Double, stRl() As Double, stMg() As Double, stMl() As Double, stMu() As Double
+Private stMach() As Double, stRv2V() As Double, stRv2L() As Double, stCum() As Double, stPin() As Double, stDp() As Double
+Private stHasMom() As Boolean
+Private fivOut() As Variant, nFiv As Long, aivOut() As Variant, nAiv As Long, lastOD As Double, lastWall As Double
+Private mdotCirc As Double
+
+Private Sub InitStations()
+    Dim n As Long: n = nRow + 10
+    ReDim stSeq(1 To n): ReDim stFit(1 To n): ReDim stCid(1 To n): ReDim stComp(1 To n): ReDim stNps(1 To n)
+    ReDim stOD(1 To n): ReDim stWall(1 To n): ReDim stID(1 To n): ReDim stRho(1 To n): ReDim stV(1 To n)
+    ReDim stRg(1 To n): ReDim stRl(1 To n): ReDim stMg(1 To n): ReDim stMl(1 To n): ReDim stMu(1 To n)
+    ReDim stMach(1 To n): ReDim stRv2V(1 To n): ReDim stRv2L(1 To n): ReDim stCum(1 To n): ReDim stPin(1 To n)
+    ReDim stDp(1 To n): ReDim stHasMom(1 To n)
+    ReDim fivOut(1 To n, 1 To 32): nFiv = 0
+    ReDim aivOut(1 To n + 20, 1 To 14): nAiv = 0
+    stN = 0
+End Sub
+
+' called from March on the write pass
+Private Sub RecStn(ByVal cid As String, ByVal r As Long, ByVal fit As String, ByVal nps As String, ByVal idIn As Double, _
+                   ByVal cum As Double, ByVal pIn As Double, ByVal dPt As Double, ByVal rho As Double, ByVal v As Double, ByVal std As Boolean)
+    Dim area As Double, vm As Double, lm As Double, rg As Double, rl As Double, c As Double, k As Double
+    stN = stN + 1
+    stCid(stN) = cid: stFit(stN) = fit: stNps(stN) = nps: stComp(stN) = GetS(r, "Comp ID")
+    stSeq(stN) = GetS(r, "Seq"): If stSeq(stN) = "" Then stSeq(stN) = CStr(stN)
+    stOD(stN) = lastOD * 25.4: stWall(stN) = lastWall * 25.4: stID(stN) = idIn
+    stRho(stN) = rho / LBFT3_TO_KGM3: stV(stN) = v / FT_TO_M
+    stCum(stN) = cum: stPin(stN) = pIn: stDp(stN) = dPt
+    stMg(stN) = eVap: stMl(stN) = eLiq: stMu(stN) = eMuG
+    rg = GasRho(pIn) / LBFT3_TO_KGM3: rl = sLrho
+    stRg(stN) = rg: stRl(stN) = rl
+    stHasMom(stN) = False
+    If std And idIn > 0 Then
+        area = PI / 4# * (idIn * IN_TO_M) ^ 2
+        vm = eVap * LBHR_TO_KGS: lm = eLiq * LBHR_TO_KGS
+        stHasMom(stN) = True
+        If vm > 0 And rg > 0 Then
+            c = vm / (rg * LBFT3_TO_KGM3) / area
+            stRv2V(stN) = rg * LBFT3_TO_KGM3 * c * c
+            k = eGam
+            If k > 0 And eMW > 0 Then
+                c = Sqr(k * eZ * R_UNIV * ((sT + 459.67) / 1.8) / (eMW / 1000#))
+                If c > 0 Then stMach(stN) = v / c
+            End If
+        End If
+        If lm > 0 And rl > 0 Then
+            c = lm / (rl * LBFT3_TO_KGM3) / area
+            stRv2L(stN) = rl * LBFT3_TO_KGM3 * c * c
+        End If
+    End If
+End Sub
+
+Private Function FcfF(ByVal g As Double, ByVal mu As Double) As Double
+    If g < 0.2 Then FcfF = 0.2 + 4# * g: Exit Function
+    If g < 0.88 Then FcfF = 1#: Exit Function
+    If g < 0.99 Then FcfF = -27.882 * g ^ 2 + 45.545 * g - 17.495: Exit Function
+    If mu <= 0 Then mu = 0.0012
+    FcfF = Sqr(mu / 0.0012)
+End Function
+Private Function Ln10(ByVal x As Double) As Double
+    Ln10 = Log(x) / Log(10#)
+End Function
+Private Function FvStiff(ByVal D As Double, ByVal T As Double) As Double
+    Dim a As Double, b As Double
+    If D < 812 Then
+        a = 446187# + 646 * D + 0.000917 * D ^ 3: b = 0.1 * Log(D) - 1.374
+    Else
+        a = 419373.9 + 859.4 * D + 0.4803 * D ^ 2 - 0.0001625 * D ^ 3: b = 0.1001 * Log(D) - 0.00005309 * D - 1.358
+    End If
+    FvStiff = a * (D / T) ^ b
+End Function
+Private Function FvMedStiff(ByVal D As Double, ByVal T As Double) As Double
+    Dim a As Double, b As Double
+    If D < 812 Then
+        a = 283921# + 370 * D: b = 0.1106 * Log(D) - 1.501
+    Else
+        a = 246340# + 502.2 * D + 0.1218 * D ^ 2 - 0.0000332 * D ^ 3: b = 0.0916 * Log(D) - 0.0000125 * D - 1.38
+    End If
+    FvMedStiff = a * (D / T) ^ b
+End Function
+Private Function FvMedium(ByVal D As Double, ByVal T As Double) As Double
+    Dim a As Double, b As Double
+    If D < 812 Then
+        If D <= 219 Then
+            FvMedium = Exp((13.1 - 0.00475 * D + 0.0000141 * D ^ 2) * (D / T) ^ (-0.132 + 0.000228 * D - 0.000000372 * D ^ 2))
+            Exit Function
+        End If
+        a = 150412# + 209 * D: b = 0.0815 * Log(D) - 1.327
+    Else
+        a = 179.1 * D + 195015#: b = 0.1533 * Log(D) - 0.00007 * D - 1.768
+    End If
+    FvMedium = a * (D / T) ^ b
+End Function
+Private Function FvFlex(ByVal D As Double, ByVal T As Double) As Double
+    Dim a As Double, b As Double
+    If D < 812 Then
+        If D <= 219 Then
+            FvFlex = Exp((0.0000132 * D ^ 2 - 0.00442 * D + 12.22) * (D / T) ^ (0.000284 * D - 0.000000462 * D ^ 2 - 0.164))
+            Exit Function
+        End If
+        a = 41.21 * D + 49397#: b = 0.0815 * Log(D) - 1.384
+    Else
+        a = 42.21 * D + 52778#: b = 0.0697 * Log(D) - 1.323
+    End If
+    FvFlex = a * (D / T) ^ b
+End Function
+Private Function SpanOf(ByVal arr As Long, ByVal D As Double) As Double
+    Select Case arr
+        Case 2   ' Medium
+            If D <= 762 Then SpanOf = -0.00001597 * D ^ 2 + 0.0336 * D + 4.429 Else SpanOf = 0.7443 * D ^ 0.5033
+        Case 3   ' Medium stiff
+            If D <= 762 Then SpanOf = -0.00001189 * D ^ 2 + 0.0253 * D + 3.36 Else SpanOf = 0.5623 * D ^ 0.5034
+        Case 4   ' Stiff
+            If D <= 762 Then SpanOf = -0.00001235 * D ^ 2 + 0.02 * D + 2.056 Else SpanOf = 0.4056 * D ^ 0.4927
+    End Select
+End Function
+Private Function FvOf(ByVal arr As Long, ByVal D As Double, ByVal T As Double) As Double
+    Select Case arr
+        Case 1: FvOf = FvFlex(D, T)
+        Case 2: FvOf = FvMedium(D, T)
+        Case 3: FvOf = FvMedStiff(D, T)
+        Case Else: FvOf = FvStiff(D, T)
+    End Select
+End Function
+
+' assess_span: returns text in sup, span (m) in sp (-1 = no limit, -2 = not achievable)
+Private Sub AssessSpan(ByVal rv2 As Double, ByVal fcfV As Double, ByVal D As Double, ByVal T As Double, ByVal lim As Double, _
+                       ByRef sup As String, ByRef sp As Double)
+    Dim fvReq As Double, a As Long
+    fvReq = rv2 * fcfV / lim
+    For a = 1 To 4
+        If FvOf(a, D, T) >= fvReq Then
+            sup = Choose(a, "Flexible", "Medium", "Medium Stiff", "Stiff")
+            If a = 1 Then sp = -1 Else sp = SpanOf(a, D)
+            Exit Sub
+        End If
+    Next a
+    sup = "Not achievable": sp = -2
+End Sub
+
+Private Sub FlushStations(ByVal cid As String)
+    Dim i As Long, j As Long, D As Double, T As Double, rv2 As Double, qg As Double, ql As Double, g As Double, fc As Double
+    Dim lims As Variant, sup As String, sp As Double, c As Long, worst As Long, wr2 As Double
+    Dim srcI As Long, dmax As Double, mdot As Double, rhoSrc As Double, dpPa As Double, wac As Double, lws As Double
+    Dim cumAtt As Double, prevCum As Double, started As Boolean, dist As Double, lwl As Double, cmp As Double, eil As Double, dyn As Double
+    Dim cmS As String, eiS As String, k As Long
+    If stN = 0 Then Exit Sub
+    lims = Array(0.15, 0.25, 0.35, 0.45)
+    ' ---- FIV
+    For i = 1 To stN
+        D = stOD(i): T = stWall(i)
+        If D <= 0 Or T <= 0 Then GoTo NextF
+        rv2 = stRho(i) * LBFT3_TO_KGM3 * (stV(i) * FT_TO_M) ^ 2
+        qg = 0: ql = 0
+        If stRg(i) > 0 Then qg = stMg(i) * LBHR_TO_KGS / (stRg(i) * LBFT3_TO_KGM3)
+        If stRl(i) > 0 Then ql = stMl(i) * LBHR_TO_KGS / (stRl(i) * LBFT3_TO_KGM3)
+        If qg + ql > 0 Then g = qg / (qg + ql) Else g = 1#
+        fc = FcfF(g, stMu(i) * 0.001)
+        nFiv = nFiv + 1
+        fivOut(nFiv, 1) = cid: fivOut(nFiv, 2) = stSeq(i): fivOut(nFiv, 3) = stComp(i): fivOut(nFiv, 4) = stFit(i)
+        fivOut(nFiv, 5) = stNps(i): fivOut(nFiv, 6) = D: fivOut(nFiv, 7) = T: fivOut(nFiv, 8) = stID(i)
+        fivOut(nFiv, 9) = stV(i): fivOut(nFiv, 10) = stRho(i): fivOut(nFiv, 11) = rv2: fivOut(nFiv, 12) = g: fivOut(nFiv, 13) = fc
+        fivOut(nFiv, 14) = FvStiff(D, T): fivOut(nFiv, 15) = FvMedStiff(D, T): fivOut(nFiv, 16) = FvMedium(D, T): fivOut(nFiv, 17) = FvFlex(D, T)
+        If stHasMom(i) Then
+            fivOut(nFiv, 18) = stMach(i): fivOut(nFiv, 19) = stRv2V(i): fivOut(nFiv, 20) = stRv2L(i)
+        End If
+        c = 21
+        For j = 0 To 3
+            AssessSpan rv2, fc, D, T, CDbl(lims(j)), sup, sp
+            fivOut(nFiv, c) = sup
+            If sp = -1 Then
+                fivOut(nFiv, c + 1) = "No EI span limit"
+            ElseIf sp = -2 Then
+                fivOut(nFiv, c + 1) = "Not achievable"
+            Else
+                fivOut(nFiv, c + 1) = sp: fivOut(nFiv, c + 2) = sp / FT_TO_M
+            End If
+            c = c + 3
+        Next j
+NextF:
+    Next i
+    ' ---- AIV: source = largest total dP
+    dmax = -1E+30
+    For i = 1 To stN
+        If stDp(i) > dmax Then dmax = stDp(i): srcI = i
+    Next i
+    mdot = (sVap + sLiq) * gMult * LBHR_TO_KGS
+    rhoSrc = stRho(srcI) * LBFT3_TO_KGM3
+    If rhoSrc <= 0 Then            ' CV / orifice rows carry no density: use the nearest upstream flowing station
+        For k = srcI - 1 To 1 Step -1
+            If stRho(k) > 0 Then rhoSrc = stRho(k) * LBFT3_TO_KGM3: Exit For
+        Next k
+    End If
+    dpPa = stDp(srcI) * PSIA_TO_PA
+    If rhoSrc > 0 Then wac = 0.0001 * mdot * dpPa / rhoSrc
+    If wac > 0 Then lws = 10# * Ln10(wac / 1E-12)
+    nAiv = nAiv + 1
+    aivOut(nAiv, 1) = cid: aivOut(nAiv, 2) = "SOURCE": aivOut(nAiv, 3) = stComp(srcI) & " / " & stFit(srcI)
+    aivOut(nAiv, 4) = "dP (psi)": aivOut(nAiv, 5) = stDp(srcI): aivOut(nAiv, 6) = "W_ac (W)": aivOut(nAiv, 7) = wac
+    aivOut(nAiv, 8) = "PWL (dB)": aivOut(nAiv, 9) = lws
+    For i = srcI To stN
+        D = stOD(i): T = stWall(i)
+        If i = srcI Then prevCum = stCum(i): cumAtt = 0
+        cumAtt = cumAtt + 0.2 * IIf(stCum(i) - prevCum > 0, stCum(i) - prevCum, 0) * FT_TO_M + FitLoss(stFit(i))
+        prevCum = stCum(i)
+        dist = IIf(stCum(i) - stCum(srcI) > 0, stCum(i) - stCum(srcI), 0) * FT_TO_M
+        lwl = lws - cumAtt
+        If D > 0 Then cmp = lwl + 10# * Ln10(D) Else cmp = lwl
+        If D > 0 And T > 0 Then eil = lwl + 20# * Ln10(D / T) Else eil = lwl
+        If cmp < 145 Then
+            cmS = "LOW"
+        ElseIf cmp < 155 Then
+            cmS = "MEDIUM"
+        Else
+            cmS = "HIGH"
+        End If
+        If eil < 160 Then
+            eiS = "LOW"
+        ElseIf eil < 170 Then
+            eiS = "MEDIUM"
+        Else
+            eiS = "HIGH"
+        End If
+        If T > 0 Then dyn = (stPin(i) * PSIA_TO_PA * (D / 1000#) / (2# * (T / 1000#))) / 1000000# Else dyn = 0
+        nAiv = nAiv + 1
+        aivOut(nAiv, 1) = cid: aivOut(nAiv, 2) = stSeq(i): aivOut(nAiv, 3) = stComp(i) & " / " & stFit(i)
+        aivOut(nAiv, 4) = D: aivOut(nAiv, 5) = T: aivOut(nAiv, 6) = dist: aivOut(nAiv, 7) = cumAtt
+        aivOut(nAiv, 8) = lwl: aivOut(nAiv, 9) = cmp: aivOut(nAiv, 10) = cmS: aivOut(nAiv, 11) = eil
+        aivOut(nAiv, 12) = eiS: aivOut(nAiv, 13) = dyn
+    Next i
+    stN = 0
+End Sub
+Private Function FitLoss(ByVal fit As String) As Double
+    Dim f As String: f = LCase$(fit)
+    If InStr(f, "elbow") > 0 Or InStr(f, "bend") > 0 Then
+        FitLoss = 2#
+    ElseIf InStr(f, "tee") > 0 Or InStr(f, "stub") > 0 Or InStr(f, "branch") > 0 Then
+        FitLoss = 5#
+    ElseIf InStr(f, "reducer") > 0 Or InStr(f, "swage") > 0 Then
+        FitLoss = 2#
+    End If
+End Function
+
+Private Sub WriteFivAiv()
+    Dim ws As Worksheet, h As Variant, i As Long, c As Long, c2 As Variant
+    h = Array("Circuit", "Seq", "Comp ID", "Fitting", "NPS", "OD (mm)", "Wall (mm)", "ID (in)", "Velocity (ft/s)", "Rho (lb/ft3)", _
+        "rho v2 (kg/m s2)", "GVF", "FCF", "Fv Stiff", "Fv Med-Stiff", "Fv Medium", "Fv Flexible", "Mach (vapor)", "rho v2 Vapor", "rho v2 Liquid", _
+        "Support (LOF<=0.15)", "Span @0.15 (m)", "Span @0.15 (ft)", "Support (LOF<=0.25)", "Span @0.25 (m)", "Span @0.25 (ft)", _
+        "Support (LOF<=0.35)", "Span @0.35 (m)", "Span @0.35 (ft)", "Support (LOF<=0.45)", "Span @0.45 (m)", "Span @0.45 (ft)")
+    Set ws = FreshSheet("FIV_EI_T2.2")
+    ws.Range("A1").Resize(1, 32).Value = h: StyleHeader ws.Range("A1").Resize(1, 32)
+    If nFiv > 0 Then
+        ws.Range("A2").Resize(nFiv, 32).Value = fivOut
+        ws.Range("F2:S" & nFiv + 1).NumberFormat = "0.000"
+        For i = 2 To nFiv + 1
+            For c = 21 To 30 Step 3
+                Select Case CStr(ws.Cells(i, c).Value)
+                    Case "Stiff", "Not achievable": ws.Cells(i, c).Interior.Color = RGB(255, 199, 206)
+                    Case "Medium Stiff": ws.Cells(i, c).Interior.Color = RGB(255, 235, 156)
+                    Case Else: ws.Cells(i, c).Interior.Color = RGB(198, 239, 206)
+                End Select
+            Next c
+        Next i
+    End If
+    ws.Columns("A:AF").ColumnWidth = 12: ws.Columns("D").ColumnWidth = 22
+    ws.Range("A" & nFiv + 4).Value = "Energy Institute T2.2 screening (SI): LOF = rho v2 * FCF / Fv; least-stiff support meeting each LOF limit. VERIFY against the contracted EI edition."
+    h = Array("Circuit", "Seq", "Comp / Fitting", "OD (mm)", "Wall (mm)", "Dist from src (m)", "Cum. atten (dB)", "Local PWL (dB)", _
+        "C-M param", "C-M screen", "EI likelihood", "EI risk", "Dyn. stress idx (MPa)", "")
+    Set ws = FreshSheet("AIV")
+    ws.Range("A1").Resize(1, 13).Value = h: StyleHeader ws.Range("A1").Resize(1, 13)
+    If nAiv > 0 Then
+        ws.Range("A2").Resize(nAiv, 13).Value = aivOut
+        ws.Range("D2:I" & nAiv + 1).NumberFormat = "0.00": ws.Range("K2:K" & nAiv + 1).NumberFormat = "0.0": ws.Range("M2:M" & nAiv + 1).NumberFormat = "0.0"
+        For i = 2 To nAiv + 1
+            If CStr(ws.Cells(i, 2).Value) = "SOURCE" Then
+                ws.Range(ws.Cells(i, 1), ws.Cells(i, 13)).Interior.Color = RGB(160, 238, 192)
+            Else
+                For Each c2 In Array(10, 12)
+                    Select Case CStr(ws.Cells(i, c2).Value)
+                        Case "LOW": ws.Cells(i, c2).Interior.Color = RGB(198, 239, 206)
+                        Case "MEDIUM": ws.Cells(i, c2).Interior.Color = RGB(255, 235, 156)
+                        Case "HIGH": ws.Cells(i, c2).Interior.Color = RGB(255, 199, 206)
+                    End Select
+                Next c2
+            End If
+        Next i
+    End If
+    ws.Columns("A:M").ColumnWidth = 13: ws.Columns("C").ColumnWidth = 26
+    ws.Range("A" & nAiv + 4).Value = "AIV: source = largest dP; W = 1e-4*mdot*dP/rho; PWL = 10log10(W/1e-12); 0.2 dB/m + 2 dB elbow / 5 tee / 2 reducer; Carucci-Mueller and EI likelihood screens. Valve rows use the nearest upstream density. VERIFY eta and source."
+End Sub
+
 
 '==========================================================================
 Private Sub WriteOutputs()
