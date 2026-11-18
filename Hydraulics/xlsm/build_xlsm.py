@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--vba")
     a = ap.parse_args()
     wb = xlsxwriter.Workbook(a.out)
-    NSHEETS = 11
+    NSHEETS = 14
     if a.out.lower().endswith(".xlsm"):
         import tempfile
         import ovba
@@ -77,7 +77,8 @@ def main():
     c.write("B2", "Edit the Input sheet, then press RUN.  Results are rebuilt in Pressure_Profile and CV_Summary.", txt)
     c.write("B4", "Flow case multiplier (%)", lab); c.write("C4", 100, yel)
     c.write("B5", "Streams used", lab)
-    c.write("C5", "Streams sheet (row 1 headers: Stream, then HMB keys).  Paste the HMB stream table there.", txt)
+    c.write("C5", "A sheet named like the stream (HMB per-stream sheet, with composition) is flashed; else the Streams table row is used.", txt)
+    c.write("B7", "Flash from composition (ON/OFF)", lab); c.write("C7", "ON", yel)
     c.write("B8", "Last run", lab); c.write("C8", "not run yet", txt)
     if a.vba:
         c.insert_button("B6", {"macro": "RunHydraulics", "caption": "RUN HYDRAULICS", "width": 260, "height": 34})
@@ -138,9 +139,21 @@ def main():
     print("Streams sheet:", len(found), "streams from", os.path.basename(hmb))
     s.set_column(0, 0, 18); s.set_column(1, 20, 12); s.freeze_panes(1, 1)
 
-    # ── Component_Constants (reserved) ─────────────────────────────────────
+    # ── HMB sheets pasted by the user: COMP_CONSTANTS + per-stream sheets (sample: DX10-OUT) ─────────
+    smp = openpyxl.load_workbook(os.path.join(HERE, "sample_DX10-OUT.xlsx"), data_only=True)
+
+    def copy_sheet(src, dst, head_rows):
+        for ri, row in enumerate(src.iter_rows(values_only=True)):
+            for ci, v in enumerate(row):
+                if v is not None:
+                    dst.write(ri, ci, v, navy if ri in head_rows else None)
     cc = wb.add_worksheet("Component_Constants")
-    cc.write(0, 0, "Paste the COMP_CONSTANTS sheet of the HMB here (used by the flash model in phase 2).", txt)
+    copy_sheet(smp["COMP_CONSTANTS"], cc, (1,))
+    cc.set_column(1, 1, 18); cc.set_row(1, 30)
+    for nm_ in ("DX10-OUT",):
+        w_ = wb.add_worksheet(nm_)
+        copy_sheet(smp[nm_], w_, (1,))
+        w_.set_column(1, 1, 38); w_.set_column(2, 5, 14)
 
     # ── Data sheets ──────────────────────────────────────────────────────
     d = wb.add_worksheet("Data_K"); d.write_row(0, 0, ["Fitting (lower case)", "K"], navy)

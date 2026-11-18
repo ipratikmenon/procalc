@@ -37,6 +37,15 @@ Private pmCls As Variant, pmLo As Variant, pmHi As Variant, pmSch As Variant, pm
 Private out() As Variant, nOut As Long
 Private cvOut() As Variant, nCV As Long
 Private gMult As Double, hdrRow As Long
+'---- flash (composition) model --------------------------------------------
+Private useFlash As Boolean, flashOn As Boolean, fN As Long
+Private fNm() As String, fZ() As Double, fKref() As Double, fMWc() As Double
+Private fTcR() As Double, fOm() As Double, fHasC As Boolean
+Private fPref As Double, fTref As Double, fTotMoles As Double, fBeta0 As Double, fSrc As String
+Private cN() As String, cMW() As Double, cTc() As Double, cPc() As Double, cOm() As Double, nCC As Long
+Private sVMW As Double, sLMW As Double
+Private eVap As Double, eLiq As Double, eMW As Double, eZ As Double, eMuG As Double, eMuL As Double
+Private ePhase As String, eBeta As Double, eGam As Double, eY() As Double, eNote As String
 
 '==========================================================================
 '  Entry point - assigned to the RUN button on the Control sheet
@@ -48,8 +57,10 @@ Public Sub RunHydraulics()
     Application.Calculation = xlCalculationManual
     LoadTables
     gMult = Val(Worksheets("Control").Range("C4").Value) / 100#
+    useFlash = (UCase$(Trim$(CStr(Worksheets("Control").Range("C7").Value))) <> "OFF")
+    ReadConstants
     If gMult <= 0 Then gMult = 1#
-    ReDim out(1 To nRow + 10, 1 To 24): nOut = 0
+    ReDim out(1 To nRow + 10, 1 To 28): nOut = 0
     ReDim cvOut(1 To nRow + 10, 1 To 14): nCV = 0
 
     Dim r As Long, r1 As Long, cid As String, nCirc As Long
@@ -235,8 +246,8 @@ Private Function Darcy(ByVal Re As Double, ByVal eod As Double) As Double
 End Function
 
 Private Function GasRho(ByVal pPsia As Double) As Double
-    If sMW > 0 Then
-        GasRho = pPsia * PSIA_TO_PA * (sMW / 1000#) / (sZ * R_UNIV * ((sT + 459.67) / 1.8))
+    If eMW > 0 Then
+        GasRho = pPsia * PSIA_TO_PA * (eMW / 1000#) / (eZ * R_UNIV * ((sT + 459.67) / 1.8))
     Else
         GasRho = sVrho * LBFT3_TO_KGM3 * pPsia / sPst
     End If
@@ -249,19 +260,30 @@ Private Sub DpKernel(ByVal idM As Double, ByVal lenM As Double, ByVal dzM As Dou
     Dim area As Double, vm As Double, lm As Double, md As Double, x As Double
     Dim rg As Double, rl As Double, mg As Double, ml As Double, mu As Double, gf As Double, dyn As Double
     area = PI / 4# * idM * idM
-    vm = sVap * gMult * LBHR_TO_KGS: lm = sLiq * gMult * LBHR_TO_KGS: md = vm + lm
+    vm = eVap * LBHR_TO_KGS: lm = eLiq * LBHR_TO_KGS: md = vm + lm
     rho = 0: v = 0: Re = 0: f = 0: dpF = 0: dpK = 0: dpZ = 0
     If md <= 0 Or area <= 0 Then Exit Sub
     rl = sLrho * LBFT3_TO_KGM3: rg = GasRho(pPsia)
-    mg = sVmu * 0.001: ml = sLmu * 0.001: x = vm / md
-    Select Case sPhase
-        Case "LIQUID": rho = rl: mu = ml
-        Case "VAPOR": rho = rg: mu = mg
-        Case Else
-            If rg <= 0 Or rl <= 0 Then Exit Sub
+    mg = eMuG * 0.001: ml = eMuL * 0.001: x = vm / md
+    If flashOn Then
+        If x <= 0.00001 Or rg <= 0 Then
+            rho = rl: mu = ml
+        ElseIf x >= 0.99999 Or rl <= 0 Then
+            rho = rg: mu = mg
+        Else
             rho = 1# / (x / rg + (1# - x) / rl)
             If mg > 0 And ml > 0 Then mu = 1# / (x / mg + (1# - x) / ml) Else mu = mg + ml
-    End Select
+        End If
+    Else
+        Select Case ePhase
+            Case "LIQUID": rho = rl: mu = ml
+            Case "VAPOR": rho = rg: mu = mg
+            Case Else
+                If rg <= 0 Or rl <= 0 Then Exit Sub
+                rho = 1# / (x / rg + (1# - x) / rl)
+                If mg > 0 And ml > 0 Then mu = 1# / (x / mg + (1# - x) / ml) Else mu = mg + ml
+        End Select
+    End If
     If rho <= 0 Then Exit Sub
     gf = md / area: v = gf / rho
     If mu > 0 Then Re = gf * idM / mu
@@ -273,14 +295,457 @@ End Sub
 '==========================================================================
 '  Circuit solve
 '==========================================================================
+'  PHASE 2 - composition + flash  (ports of _build_feed / flash / rachford_rice)
+'==========================================================================
+Private Function NumOf(ByVal v As Variant, ByRef ok As Boolean) As Double
+    ok = False
+    If IsEmpty(v) Or IsError(v) Then Exit Function
+    If VarType(v) = vbString Then Exit Function
+    If IsNumeric(v) Then NumOf = CDbl(v): ok = True
+End Function
+
+' Component_Constants sheet = COMP_CONSTANTS layout: B Name, E MW, I Tc(F), J Pc(psia), M omega
+Private Sub ReadConstants()
+    Dim ws As Worksheet, v As Variant, i As Long, r0 As Long, lr As Long, ok As Boolean
+    nCC = 0
+    On Error Resume Next
+    Set ws = Worksheets("Component_Constants")
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+    lr = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    r0 = 0
+    For i = 1 To 6
+        If UCase$(Trim$(CStr(ws.Cells(i, 2).Value))) = "NAME" Then r0 = i: Exit For
+    Next i
+    If r0 = 0 Or lr <= r0 Then Exit Sub
+    v = ws.Range(ws.Cells(r0 + 1, 2), ws.Cells(lr, 13)).Value
+    nCC = UBound(v, 1)
+    ReDim cN(1 To nCC): ReDim cMW(1 To nCC): ReDim cTc(1 To nCC): ReDim cPc(1 To nCC): ReDim cOm(1 To nCC)
+    For i = 1 To nCC
+        cN(i) = UCase$(Trim$(CStr(v(i, 1))))
+        cMW(i) = NumOf(v(i, 4), ok): If Not ok Then cMW(i) = 0
+        cTc(i) = NumOf(v(i, 8), ok): If Not ok Then cTc(i) = -9999
+        cPc(i) = NumOf(v(i, 9), ok): If Not ok Then cPc(i) = 0
+        cOm(i) = NumOf(v(i, 12), ok): If Not ok Then cOm(i) = -9999
+    Next i
+End Sub
+
+Private Function CIdx(ByVal nm As String) As Long
+    Dim i As Long: nm = UCase$(Trim$(nm))
+    For i = 1 To nCC
+        If cN(i) = nm Then CIdx = i: Exit Function
+    Next i
+End Function
+
+Private Function FindStreamSheet(ByVal nm As String) As Worksheet
+    Dim ws As Worksheet, t As String, p As Long, q As Long
+    For Each ws In Worksheets
+        If UCase$(ws.Name) = UCase$(nm) Then Set FindStreamSheet = ws: Exit Function
+    Next ws
+    For Each ws In Worksheets
+        t = CStr(ws.Cells(1, 2).Value)
+        p = InStr(UCase$(t), "STREAM:")
+        If p > 0 Then
+            q = InStr(p, t, "|")
+            If q = 0 Then q = Len(t) + 1
+            If UCase$(Trim$(Mid$(t, p + 7, q - p - 7))) = UCase$(nm) Then Set FindStreamSheet = ws: Exit Function
+        End If
+    Next ws
+End Function
+
+Private Function IsSecHdr(ByVal lab As String) As Boolean
+    Dim p As Long: p = InStr(lab, ".")
+    If p < 2 Then Exit Function
+    IsSecHdr = IsNumeric(Left$(lab, p - 1))
+End Function
+
+Private Function PickCol(v As Variant, ByVal i As Long, ByVal c1 As Long, ByVal c2 As Long, ByRef ok As Boolean) As Double
+    Dim x As Double
+    PickCol = NumOf(v(i, c1), ok)
+    If ok Then Exit Function
+    If c2 > 0 Then PickCol = NumOf(v(i, c2), ok)
+End Function
+
+' Reads an HMB per-stream sheet: properties -> s* globals, compositions -> BuildFeed
+Private Function ReadStreamSheet(ByVal nm As String) As Boolean
+    Dim ws As Worksheet, v As Variant, lr As Long, i As Long, j As Long, ok As Boolean, lab As String, ll As String
+    Dim unit As String, sec As String, comp As Long, cT As Long, cV As Long, cL As Long, t As String, p As Long, q As Long
+    Dim tot As Double, vp As Double, lq As Double, gotV As Boolean, gotL As Boolean, gotZ As Boolean, x As Double
+    Dim secN(1 To 5) As Long, secNm(1 To 5, 1 To 600) As String, secVal(1 To 5, 1 To 600) As Double
+    Set ws = FindStreamSheet(nm)
+    If ws Is Nothing Then Exit Function
+    lr = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    If lr < 4 Then Exit Function
+    v = ws.Range(ws.Cells(1, 2), ws.Cells(lr, 6)).Value
+    t = CStr(v(1, 1)): sPhase = ""
+    p = InStr(t, "Phase:")
+    If p > 0 Then
+        q = InStr(p, t, "|"): If q = 0 Then q = Len(t) + 1
+        sPhase = UCase$(Trim$(Mid$(t, p + 6, q - p - 6)))
+    End If
+    cT = 3: cV = 4: cL = 5
+    For j = 3 To 5
+        Select Case UCase$(Trim$(CStr(v(2, j))))
+            Case "TOTAL": cT = j
+            Case "VAPOR": cV = j
+            Case "LIQUID": cL = j
+        End Select
+    Next j
+    sT = 0: sPst = 0: sVap = 0: sLiq = 0: sMW = 0: sVMW = 0: sLMW = 0: sVrho = 0: sLrho = 0
+    sVmu = 0: sLmu = 0: sZ = 0: sGam = 0
+    Dim tm As Double, hvT As Boolean, hvV As Boolean, hvL As Boolean
+    For i = 3 To lr
+        lab = Trim$(CStr(v(i, 1)))
+        If Len(lab) = 0 Then GoTo NextI
+        unit = UCase$(Trim$(CStr(v(i, 2))))
+        If IsSecHdr(lab) Then
+            sec = UCase$(lab): comp = 0
+            If InStr(sec, "VAPOR MOLE FRACTIONS") > 0 Then
+                comp = 3
+            ElseIf InStr(sec, "LIQUID MOLE FRACTIONS") > 0 Then
+                comp = 2
+            ElseIf InStr(sec, "MOLE FLOW") > 0 Then
+                comp = 4
+            ElseIf InStr(sec, "MASS FLOW") > 0 Then
+                comp = 5
+            ElseIf InStr(sec, "MOLE FRACTIONS") > 0 Then
+                comp = 1
+            ElseIf InStr(sec, "MASS FRACTIONS") > 0 Then
+                comp = -1
+            End If
+            GoTo NextI
+        End If
+        If comp <> 0 Then
+            If comp > 0 And LCase$(lab) <> "component" Then
+                x = NumOf(v(i, 3), ok)
+                If ok And secN(comp) < 600 Then secN(comp) = secN(comp) + 1: secNm(comp, secN(comp)) = UCase$(lab): secVal(comp, secN(comp)) = x
+            End If
+            GoTo NextI
+        End If
+        ll = LCase$(lab)
+        If InStr(sec, "FLOW RATE") > 0 Then
+            If ll = "mass rate" Then
+                tm = NumOf(v(i, cT), hvT): vp = NumOf(v(i, cV), hvV): lq = NumOf(v(i, cL), hvL)
+                If hvT Then sVap = 0: sLiq = 0: tot = tm
+                If hvV Then sVap = vp: gotV = True
+                If hvL Then sLiq = lq: gotL = True
+            End If
+        ElseIf InStr(sec, "CONDITION") > 0 Then
+            If InStr(ll, "temperature") > 0 And sT = 0 Then sT = NumOf(v(i, cT), ok)
+            If InStr(ll, "pressure") > 0 And sPst = 0 Then sPst = NumOf(v(i, cT), ok)
+            If InStr(ll, "molecular weight") > 0 Then
+                If sMW = 0 Then sMW = PickCol(v, i, cT, cV, ok)
+                If sVMW = 0 Then sVMW = NumOf(v(i, cV), ok)
+                If sLMW = 0 Then sLMW = NumOf(v(i, cL), ok)
+            End If
+        ElseIf InStr(sec, "VAPOR PHASE") > 0 Then
+            If InStr(ll, "actual density") > 0 Then sVrho = PickCol(v, i, cV, cT, ok)
+            If InStr(ll, "viscosity") > 0 And InStr(ll, "kin") = 0 Then sVmu = PickCol(v, i, cV, cT, ok)
+            If (InStr(ll, "z-factor") > 0 Or InStr(ll, "z factor") > 0) And sZ = 0 Then sZ = PickCol(v, i, cV, cT, ok)
+            If InStr(ll, "cp/cv") > 0 And sGam = 0 Then sGam = PickCol(v, i, cV, cT, ok)
+        ElseIf InStr(sec, "LIQUID PHASE") > 0 Then
+            If InStr(ll, "actual density") > 0 Then sLrho = PickCol(v, i, cL, cT, ok)
+            If InStr(ll, "viscosity") > 0 And InStr(ll, "kin") = 0 Then sLmu = PickCol(v, i, cL, cT, ok)
+        End If
+NextI:
+    Next i
+    ' split total mass by phase if only the total is printed (as extract_stream)
+    If Not gotV And Not gotL Then
+        If InStr(sPhase, "LIQUID") > 0 And InStr(sPhase, "VAPOR") = 0 Then sLiq = tot Else sVap = tot
+    ElseIf gotV And Not gotL Then
+        sLiq = tot - sVap: If sLiq < 0 Then sLiq = 0
+    ElseIf gotL And Not gotV Then
+        sVap = tot - sLiq: If sVap < 0 Then sVap = 0
+    End If
+    If sPst <= 0 Then Exit Function
+    sStream = nm & " (sheet)"
+    ReadStreamSheet = True
+    ' ---- composition -> feed ------------------------------------------------
+    flashOn = False
+    If secN(1) >= 2 Then flashOn = BuildFeed(secN, secNm, secVal)
+End Function
+
+Private Function SecGet(secN() As Long, secNm() As String, secVal() As Double, ByVal sec As Long, ByVal nm As String) As Double
+    Dim i As Long
+    For i = 1 To secN(sec)
+        If secNm(sec, i) = nm Then SecGet = secVal(sec, i): Exit Function
+    Next i
+End Function
+
+Private Function RR(ByVal n As Long, z() As Double, k() As Double) As Double
+    Dim lo As Double, hi As Double, mdp As Double, gm As Double, i As Long, it As Long, g0 As Double, g1 As Double
+    For i = 1 To n
+        g0 = g0 + z(i) * (k(i) - 1#)
+        g1 = g1 + z(i) * (k(i) - 1#) / k(i)
+    Next i
+    If g0 <= 0 Then RR = 0: Exit Function
+    If g1 >= 0 Then RR = 1: Exit Function
+    lo = 0: hi = 1
+    For it = 1 To 200
+        mdp = 0.5 * (lo + hi): gm = 0
+        For i = 1 To n
+            gm = gm + z(i) * (k(i) - 1#) / (1# + mdp * (k(i) - 1#))
+        Next i
+        If Abs(gm) < 0.000000000001 Then RR = mdp: Exit Function
+        If gm > 0 Then lo = mdp Else hi = mdp
+    Next it
+    RR = 0.5 * (lo + hi)
+End Function
+
+Private Function SolveLambda(ByVal n As Long, z() As Double, kr() As Double, ByVal target As Double) As Double
+    Dim lo As Double, hi As Double, mdp As Double, b As Double, it As Long, i As Long
+    Dim kk() As Double: ReDim kk(1 To n)
+    lo = 0.000000001: hi = 1000000000#
+    For i = 1 To n: kk(i) = ClampK(lo * kr(i), 1E+12): Next i
+    If RR(n, z, kk) >= target Then SolveLambda = lo: Exit Function
+    For i = 1 To n: kk(i) = ClampK(hi * kr(i), 1E+12): Next i
+    If RR(n, z, kk) <= target Then SolveLambda = hi: Exit Function
+    For it = 1 To 200
+        mdp = Sqr(lo * hi)
+        For i = 1 To n: kk(i) = ClampK(mdp * kr(i), 1E+12): Next i
+        b = RR(n, z, kk)
+        If Abs(b - target) < 0.000000001 Then SolveLambda = mdp: Exit Function
+        If b < target Then lo = mdp Else hi = mdp
+    Next it
+    SolveLambda = Sqr(lo * hi)
+End Function
+Private Function ClampK(ByVal k As Double, ByVal hi As Double) As Double
+    If k > hi Then k = hi
+    If k < 1 / hi Then k = 1 / hi
+    ClampK = k
+End Function
+
+Private Function BuildFeed(secN() As Long, secNm() As String, secVal() As Double) As Boolean
+    Dim i As Long, n As Long, nm As String, zi As Double, xi As Double, yi As Double, mi As Double, mo As Double
+    Dim yOk As Long, useYX As Boolean, vmol As Double, lmol As Double, b0 As Double, vmw As Double, lmw As Double
+    Dim kraw() As Double, sz As Double, lam As Double, avg As Double, nk As Long, tmw As Double, tmass As Double, ci As Long
+    Dim zz() As Double, kk() As Double
+    ' reference molar vapour fraction from the HMB phase masses (_ref_beta)
+    vmw = sVMW: If vmw = 0 Then vmw = sMW
+    lmw = sLMW: If lmw = 0 Then lmw = sMW
+    If vmw > 0 Then vmol = sVap / vmw
+    If lmw > 0 Then lmol = sLiq / lmw
+    If vmol + lmol > 0 Then b0 = vmol / (vmol + lmol)
+    If b0 < 0.0001 Then b0 = 0.0001
+    If b0 > 0.9999 Then b0 = 0.9999
+    n = 0
+    ReDim fNm(1 To secN(1)): ReDim fZ(1 To secN(1)): ReDim kraw(1 To secN(1)): ReDim fMWc(1 To secN(1))
+    ReDim fTcR(1 To secN(1)): ReDim fOm(1 To secN(1))
+    For i = 1 To secN(1)
+        If secVal(1, i) > 0.000000000001 Then
+            zi = secVal(1, i): nm = secNm(1, i)
+            xi = SecGet(secN, secNm, secVal, 2, nm): yi = SecGet(secN, secNm, secVal, 3, nm)
+            If yi > 0 And xi > 0.000000000001 Then yOk = yOk + 1
+        End If
+    Next i
+    useYX = (yOk >= 2)
+    For i = 1 To secN(1)
+        If secVal(1, i) > 0.000000000001 Then
+            n = n + 1
+            nm = secNm(1, i): zi = secVal(1, i)
+            xi = SecGet(secN, secNm, secVal, 2, nm): yi = SecGet(secN, secNm, secVal, 3, nm)
+            mi = SecGet(secN, secNm, secVal, 5, nm): mo = SecGet(secN, secNm, secVal, 4, nm)
+            fNm(n) = nm: fZ(n) = zi
+            If useYX And yi > 0 And xi > 0.000000000001 Then
+                kraw(n) = yi / xi
+            ElseIf xi > 0.000000000001 Then
+                kraw(n) = zi / xi
+            Else
+                kraw(n) = 1000000#
+            End If
+            If mi > 0 And mo > 0 Then fMWc(n) = mi / mo Else fMWc(n) = 0
+            ci = CIdx(nm)
+            fTcR(n) = -9999: fOm(n) = -9999
+            If ci > 0 Then
+                If cTc(ci) > -9000 And cOm(ci) > -9000 Then fTcR(n) = cTc(ci) + 459.67: fOm(n) = cOm(ci)
+                If fMWc(n) = 0 And cMW(ci) > 0 Then fMWc(n) = cMW(ci)
+            End If
+        End If
+    Next i
+    If n < 1 Then Exit Function
+    If n = 1 And (sLiq > 0.000000001 Or sVap <= 0) Then Exit Function
+    For i = 1 To n
+        If fMWc(i) > 0 Then avg = avg + fMWc(i): nk = nk + 1
+    Next i
+    If nk > 0 Then avg = avg / nk Else avg = IIf(sMW > 0, sMW, 50)
+    For i = 1 To n
+        If fMWc(i) = 0 Then fMWc(i) = avg
+        sz = sz + fZ(i)
+    Next i
+    ReDim zz(1 To n): ReDim kk(1 To n): ReDim fKref(1 To n)
+    For i = 1 To n
+        fZ(i) = fZ(i) / sz: zz(i) = fZ(i)
+        tmw = tmw + fZ(i) * fMWc(i)
+    Next i
+    lam = SolveLambda(n, zz, kraw, b0)
+    For i = 1 To n
+        fKref(i) = ClampK(lam * kraw(i), 10000000000#)
+    Next i
+    If n = 1 Then fKref(1) = 10000000000#
+    tmass = sVap + sLiq
+    If tmass <= 0 Or tmw <= 0 Then Exit Function
+    fTotMoles = tmass / tmw
+    fPref = sPst: fTref = sT: fBeta0 = b0: fN = n
+    fHasC = False
+    For i = 1 To n
+        If fTcR(i) > -9000 Then fHasC = True: Exit For
+    Next i
+    fSrc = n & " comps, beta0=" & Format(b0, "0.0000") & ", " & IIf(useYX, "y/x", "z/x-lambda") & " K basis"
+    BuildFeed = True
+End Function
+
+' Isothermal flash at pPsia (optionally Wilson T-corrected): fills eVap/eLiq/eMW/eBeta and eY()
+Private Sub FlashAt(ByVal pPsia As Double)
+    Dim i As Long, n As Long, ratio As Double, t_r As Double, tref_r As Double, inv As Double, w As Double
+    Dim k() As Double, beta As Double, sx As Double, sy As Double, vmw As Double, lmw As Double
+    Dim x() As Double, y() As Double, vmol As Double, lmol As Double
+    n = fN: ReDim k(1 To n): ReDim x(1 To n): ReDim y(1 To n): ReDim eY(1 To n)
+    If pPsia < 0.000001 Then pPsia = 0.000001
+    ratio = fPref / pPsia
+    t_r = sT + 459.67: tref_r = fTref + 459.67
+    inv = 0
+    If fHasC And Abs(t_r - tref_r) > 0.000000001 And t_r > 0 And tref_r > 0 Then inv = 1# / tref_r - 1# / t_r
+    For i = 1 To n
+        w = 1#
+        If inv <> 0 And fTcR(i) > 0 Then
+            w = 5.373 * (1# + fOm(i)) * fTcR(i) * inv
+            If w > 50 Then w = 50
+            If w < -50 Then w = -50
+            w = Exp(w)
+        End If
+        k(i) = ClampK(fKref(i) * ratio * w, 1E+12)
+    Next i
+    beta = RR(n, fZ, k)
+    For i = 1 To n
+        x(i) = fZ(i) / (1# + beta * (k(i) - 1#)): y(i) = k(i) * x(i)
+        sx = sx + x(i): sy = sy + y(i)
+    Next i
+    If sx = 0 Then sx = 1
+    If sy = 0 Then sy = 1
+    For i = 1 To n
+        x(i) = x(i) / sx: y(i) = y(i) / sy: eY(i) = y(i)
+        vmw = vmw + y(i) * fMWc(i): lmw = lmw + x(i) * fMWc(i)
+    Next i
+    vmol = beta * fTotMoles: lmol = (1# - beta) * fTotMoles
+    eVap = vmol * vmw * gMult: eLiq = lmol * lmw * gMult
+    eMW = vmw: eBeta = beta
+End Sub
+
+' Vapour mu / Z / Cp-Cv for flash-generated vapour when the stream sheet has none (Lucas + JST, Peng-Robinson Z)
+Private Sub FillVapour(ByVal pPsia As Double)
+    Dim i As Long, n As Long, ci As Long, T As Double, P As Double, ok As Boolean, sy As Double
+    Dim idx() As Long, yv() As Double, m As Long
+    eNote = ""
+    If eVap <= 0 Then Exit Sub
+    If sVmu > 0 And sZ >= 0.2 Then Exit Sub
+    T = (sT + 459.67) / 1.8: P = pPsia / 14.5038
+    n = fN: ReDim idx(1 To n): ReDim yv(1 To n)
+    ok = True
+    For i = 1 To n
+        If eY(i) > 0.000000000001 Then
+            ci = CIdx(fNm(i))
+            If ci = 0 Then ok = False: Exit For
+            If cMW(ci) <= 0 Or cTc(ci) <= -9000 Or cPc(ci) <= 0 Or cOm(ci) <= -9000 Then ok = False: Exit For
+            m = m + 1: idx(m) = ci: yv(m) = eY(i): sy = sy + eY(i)
+        End If
+    Next i
+    If ok And m > 0 And sy > 0 Then
+        Dim a() As Double, bb() As Double, tc() As Double, pc() As Double, w() As Double, mw() As Double
+        Dim j As Long, k As Double, al As Double, am As Double, bm As Double, pA As Double, pB As Double
+        Dim Z As Double, zn As Double, f As Double, df As Double, it As Long, R As Double
+        Dim eta0 As Double, nu As Double, de As Double, tr As Double, xi As Double, Mv As Double
+        ReDim a(1 To m): ReDim bb(1 To m): ReDim tc(1 To m): ReDim pc(1 To m): ReDim w(1 To m): ReDim mw(1 To m)
+        R = 83.14462618
+        For i = 1 To m
+            yv(i) = yv(i) / sy: ci = idx(i)
+            tc(i) = (cTc(ci) + 459.67) / 1.8: pc(i) = cPc(ci) / 14.5038: w(i) = cOm(ci): mw(i) = cMW(ci)
+            Mv = Mv + yv(i) * mw(i)
+            k = 0.37464 + 1.54226 * w(i) - 0.26992 * w(i) ^ 2
+            al = (1# + k * (1# - Sqr(T / tc(i)))) ^ 2
+            a(i) = 0.45724 * R * R * tc(i) ^ 2 / pc(i) * al
+            bb(i) = 0.0778 * R * tc(i) / pc(i)
+        Next i
+        For i = 1 To m
+            For j = 1 To m
+                am = am + yv(i) * yv(j) * Sqr(a(i) * a(j))
+            Next j
+            bm = bm + yv(i) * bb(i)
+        Next i
+        pA = am * P / (R * T) ^ 2: pB = bm * P / (R * T)
+        Z = 1#
+        For it = 1 To 100
+            f = Z ^ 3 - (1# - pB) * Z ^ 2 + (pA - 3# * pB * pB - 2# * pB) * Z - (pA * pB - pB * pB - pB ^ 3)
+            df = 3# * Z * Z - 2# * (1# - pB) * Z + (pA - 3# * pB * pB - 2# * pB)
+            If df = 0 Then Exit For
+            zn = Z - f / df
+            If Abs(zn - Z) < 0.0000000001 Then Z = zn: Exit For
+            Z = zn
+        Next it
+        If Z <= pB Then Z = 1#
+        ' dilute-gas viscosity (Lucas), Wilke-type sqrt(MW) mixing, JST density term
+        Dim nn As Double, dd As Double, tcm As Double, pcm As Double, vcm As Double, rhor As Double, rhs As Double
+        For i = 1 To m
+            tr = T / tc(i)
+            xi = 0.176 * (tc(i) / (mw(i) ^ 3 * pc(i) ^ 4)) ^ (1# / 6#)
+            eta0 = (0.807 * tr ^ 0.618 - 0.357 * Exp(-0.449 * tr) + 0.34 * Exp(-4.058 * tr) + 0.018) / xi
+            nn = nn + yv(i) * eta0 * Sqr(mw(i)): dd = dd + yv(i) * Sqr(mw(i))
+            tcm = tcm + yv(i) * tc(i): pcm = pcm + yv(i) * pc(i)
+            vcm = vcm + yv(i) * (0.291 - 0.08 * w(i)) * R * tc(i) / pc(i)
+        Next i
+        eta0 = nn / dd
+        rhor = (P / (Z * R * T)) * vcm
+        If rhor > 0.1 Then
+            xi = tcm ^ (1# / 6#) / (Mv ^ 0.5 * (pcm / 1.01325) ^ (2# / 3#))
+            rhs = 1.023 + 0.23364 * rhor + 0.58533 * rhor ^ 2 - 0.40758 * rhor ^ 3 + 0.093324 * rhor ^ 4
+            eta0 = eta0 + (rhs ^ 4 - 1#) / xi
+        End If
+        If sVmu <= 0 Then eMuG = eta0 * 0.0001
+        If sZ < 0.2 Then eZ = Z
+        eNote = " | vapour mu/Z from component correlations (Lucas / Peng-Robinson)"
+    Else
+        If sVmu <= 0 Then eMuG = 0.0111 * (IIf(eMW > 0, eMW, 30) / 16#) ^ -0.3 * (T / 300#) ^ 0.8
+        If sZ < 0.2 Then eZ = 1#
+        eNote = " | vapour mu/Z: generic gas fallback (component constants incomplete)"
+    End If
+    If sGam <= 0 Then eGam = 1.1
+End Sub
+
+' Set the phase state used by DpKernel for the row about to be evaluated at pPsia
+Private Sub SetState(ByVal pPsia As Double)
+    Dim q As Double
+    eMuG = sVmu: eMuL = sLmu: eZ = sZ: eGam = sGam: eNote = ""
+    If flashOn Then
+        FlashAt IIf(pPsia < 0.05, 0.05, pPsia)
+        FillVapour pPsia
+        If eVap + eLiq > 0 Then q = eVap / (eVap + eLiq)
+        If q <= 0.00001 Then
+            ePhase = "LIQUID"
+        ElseIf q >= 0.99999 Then
+            ePhase = "VAPOR"
+        Else
+            ePhase = "TWO-PHASE"
+        End If
+        If eZ < 0.2 Then eZ = 1#
+    Else
+        eVap = sVap * gMult: eLiq = sLiq * gMult: eMW = sMW: ePhase = sPhase: eBeta = 0
+        If eZ < 0.2 Then eZ = 1#
+    End If
+End Sub
+
+
+'==========================================================================
 Private Function LoadStream(ByVal r1 As Long, ByVal r2 As Long) As Boolean
     Dim r As Long, nm As String, has As Boolean, ws As Worksheet, i As Long, c As Long
     Dim hdr() As String, sv As Variant, lr As Long, lc As Long, rr As Long
     nm = ""
     For r = r1 To r2: If Len(GetS(r, "Stream Lookup")) > 0 Then nm = GetS(r, "Stream Lookup"): Exit For
     Next r
-    sStream = nm
-    If Len(nm) > 0 Then
+    sStream = nm: flashOn = False: fSrc = ""
+    Dim gotSheet As Boolean
+    If Len(nm) > 0 And useFlash Then gotSheet = ReadStreamSheet(nm)
+    If gotSheet Then
+        sStream = nm & " (sheet)"
+    ElseIf Len(nm) > 0 Then
         Set ws = Worksheets("Streams")
         lr = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row: lc = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
         sv = ws.Range(ws.Cells(1, 1), ws.Cells(lr, lc)).Value
@@ -313,7 +778,13 @@ Private Function LoadStream(ByVal r1 As Long, ByVal r2 As Long) As Boolean
         sZ = GetN(r, "Vap Z", has): sGam = GetN(r, "Vap Cp/Cv", has): sPst = 0: sPhase = ""
         sStream = "(manual)"
     End If
-    If sZ <= 0 Then sZ = 1#
+    If Len(nm) > 0 Then
+        For r = r1 To r2
+            Dim tOv As Double: tOv = GetN(r, "Temp (degF)", has)
+            If has Then sT = tOv: Exit For
+        Next r
+    End If
+    If sZ <= 0 And Not flashOn Then sZ = 1#
     If sGam <= 0 Then sGam = 1.3
     Dim tot As Double, xq As Double
     tot = sVap + sLiq
@@ -382,6 +853,7 @@ Private Sub SolveCircuit(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String
         note = "Source P back-calculated from Destination Set P = " & Format(dstP, "0.000") & " psia"
     End If
     pEnd = March(r1, r2, cid, startP, True, 0)
+    If flashOn Then note = note & IIf(Len(note) > 0, " | ", "") & "Flash model: " & fSrc & " (" & sStream & ")"
     If Len(note) > 0 And nOut > nStart Then out(nStart + 1, 24) = note & " | " & out(nStart + 1, 24)
 End Sub
 
@@ -403,6 +875,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
     For r = r1 To r2
         fit = GetS(r, "Fitting Name"): fl = LCase$(fit)
         If Len(fit) = 0 And Len(GetS(r, "Comp ID")) = 0 Then GoTo NextRow
+        SetState p
         spec = GetS(r, "Piping Spec")
         bore = GetN(r, "Bore (in)", has): If has Then lastBore = bore Else bore = lastBore
         lenFt = GetN(r, "Length (ft)", has): dzFt = GetN(r, "Elev Change (ft)", has)
@@ -475,13 +948,13 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
                 d = idIn * IN_TO_M
                 DpKernel d, lenFt * FT_TO_M, dzFt * FT_TO_M, k, p, rho, v, Re, f, eF, eK, eZ
                 dPf = eF * PA_TO_PSI: dPk = eK * PA_TO_PSI: dPz = eZ * PA_TO_PSI
-                dPt = dPf + dPk + dPz: note = basis
+                dPt = dPf + dPk + dPz: note = basis & eNote
             End If
         End If
         pOut = p - dPt: cum = cum + lenFt
-        If pOut < 0.5 Then
-            note = note & "  | WARNING: P < 0.5 psia - infeasible / choked, clamped"
-            pOut = 0.5
+        If pOut < 0.05 Then
+            note = note & "  | CHOKED (dP capped, P floor 0.05 psia)"
+            dPt = IIf(p > 0.05, p - 0.05, 0): pOut = p - dPt
         End If
         If wr Then
             nOut = nOut + 1
@@ -492,7 +965,9 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             out(nOut, 8) = IIf(idIn > 0, idIn, ""): out(nOut, 9) = lenFt: out(nOut, 10) = dzFt: out(nOut, 11) = cum
             out(nOut, 12) = p: out(nOut, 13) = pOut: out(nOut, 14) = v / FT_TO_M: out(nOut, 15) = Re: out(nOut, 16) = f
             out(nOut, 17) = rho / LBFT3_TO_KGM3: out(nOut, 18) = dPf: out(nOut, 19) = dPk: out(nOut, 20) = dPz
-            out(nOut, 21) = dPt: out(nOut, 22) = sPhase: out(nOut, 23) = sStream: out(nOut, 24) = note
+            out(nOut, 21) = dPt: out(nOut, 22) = ePhase: out(nOut, 23) = sStream: out(nOut, 24) = note
+            out(nOut, 25) = IIf(eVap + eLiq > 0, eVap / (eVap + eLiq), 0)
+            out(nOut, 26) = eBeta: out(nOut, 27) = eVap: out(nOut, 28) = eLiq
         End If
         p = pOut
 NextRow:
@@ -507,19 +982,19 @@ Private Sub RecordCV(ByVal r As Long, ByVal cid As String, ByVal p1 As Double, B
     Dim wl As Double, wv As Double, q As Double, sg As Double, cvv As Double, rho1 As Double
     Dim x As Double, fk As Double, y As Double, FL As Double, p2 As Double, tag As String
     FL = 0.9: p2 = p1 - dp: tag = GetS(r, "Instr Tag"): If tag = "" Then tag = GetS(r, "Comp ID")
-    wl = sLiq * gMult: wv = sVap * gMult
+    wl = eLiq: wv = eVap
     nCV = nCV + 1
-    cvOut(nCV, 1) = cid: cvOut(nCV, 2) = tag: cvOut(nCV, 3) = sStream: cvOut(nCV, 4) = sPhase
+    cvOut(nCV, 1) = cid: cvOut(nCV, 2) = tag: cvOut(nCV, 3) = sStream: cvOut(nCV, 4) = ePhase
     cvOut(nCV, 5) = p1: cvOut(nCV, 6) = p2: cvOut(nCV, 7) = dp: cvOut(nCV, 8) = wl + wv: cvOut(nCV, 9) = sT
     If dp <= 0 Then cvOut(nCV, 13) = "dP = 0: valve fully open / no dP basis": Exit Sub
-    If sPhase = "LIQUID" Then
+    If ePhase = "LIQUID" Then
         q = wl / (sLrho * 7.48052 * 60#): sg = sLrho / 62.428
         cvOut(nCV, 10) = q * Sqr(sg / dp): cvOut(nCV, 11) = sg
         cvOut(nCV, 12) = "gpm = " & Format(q, "0.0")
         cvOut(nCV, 13) = "Liquid Cv = Q*sqrt(SG/dP); FL=0.9 assumed; check choking (Pv) with fluid data"
-    ElseIf sPhase = "VAPOR" Then
+    ElseIf ePhase = "VAPOR" Then
         rho1 = GasRho(p1) / LBFT3_TO_KGM3
-        fk = sGam / 1.4: x = dp / p1
+        fk = IIf(eGam > 0, eGam, 1.3) / 1.4: x = dp / p1
         If x > fk * 0.7 Then x = fk * 0.7: cvOut(nCV, 13) = "CHOKED (x>Fk*xT, xT=0.7 assumed). "
         y = 1# - x / (3# * fk * 0.7)
         cvOut(nCV, 10) = wv / (63.3 * y * Sqr(x * p1 * rho1)): cvOut(nCV, 11) = rho1
@@ -538,11 +1013,11 @@ Private Sub WriteOutputs()
     Dim ws As Worksheet, hdr As Variant, i As Long, nc As Long
     hdr = Array("Circuit", "Line No", "Comp ID", "Fitting", "Spec", "NPS", "Sch", "ID (in)", "Length (ft)", "Elev (ft)", _
         "Cum L (ft)", "P in (psia)", "P out (psia)", "Velocity (ft/s)", "Re", "f", "Density (lb/ft3)", "dP fric (psi)", _
-        "dP fit (psi)", "dP elev (psi)", "dP total (psi)", "Phase", "Stream", "Note")
+        "dP fit (psi)", "dP elev (psi)", "dP total (psi)", "Phase", "Stream", "Note", "Vap frac (mass)", "Beta (mol)", "Vapour (lb/h)", "Liquid (lb/h)")
     Set ws = FreshSheet("Pressure_Profile")
-    ws.Range("A1").Resize(1, 24).Value = hdr
-    StyleHeader ws.Range("A1").Resize(1, 24)
-    If nOut > 0 Then ws.Range("A2").Resize(nOut, 24).Value = out
+    ws.Range("A1").Resize(1, 28).Value = hdr
+    StyleHeader ws.Range("A1").Resize(1, 28)
+    If nOut > 0 Then ws.Range("A2").Resize(nOut, 28).Value = out
     ws.Range("I2:K" & nOut + 1).NumberFormat = "0.00"
     ws.Range("L2:M" & nOut + 1).NumberFormat = "0.000"
     ws.Range("N2:N" & nOut + 1).NumberFormat = "0.00"
@@ -550,7 +1025,8 @@ Private Sub WriteOutputs()
     ws.Range("P2:P" & nOut + 1).NumberFormat = "0.0000"
     ws.Range("Q2:Q" & nOut + 1).NumberFormat = "0.000"
     ws.Range("R2:U" & nOut + 1).NumberFormat = "0.000"
-    ws.Columns("A:W").ColumnWidth = 12: ws.Columns("D").ColumnWidth = 24: ws.Columns("X").ColumnWidth = 70
+    ws.Columns("A:AB").ColumnWidth = 12: ws.Columns("D").ColumnWidth = 24: ws.Columns("X").ColumnWidth = 70
+    ws.Range("Y2:Z" & nOut + 1).NumberFormat = "0.0000": ws.Range("AA2:AB" & nOut + 1).NumberFormat = "#,##0"
     ws.Activate: ActiveWindow.FreezePanes = False: ws.Range("D2").Select: ActiveWindow.FreezePanes = True
     ws.Range("A1").Select
     hdr = Array("Circuit", "CV Tag", "Stream", "Phase", "P1 (psia)", "P2 (psia)", "dP (psi)", "Flow (lb/h)", "T (degF)", _

@@ -7792,7 +7792,8 @@ def _fill_vapor_props(sp, fr, feed, cmap, p_psia):
     Cp/Cv — friction would silently vanish (Re = 0).  Fill the missing ones for THIS station only:
     first from the component correlations (needs complete constants), else a flagged generic
     dilute-hydrocarbon-gas fallback.  Returns (sp, note)."""
-    miss = [a for a in ("vap_visc", "vap_z", "vap_cp_cv") if getattr(sp, a, None) is None]
+    miss = [a for a in ("vap_visc", "vap_z", "vap_cp_cv") if getattr(sp, a, None) is None
+            or (a == "vap_z" and getattr(sp, a) < 0.2)]       # a liquid-like Z (<0.2) is not a gas Z
     if not miss or fr is None or (fr.vap_mass or 0) <= 0:
         return sp, ""
     upd, how = {}, ""

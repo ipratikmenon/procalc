@@ -8,25 +8,29 @@ No Python needed. Total size ≈ 55 KB (≈ 100 KB with all 440 streams of the s
 |---|---|
 | Control | RUN button, flow-case multiplier % (C4), last-run status (C8) |
 | Input | Same 37 columns as `Pipeline_Input` (paste your sheet; header row = the row with `Circuit` in column A; unit suffixes ignored). FPS units |
-| Streams | Stream property table. Row 1 = `Stream` + HMB keys (same as `hmbbuilder.py wide`). Paste yours, or rebuild with `build_xlsm.py --hmb HMB.xlsx` |
-| Component_Constants | Reserved for the flash model (phase 2) |
+| `<stream name>` sheets (e.g. `DX10-OUT`) | Paste the HMB per-stream sheet as is (composition included). A circuit whose *Stream Lookup* matches a sheet name is flashed |
+| Component_Constants | Paste the HMB `COMP_CONSTANTS` sheet as is (B Name, E MW, I Tc, J Pc, M ω) — used by the flash (Wilson T-correction) and for vapour µ / Z |
+| Streams | Fallback property table (no composition → no flash). Row 1 = `Stream` + HMB keys |
 | Data_K / Data_OD / Data_Pipe / Data_PMS | Fitting K, ASME B36.10 OD/walls, PMS class → schedule (edit class names / schedules here) |
 | Pressure_Profile, CV_Summary | Outputs (generated) |
 
-## What v1 does
+## What it does (v1 + phase 2)
 * Darcy-Weisbach (Swamee-Jain), K-method fittings, elevation, ID from PMS class + bore (same tables as `hydraulics.py`)
 * Single phase and homogeneous two-phase (McAdams µ); gas ρ = P·MW/(Z·R·T) at the local pressure (isothermal)
 * Boundaries / devices: Source (Set P), Destination (Set P), Fix Pressure, Fix K, orifice / inline FT (Instr dP)
 * Control valve: Fixed dP > Set P (outlet) > flow control solved to the Destination > Fixed K; Cv (ISA 75.01 liquid / gas)
 * Pump-discharge back-calculation: Source without Set P + Destination with Set P → source pressure is solved
 * Flow case: multiplier on Control!C4 scales all stream flows
+* **Flash-coupled marching** (Control!C7 = ON): Rachford-Rice at the local pressure with K(P) = K_ref·P_ref/P, reference K from the HMB phase split (y/x, else z/x with a solved λ), Wilson T-correction when a Temp override is typed; vapour µ / Z from Lucas / Peng-Robinson using Component_Constants (generic fallback if constants are incomplete). Output adds vapour fraction, β, vapour / liquid flow per station
 
-Validated against `hydraulics.py`: single-phase gas and two-phase kernels agree to < 1e-4 psi per station; the L-810 pump
+Validated against `hydraulics.py`: single-phase gas, two-phase and flash-coupled (stream 198, flashing along the line, incl. choking) agree to < 1e-4 psi at every station; the L-810 pump
 case gives 246.632 psia (same as Python).
 
 ## Not in v1 (phase 2 — still in `hydraulics.py`)
-Rachford-Rice flash from composition, Peng-Robinson / JT temperature, tees & branches, FIV / AIV / flow-regime maps,
+Peng-Robinson package properties / isenthalpic (JT) temperature, tees & branches, FIV / AIV / flow-regime maps,
 Component_Detail / Composition_Splits, thermowell / inline instrument datasheets, light output theme.
+
+Note: a sub-cooled single-liquid stream has equal proxy K values, so (as in Python) it flashes all-or-nothing around its HMB pressure; keep the line above the HMB pressure or supply a stream that carries its own vapour split.
 
 ## If Excel does not show the RUN macro
 Open the workbook, Alt+F11 → File → Import File → `Procalc.bas`, save as `.xlsm`. The button is already linked to `RunHydraulics`.
