@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--vba")
     a = ap.parse_args()
     wb = xlsxwriter.Workbook(a.out)
-    NSHEETS = 16
+    NSHEETS = 20
     if a.out.lower().endswith(".xlsm"):
         import tempfile
         import ovba
@@ -79,6 +79,7 @@ def main():
     c.write("B5", "Streams used", lab)
     c.write("C5", "A sheet named like the stream (HMB per-stream sheet, with composition) is flashed; else the Streams table row is used.", txt)
     c.write("B7", "Flash from composition (ON/OFF)", lab); c.write("C7", "ON", yel)
+    c.write("B9", "Isenthalpic T march, PR-covered streams (ON/OFF)", lab); c.write("C9", "OFF", yel)
     c.write("B8", "Last run", lab); c.write("C8", "not run yet", txt)
     if a.vba:
         c.insert_button("B6", {"macro": "RunHydraulics", "caption": "RUN HYDRAULICS", "width": 260, "height": 34})
@@ -190,6 +191,20 @@ def main():
     tw.write_row(0, 0, ["Piping class", "TW root OD (in)", "TW tip OD (in)", "TW bore (in)", "TW insertion U (in)", "TW material"], navy)
     tw.write_row(1, 0, ["G9A-3", 1.0, 0.75, 0.26, 6.0, "SS316"])
     tw.set_column(0, 5, 16)
+    pr = wb.add_worksheet("Data_PR")
+    pr.write_row(0, 0, ["Component", "MW", "Tc (K)", "Pc (bar)", "omega", "Vc (cm3/mol)", "H offset (kJ/kmol)", "Hf (kJ/kmol)",
+                        "H poly a", "b", "c", "d", "e", "f", "Peneloux c (cm3/mol)"], navy)
+    for i, (k, d) in enumerate(H._PR_DATA.items()):
+        pr.write_row(1 + i, 0, [k, d[0], d[1], d[2], d[3], d[4], d[5], d[6], *d[7], d[8]])
+    pr.set_column(0, 0, 18)
+    pa = wb.add_worksheet("Data_PRAlias")
+    pa.write_row(0, 0, ["Normalised name", "PR component"], navy)
+    for i, (k, v) in enumerate(H._PR_ALIAS.items()):
+        pa.write_row(1 + i, 0, [k, v])
+    pk = wb.add_worksheet("Data_PRKij")
+    pk.write_row(0, 0, ["Component 1", "Component 2", "kij"], navy)
+    for i, ((a_, b_), v) in enumerate(H._PR_KIJ.items()):
+        pk.write_row(1 + i, 0, [a_, b_, v])
     wb.close()
     print("wrote", a.out, os.path.getsize(a.out), "bytes")
 
