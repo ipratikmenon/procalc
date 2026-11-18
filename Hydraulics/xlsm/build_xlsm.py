@@ -74,7 +74,7 @@ def main():
     c.hide_gridlines(2)
     c.set_column("A:A", 3); c.set_column("B:B", 30); c.set_column("C:C", 60)
     c.write("B1", "PROCALC  -  Hydraulics (macro workbook)", ttl)
-    c.write("B2", "Edit the Input sheet, then press RUN.  Results are rebuilt in Pressure_Profile and CV_Summary.", txt)
+    c.write("B2", "Edit the Input sheet, then press RUN.  Results are rebuilt in the output sheets (Pressure_Profile, CV_Summary, FIV, AIV, regime, instruments, composition).", txt)
     c.write("B4", "Flow case multiplier (%)", lab); c.write("C4", 100, yel)
     c.write("B5", "Streams used", lab)
     c.write("C5", "A sheet named like the stream (HMB per-stream sheet, with composition) is flashed; else the Streams table row is used.", txt)
@@ -87,10 +87,10 @@ def main():
         "Units: FPS (psia, degF, lb/hr, ft, in, cP, lb/ft3) - the same as hydraulics.py.",
         "Input sheet: same 37 columns as Pipeline_Input.  Header row = the row with 'Circuit' in column A (row 1-3);",
         "unit suffixes in headers are ignored.  Rows sharing a Circuit ID are chained in series.",
-        "Stream Lookup -> Streams sheet; blank -> the yellow manual-property columns (first row of the circuit).",
+        "Stream Lookup -> a sheet named like the stream (HMB per-stream sheet, flashed) or the Streams table; blank -> the manual-property columns.",
         "Pump discharge: Source row without Set P + Destination with Set P => Source P is back-calculated.",
         "Control valve: Fixed dP > Set P (outlet) > flow-control floats to Destination > Fixed K.",
-        "Component_Constants is reserved for the flash model (phase 2); v1 uses the HMB phase properties.",
+        "Component_Constants (HMB COMP_CONSTANTS) feeds the flash. Run Type = Branch plus Tee Split / Join rows give branch runs.",
     ]
     for i, n in enumerate(notes):
         c.merge_range(10 + i, 1, 10 + i, 2, n, txt)
