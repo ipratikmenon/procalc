@@ -153,6 +153,7 @@ Private Sub LoadTables()
         pmCls(i) = UCase$(Trim$(CStr(v(i, 1)))): pmLo(i) = CStr(v(i, 2)): pmHi(i) = CStr(v(i, 3))
         pmSch(i) = UCase$(CStr(v(i, 4))): pmMin(i) = UCase$(CStr(v(i, 5))): pmMoc(i) = CStr(v(i, 6))
     Next i
+    ComputeSeq
 End Sub
 
 ' header key: drop a trailing "(unit)" and case/space differences
@@ -741,6 +742,7 @@ Private Sub SetState(ByVal pPsia As Double)
     If flashOn Then
         FlashAt IIf(pPsia < 0.05, 0.05, pPsia)
         FillVapour pPsia
+        eVap = eVap * fScale * vCf: eLiq = eLiq * fScale * lCf
         If eVap + eLiq > 0 Then q = eVap / (eVap + eLiq)
         If q <= 0.00001 Then
             ePhase = "LIQUID"
@@ -751,7 +753,7 @@ Private Sub SetState(ByVal pPsia As Double)
         End If
         If eZ < 0.2 Then eZ = 1#
     Else
-        eVap = sVap * gMult: eLiq = sLiq * gMult: eMW = sMW: ePhase = sPhase: eBeta = 0
+        eVap = sVap * gMult * fScale * vCf: eLiq = sLiq * gMult * fScale * lCf: eMW = sMW: ePhase = sPhase: eBeta = 0
         If eZ < 0.2 Then eZ = 1#
     End If
 End Sub
@@ -844,33 +846,59 @@ Private Function IsFit(ByVal r As Long, ByVal nm As String) As Boolean
 End Function
 
 Private Sub SolveCircuit(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String)
-    Dim r As Long, has As Boolean, startP As Double, srcSet As Boolean, dstP As Double, hasDst As Boolean
+    Dim r As Long, k As Long, has As Boolean, startP As Double, srcSet As Boolean, dstP As Double, hasDst As Boolean
     Dim p0 As Double, pEnd As Double, it As Long, err1 As Double, guess As Double, note As String
+    Dim mainMap() As Long, brMap() As Long, bS() As Long, bE() As Long, nM As Long, nBr As Long, nB As Long
+    ReDim mainMap(1 To r2 - r1 + 2): ReDim brMap(1 To r2 - r1 + 2): ReDim bS(1 To 40): ReDim bE(1 To 40)
+    For r = r1 To r2
+        If IsBranchRow(r) Then
+            nBr = nBr + 1: brMap(nBr) = r
+            If nB = 0 Or Len(GetS(r, "Start P (psia)")) > 0 Then
+                If nB < 40 Then nB = nB + 1: bS(nB) = nBr
+            End If
+            bE(nB) = nBr
+        Else
+            nM = nM + 1: mainMap(nM) = r
+        End If
+    Next r
+    If nM = 0 Then Exit Sub
     If Not LoadStream(r1, r2) Then Exit Sub
     startP = 0: srcSet = False: hasDst = False
-    For r = r1 To r2
+    For k = 1 To nM
+        r = mainMap(k)
         If IsFit(r, "source") Then
             startP = GetN(r, "Set P (psia)", has): If has Then srcSet = True
             Exit For
         End If
-    Next r
-    For r = r2 To r1 Step -1
+    Next k
+    For k = nM To 1 Step -1
+        r = mainMap(k)
         If IsFit(r, "destination") Then dstP = GetN(r, "Set P (psia)", hasDst): Exit For
-    Next r
+    Next k
     Dim typed As Boolean, sp2 As Double
     If Not srcSet Then
-        For r = r1 To r2
-            sp2 = GetN(r, "Start P (psia)", has): If has Then startP = sp2: typed = True: Exit For
-        Next r
+        For k = 1 To nM
+            sp2 = GetN(mainMap(k), "Start P (psia)", has): If has Then startP = sp2: typed = True: Exit For
+        Next k
         If Not typed Then startP = sPst
     End If
     Dim nStart As Long: nStart = nOut
     cdNew = True: stnNo = 0
+    SaveFeed 0
+    nSplit = 0: nInj = 0
+    If nB > 0 Then
+        rowMap = mainMap: capSplit = True: useInj = False: fScale = 1: vCf = 1: lCf = 1
+        pEnd = March(1, nM, cid, IIf(startP > 0, startP, sPst), False, 0)
+        capSplit = False
+        RunBranches cid, nB, bS, bE, brMap, IIf(startP > 0, startP, sPst), False, True, mainMap, nM, r1, r2
+        RestoreFeed 0
+    End If
     If Not srcSet And hasDst Then
         ' ---- back-calculate the source / pump-discharge pressure --------------
         guess = dstP + 25
         For it = 1 To 14
-            pEnd = March(r1, r2, cid, guess, False, 0)
+            ResetMain mainMap
+            pEnd = March(1, nM, cid, guess, False, 0)
             err1 = dstP - pEnd
             If Abs(err1) < 0.001 Then Exit For
             guess = guess + err1: If guess < dstP Then guess = dstP
@@ -878,11 +906,24 @@ Private Sub SolveCircuit(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String
         startP = guess
         note = "Source P back-calculated from Destination Set P = " & Format(dstP, "0.000") & " psia"
     End If
-    pEnd = March(r1, r2, cid, startP, True, 0)
+    ResetMain mainMap
+    pEnd = March(1, nM, cid, startP, True, 0)
     FlushStations cid
     If flashOn Then note = note & IIf(Len(note) > 0, " | ", "") & "Flash model: " & fSrc & " (" & sStream & ")"
+    If nB > 0 Then note = note & IIf(Len(note) > 0, " | ", "") & nB & " branch run(s), " & nInj & " join(s)"
     If Len(note) > 0 And nOut > nStart Then out(nStart + 1, 24) = note & " | " & out(nStart + 1, 24)
+    If nB > 0 Then
+        useInj = False
+        RunBranches cid, nB, bS, bE, brMap, IIf(startP > 0, startP, sPst), True, False, mainMap, nM, r1, r2
+        RestoreFeed 0
+    End If
 End Sub
+Private Sub ResetMain(mainMap() As Long)
+    rowMap = mainMap: useInj = True: capSplit = False
+    fScale = 1: vCf = 1: lCf = 1
+    RestoreFeed 0
+End Sub
+
 
 ' ---------------------------------------------------------------------------
 '  March pressure through rows r1..r2.  write=True records output rows.
@@ -894,14 +935,39 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
     Dim fit As String, fl As String, spec As String, bore As Double, lenFt As Double, dzFt As Double
     Dim fixedDp As Double, hasFD As Boolean, setP As Double, hasSP As Boolean, fixK As Double, hasFK As Boolean
     Dim instDp As Double, hasID As Boolean, idIn As Double, nps As String, sch As String, basis As String
-    Dim rho As Double, v As Double, Re As Double, f As Double, eF As Double, eK As Double, eZ As Double
+    Dim rho As Double, v As Double, Re As Double, f As Double, qF As Double, qK As Double, qZ As Double
     Dim dPf As Double, dPk As Double, dPz As Double, dPt As Double, k As Double, note As String, d As Double
     Dim ctype As String, dstP As Double, hasDst As Boolean, rr As Long, lo As Double, hi As Double, mdp As Double
+    Dim kp As Long, kk As Long, frac As Double, hasF As Boolean, vc As Double, hasC As Boolean, slot As Long, pendS As Double
+    Dim sc0 As Double, sv0 As Double, sl0 As Double, sFd As Boolean
     Dim j As Long, pe As Double, isCV As Boolean, bdp As Double, tmp As String, stdRow As Boolean
     p = pStart
-    For r = r1 To r2
+    sc0 = fScale: sv0 = vCf: sl0 = lCf: sFd = False
+    If depth > 0 And nInj > 0 Then SaveFeed depth: sFd = True
+    For kp = r1 To r2
+        r = rowMap(kp)
         fit = GetS(r, "Fitting Name"): fl = LCase$(fit)
         If Len(fit) = 0 And Len(GetS(r, "Comp ID")) = 0 Then GoTo NextRow
+        ' ---- tee split / merge, carry-over, branch join -------------------------
+        pendS = 0
+        frac = GetN(r, "Flow Fraction from Main", hasF)
+        If hasF And IsTeeF(fl) Then
+            If frac > 0 Then
+                pendS = fScale: fScale = frac: pendS = 0
+            Else
+                pendS = fScale - IIf(fScale + frac > 0, fScale + frac, 0)
+                fScale = IIf(fScale + frac > 0, fScale + frac, 0)
+            End If
+        End If
+        vc = GetN(r, "Mass Vapor Fraction Carry Over", hasC)
+        If hasC Then vCf = vCf * IIf(vc > 0, vc, 0)
+        vc = GetN(r, "Mass Liquid Fraction Carry Over", hasC)
+        If hasC Then lCf = lCf * IIf(vc > 0, vc, 0)
+        If capSplit And pendS > 0 And TeeSplitN(fl) > 0 Then AddSplit GetS(r, "Line No"), rowSeq(r), TeeSplitN(fl), pendS * vCf, pendS * lCf
+        If useInj And nInj > 0 Then
+            slot = InjSlot(r)
+            If slot > 0 Then DoJoin slot, p
+        End If
         SetState p
         spec = GetS(r, "Piping Spec")
         bore = GetN(r, "Bore (in)", has): If has Then lastBore = bore Else bore = lastBore
@@ -936,9 +1002,10 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             If InStr("PTFL", ctype) = 0 Then ctype = "F"
             hasDst = False
             If ctype = "F" Then
-                For rr = r + 1 To r2
+                For kk = kp + 1 To r2
+                    rr = rowMap(kk)
                     If LCase$(GetS(rr, "Fitting Name")) = "destination" Then dstP = GetN(rr, "Set P (psia)", hasDst): Exit For
-                Next rr
+                Next kk
             End If
             If Not hasFD And hasSP Then
                 bdp = p - setP: If bdp < 0 Then bdp = 0
@@ -950,7 +1017,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
                     lo = 0: hi = p: If hi < 1 Then hi = 1
                     For j = 1 To 40
                         mdp = (lo + hi) / 2
-                        pe = March(r + 1, r2, cid, p - mdp, False, depth + 1)
+                        pe = March(kp + 1, r2, cid, p - mdp, False, depth + 1)
                         If pe > dstP Then lo = mdp Else hi = mdp
                         If hi - lo < 0.0005 Then Exit For
                     Next j
@@ -960,8 +1027,8 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             ElseIf hasFD Then
                 bdp = fixedDp: tmp = "fixed design dP"
             ElseIf hasFK And idIn > 0 Then
-                DpKernel idIn * IN_TO_M, 0, 0, fixK, p, rho, v, Re, f, eF, eK, eZ
-                bdp = (eF + eK + eZ) * PA_TO_PSI: tmp = "K = " & fixK
+                DpKernel idIn * IN_TO_M, 0, 0, fixK, p, rho, v, Re, f, qF, qK, qZ
+                bdp = (qF + qK + qZ) * PA_TO_PSI: tmp = "K = " & fixK
             Else
                 bdp = 0: tmp = "no dP basis"
             End If
@@ -973,8 +1040,8 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             Else
                 k = FitK(fit): If fl = "fix k" And hasFK Then k = fixK
                 d = idIn * IN_TO_M
-                DpKernel d, lenFt * FT_TO_M, dzFt * FT_TO_M, k, p, rho, v, Re, f, eF, eK, eZ
-                dPf = eF * PA_TO_PSI: dPk = eK * PA_TO_PSI: dPz = eZ * PA_TO_PSI
+                DpKernel d, lenFt * FT_TO_M, dzFt * FT_TO_M, k, p, rho, v, Re, f, qF, qK, qZ
+                dPf = qF * PA_TO_PSI: dPk = qK * PA_TO_PSI: dPz = qZ * PA_TO_PSI
                 dPt = dPf + dPk + dPz: note = basis & eNote: stdRow = True
             End If
         End If
@@ -1000,7 +1067,11 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
         End If
         p = pOut
 NextRow:
-    Next r
+    Next kp
+    If depth > 0 Then
+        fScale = sc0: vCf = sv0: lCf = sl0
+        If sFd Then RestoreFeed depth
+    End If
     March = p
 End Function
 
@@ -1030,7 +1101,7 @@ Private Sub WriteComp(ByVal cid As String, ByVal fit As String, ByVal pIn As Dou
     Dim fm As Double, fl As Double
     Set wsS = Worksheets("Composition_Splits"): Set wsD = Worksheets("Component_Detail")
     stnNo = stnNo + 1
-    fm = eBeta * fTotMoles * gMult: fl = (1# - eBeta) * fTotMoles * gMult
+    fm = eBeta * fTotMoles * gMult * fScale * vCf: fl = (1# - eBeta) * fTotMoles * gMult * fScale * lCf
     ReDim a(1 To fN, 1 To 11): ReDim d(1 To fN, 1 To 2)
     For i = 1 To fN
         a(i, 1) = cid: a(i, 2) = stnNo: a(i, 3) = fit: a(i, 4) = pIn: a(i, 5) = fNm(i)
@@ -1087,7 +1158,7 @@ Private Sub RecStn(ByVal cid As String, ByVal r As Long, ByVal fit As String, By
     Dim area As Double, vm As Double, lm As Double, rg As Double, rl As Double, c As Double, k As Double
     stN = stN + 1
     stCid(stN) = cid: stFit(stN) = fit: stNps(stN) = nps: stComp(stN) = GetS(r, "Comp ID")
-    stSeq(stN) = GetS(r, "Seq"): If stSeq(stN) = "" Then stSeq(stN) = CStr(stN)
+    stSeq(stN) = CStr(rowSeq(r))
     stOD(stN) = lastOD * 25.4: stWall(stN) = lastWall * 25.4: stID(stN) = idIn
     stRho(stN) = rho / LBFT3_TO_KGM3: stV(stN) = v / FT_TO_M
     stCum(stN) = cum: stPin(stN) = pIn: stDp(stN) = dPt
@@ -2010,6 +2081,244 @@ Private Sub WriteInstr()
     End If
 End Sub
 
+
+'==========================================================================
+'  Phase 2: tees and branches (split / merge / carry-over / branch runs / join re-flash)
+'==========================================================================
+Private rowMap() As Long, rowSeq() As Long
+Private fScale As Double, vCf As Double, lCf As Double, capSplit As Boolean, useInj As Boolean
+Private nSplit As Long, spLine(1 To 60) As String, spSeq(1 To 60) As Long, spN(1 To 60) As Long, spV(1 To 60) As Double, spL(1 To 60) As Double
+Private nInj As Long, injRow(1 To 20) As Long, injLbl(1 To 20) As String, injVap(1 To 20) As Double, injLiq(1 To 20) As Double
+Private injN(1 To 20) As Long, injPref(1 To 20) As Double, injFlash(1 To 20) As Boolean
+Private injNm(1 To 20, 1 To 600) As String, injMol(1 To 20, 1 To 600) As Double, injK(1 To 20, 1 To 600) As Double
+Private injMW(1 To 20, 1 To 600) As Double, injTc(1 To 20, 1 To 600) As Double, injOm(1 To 20, 1 To 600) As Double
+Private bkN(0 To 3) As Long, bkNm(0 To 3, 1 To 600) As String, bkZ(0 To 3, 1 To 600) As Double, bkK(0 To 3, 1 To 600) As Double
+Private bkMW(0 To 3, 1 To 600) As Double, bkTc(0 To 3, 1 To 600) As Double, bkOm(0 To 3, 1 To 600) As Double
+Private bkHas(0 To 3) As Boolean, bkPref(0 To 3) As Double, bkTref(0 To 3) As Double, bkTot(0 To 3) As Double
+Private bkVap(0 To 3) As Double, bkLiq(0 To 3) As Double, bkFlash(0 To 3) As Boolean
+
+Private Function IsTeeF(ByVal f As String) As Boolean
+    IsTeeF = (InStr(f, "tee") > 0 Or InStr(f, "stub") > 0 Or InStr(f, "branch") > 0)
+End Function
+Private Function TrailNum(ByVal f As String) As Long
+    Dim i As Long, s As String
+    f = Trim$(f)
+    i = Len(f)
+    Do While i > 0
+        If Mid$(f, i, 1) >= "0" And Mid$(f, i, 1) <= "9" Then s = Mid$(f, i, 1) & s: i = i - 1 Else Exit Do
+    Loop
+    If Len(s) > 0 Then TrailNum = CLng(s) Else TrailNum = 1
+End Function
+Private Function TeeSplitN(ByVal f As String) As Long
+    If InStr(f, "tee") > 0 And InStr(f, "split") > 0 And InStr(f, "branch") > 0 Then TeeSplitN = TrailNum(f)
+End Function
+Private Function TeeJoinN(ByVal f As String) As Long
+    If InStr(f, "tee") > 0 And InStr(f, "join") > 0 And InStr(f, "branch") > 0 Then TeeJoinN = TrailNum(f)
+End Function
+
+Private Sub ComputeSeq()
+    Dim r As Long, circ As String, ln As String, rt As String, key As String, has As Boolean, q As Double, i As Long
+    Dim keys(1 To 400) As String, cnt(1 To 400) As Long, nk As Long
+    ReDim rowSeq(1 To nRow)
+    For r = 1 To nRow
+        If Len(GetS(r, "Circuit")) > 0 Then circ = GetS(r, "Circuit")
+        If Len(GetS(r, "Fitting Name")) = 0 And Len(GetS(r, "Comp ID")) = 0 Then GoTo NextS
+        q = GetN(r, "Seq", has)
+        If has Then
+            rowSeq(r) = CLng(q)
+        Else
+            rt = IIf(IsBranchRow(r), "B", "M")
+            key = circ & "|" & GetS(r, "Line No") & "|" & rt
+            For i = 1 To nk
+                If keys(i) = key Then Exit For
+            Next i
+            If i > nk And nk < 400 Then nk = nk + 1: keys(nk) = key: cnt(nk) = 0: i = nk
+            cnt(i) = cnt(i) + 1: rowSeq(r) = cnt(i)
+        End If
+NextS:
+    Next r
+End Sub
+Private Function IsBranchRow(ByVal r As Long) As Boolean
+    IsBranchRow = (UCase$(Left$(GetS(r, "Run Type"), 1)) = "B")
+End Function
+
+Private Sub AddSplit(ByVal ln As String, ByVal sq As Long, ByVal n As Long, ByVal v As Double, ByVal l As Double)
+    Dim i As Long
+    For i = 1 To nSplit
+        If spLine(i) = ln And spSeq(i) = sq Then spN(i) = n: spV(i) = v: spL(i) = l: Exit Sub
+    Next i
+    If nSplit >= 60 Then Exit Sub
+    nSplit = nSplit + 1
+    spLine(nSplit) = ln: spSeq(nSplit) = sq: spN(nSplit) = n: spV(nSplit) = v: spL(nSplit) = l
+End Sub
+
+Private Sub SaveFeed(ByVal sl As Long)
+    Dim i As Long
+    bkN(sl) = fN: bkHas(sl) = fHasC: bkPref(sl) = fPref: bkTref(sl) = fTref: bkTot(sl) = fTotMoles
+    bkVap(sl) = sVap: bkLiq(sl) = sLiq: bkFlash(sl) = flashOn
+    If flashOn Then
+        For i = 1 To fN
+            bkNm(sl, i) = fNm(i): bkZ(sl, i) = fZ(i): bkK(sl, i) = fKref(i): bkMW(sl, i) = fMWc(i): bkTc(sl, i) = fTcR(i): bkOm(sl, i) = fOm(i)
+        Next i
+    End If
+End Sub
+Private Sub RestoreFeed(ByVal sl As Long)
+    Dim i As Long
+    fN = bkN(sl): fHasC = bkHas(sl): fPref = bkPref(sl): fTref = bkTref(sl): fTotMoles = bkTot(sl)
+    sVap = bkVap(sl): sLiq = bkLiq(sl): flashOn = bkFlash(sl)
+    If flashOn Then
+        ReDim fNm(1 To fN): ReDim fZ(1 To fN): ReDim fKref(1 To fN): ReDim fMWc(1 To fN): ReDim fTcR(1 To fN): ReDim fOm(1 To fN)
+        For i = 1 To fN
+            fNm(i) = bkNm(sl, i): fZ(i) = bkZ(sl, i): fKref(i) = bkK(sl, i): fMWc(i) = bkMW(sl, i): fTcR(i) = bkTc(sl, i): fOm(i) = bkOm(sl, i)
+        Next i
+    End If
+End Sub
+
+Private Function InjSlot(ByVal r As Long) As Long
+    Dim i As Long
+    For i = 1 To nInj
+        If injRow(i) = r Then InjSlot = i: Exit Function
+    Next i
+End Function
+
+' keep the state at the end of a branch run for a later join into the Main
+Private Sub CaptureInj(ByVal row As Long, ByVal lbl As String)
+    Dim i As Long, s As Long, fm As Double, fl As Double
+    If nInj >= 20 Then Exit Sub
+    nInj = nInj + 1: s = nInj
+    injRow(s) = row: injLbl(s) = lbl: injVap(s) = eVap: injLiq(s) = eLiq: injFlash(s) = flashOn
+    If flashOn And fN <= 600 Then
+        injN(s) = fN: injPref(s) = fPref
+        fm = eBeta * fTotMoles * gMult * fScale * vCf: fl = (1# - eBeta) * fTotMoles * gMult * fScale * lCf
+        For i = 1 To fN
+            injNm(s, i) = fNm(i): injMol(s, i) = eY(i) * fm + eX(i) * fl: injK(s, i) = fKref(i)
+            injMW(s, i) = fMWc(i): injTc(s, i) = fTcR(i): injOm(s, i) = fOm(i)
+        Next i
+    End If
+End Sub
+
+' blend the branch outlet into the running Main (new feed, re-flashed from here on)
+Private Sub DoJoin(ByVal sl As Long, ByVal p As Double)
+    Dim i As Long, j As Long, n As Long, fm As Double, fl As Double, tot As Double, wa As Double, wb As Double, fac As Double
+    Dim nm() As String, mol() As Double, kr() As Double, mw() As Double, tc() As Double, om() As Double, a As Long, F As Double
+    Dim inA() As Boolean
+    If Not flashOn Or Not injFlash(sl) Then
+        ' frozen split (manual / no composition): add the phase flows
+        sVap = sVap * fScale * vCf + injVap(sl) / gMult: sLiq = sLiq * fScale * lCf + injLiq(sl) / gMult
+        fScale = 1: vCf = 1: lCf = 1
+        Exit Sub
+    End If
+    FlashAt IIf(p < 0.05, 0.05, p)
+    fm = eBeta * fTotMoles * gMult * fScale * vCf: fl = (1# - eBeta) * fTotMoles * gMult * fScale * lCf
+    n = fN + injN(sl)
+    ReDim nm(1 To n): ReDim mol(1 To n): ReDim kr(1 To n): ReDim mw(1 To n): ReDim tc(1 To n): ReDim om(1 To n): ReDim inA(1 To n)
+    For i = 1 To fN
+        nm(i) = fNm(i): mol(i) = eY(i) * fm + eX(i) * fl: kr(i) = fKref(i): mw(i) = fMWc(i): tc(i) = fTcR(i): om(i) = fOm(i)
+    Next i
+    a = fN
+    fac = injPref(sl) / fPref
+    For j = 1 To injN(sl)
+        For i = 1 To fN
+            If nm(i) = injNm(sl, j) Then Exit For
+        Next i
+        If i <= fN Then
+            wa = mol(i): wb = injMol(sl, j)
+            If wa + wb > 0 Then kr(i) = (wa * kr(i) + wb * injK(sl, j) * fac) / (wa + wb)
+            mol(i) = mol(i) + injMol(sl, j)
+            If tc(i) < -9000 Then tc(i) = injTc(sl, j): om(i) = injOm(sl, j)
+        Else
+            a = a + 1: nm(a) = injNm(sl, j): mol(a) = injMol(sl, j): kr(a) = injK(sl, j) * fac
+            mw(a) = injMW(sl, j): tc(a) = injTc(sl, j): om(a) = injOm(sl, j)
+        End If
+    Next j
+    n = 0: F = 0
+    For i = 1 To a
+        If mol(i) > 0 Then F = F + mol(i)
+    Next i
+    If F <= 0 Then Exit Sub
+    ReDim fNm(1 To a): ReDim fZ(1 To a): ReDim fKref(1 To a): ReDim fMWc(1 To a): ReDim fTcR(1 To a): ReDim fOm(1 To a)
+    fHasC = False
+    For i = 1 To a
+        If mol(i) > 0 Then
+            n = n + 1
+            fNm(n) = nm(i): fZ(n) = mol(i) / F: fKref(n) = ClampK(kr(i), 10000000000#)
+            fMWc(n) = IIf(mw(i) > 0, mw(i), 50): fTcR(n) = tc(i): fOm(n) = om(i)
+            If tc(i) > -9000 Then fHasC = True
+        End If
+    Next i
+    fN = n: fTotMoles = F / gMult
+    fScale = 1: vCf = 1: lCf = 1
+End Sub
+
+' ---- circuit driver: main + branch blocks --------------------------------
+Private Sub RunBranches(ByVal cid As String, ByVal nB As Long, bS() As Long, bE() As Long, brMap() As Long, ByVal pMain As Double, _
+                        ByVal wr As Boolean, ByVal capture As Boolean, mainMap() As Long, ByVal nM As Long, ByVal cr1 As Long, ByVal cr2 As Long)
+    Dim b As Long, k As Long, i As Long, bp As Double, has As Boolean, upLine As String, upSeq As Double, hasUS As Boolean
+    Dim capI As Long, cnt As Long, n As Long, r0 As Long, bline As String, lbl As String, jIdx As Long, pe As Double
+    Dim own As String, standalone As Boolean, saved As Boolean, kp As Long, rr As Long
+    Dim lnCnt(1 To 30) As String, lnN(1 To 30) As Long, nl As Long, jLine(1 To 30) As String, jN(1 To 30) As Long, nj As Long
+    For b = 1 To nB
+        r0 = brMap(bS(b)): bline = GetS(r0, "Line No")
+        lbl = cid & " [Branch " & b & "]"
+        bp = pMain
+        For k = bS(b) To bE(b)
+            upSeq = GetN(brMap(k), "Start P (psia)", has)
+            If has Then bp = upSeq: Exit For
+        Next k
+        ' ---- seed from a Main 'Tee Split Branch Flow N' capture
+        upLine = GetS(r0, "Upstream Line No"): upSeq = GetN(r0, "Upstream Seq", hasUS): capI = 0
+        If Len(upLine) > 0 Then
+            If hasUS Then
+                For i = 1 To nSplit
+                    If spLine(i) = upLine And spSeq(i) = CLng(upSeq) Then capI = i: Exit For
+                Next i
+            Else
+                cnt = 0
+                For i = 1 To nl
+                    If lnCnt(i) = upLine Then cnt = lnN(i) + 1: lnN(i) = cnt: Exit For
+                Next i
+                If cnt = 0 Then nl = nl + 1: lnCnt(nl) = upLine: lnN(nl) = 1: cnt = 1
+                For i = 1 To nSplit
+                    If spLine(i) = upLine And spN(i) = cnt Then capI = i: Exit For
+                Next i
+            End If
+        End If
+        fScale = 1: vCf = 1: lCf = 1
+        standalone = (capI = 0)
+        saved = False
+        If capI > 0 Then
+            vCf = spV(capI): lCf = spL(capI)
+        ElseIf Len(GetS(r0, "Stream Lookup")) > 0 Then
+            saved = True
+            If Not LoadStream(brMap(bS(b)), brMap(bE(b))) Then GoTo EndB
+        End If
+        rowMap = brMap
+        useInj = False: cdNew = True: stnNo = 0
+        pe = March(bS(b), bE(b), lbl, bp, wr, 0)
+        If wr Then FlushStations lbl
+        If capture Then
+            ' join row on the Main: explicit Upstream Line No = this branch line, else Nth join with this line
+            jIdx = 0: cnt = 1
+            For i = 1 To nj
+                If jLine(i) = bline Then jN(i) = jN(i) + 1: cnt = jN(i): Exit For
+            Next i
+            If i > nj Then nj = nj + 1: jLine(nj) = bline: jN(nj) = 1: cnt = 1
+            For k = 1 To nM
+                rr = mainMap(k)
+                If TeeJoinN(LCase$(GetS(rr, "Fitting Name"))) > 0 And GetS(rr, "Upstream Line No") = bline And Not IsBranchRow(rr) Then jIdx = rr: Exit For
+            Next k
+            If jIdx = 0 Then
+                For k = 1 To nM
+                    rr = mainMap(k)
+                    If GetS(rr, "Line No") = bline And TeeJoinN(LCase$(GetS(rr, "Fitting Name"))) = cnt Then jIdx = rr: Exit For
+                Next k
+            End If
+            If jIdx > 0 Then CaptureInj jIdx, lbl
+        End If
+EndB:
+        If saved Then If Not LoadStream(cr1, cr2) Then Exit Sub
+    Next b
+End Sub
 
 '==========================================================================
 Private Sub WriteOutputs()

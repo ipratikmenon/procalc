@@ -21,6 +21,7 @@ No Python needed. Total size ≈ 55 KB (≈ 100 KB with all 440 streams of the s
 * Boundaries / devices: Source (Set P), Destination (Set P), Fix Pressure, Fix K, orifice / inline FT (Instr dP)
 * Control valve: Fixed dP > Set P (outlet) > flow control solved to the Destination > Fixed K; Cv (ISA 75.01 liquid / gas)
 * Pump-discharge back-calculation: Source without Set P + Destination with Set P → source pressure is solved
+* **Tees and branches:** `Tee Split Branch Flow N` / merge rows with *Flow Fraction from Main*, Mass Vapor / Liquid Carry Over, `Run Type = Branch` blocks (seeded from the Main split via Upstream Line No / Upstream Seq, or from their own Stream Lookup), and `Tee Join Branch Flow N` re-flashes the blended mixture. Branch rows are listed as `C1 [Branch n]` in every output sheet
 * Flow case: multiplier on Control!C4 scales all stream flows
 * **Flash-coupled marching** (Control!C7 = ON): Rachford-Rice at the local pressure with K(P) = K_ref·P_ref/P, reference K from the HMB phase split (y/x, else z/x with a solved λ), Wilson T-correction when a Temp override is typed; vapour µ / Z from Lucas / Peng-Robinson using Component_Constants (generic fallback if constants are incomplete). Output adds vapour fraction, β, vapour / liquid flow per station
 
@@ -31,8 +32,8 @@ case gives 246.632 psia (same as Python).
 FIV (EI T2.2), AIV (source attenuation), Two_Phase_Regime (six correlations + slug), Inline_Instruments (PT / TT / FT / FO / RO + thermowell wake check), CV_Summary with FL / xT / rated Cv / travel check and liquid choking (bubble-point Pv). All checked against `hydraulics.py`.
 
 ## Not in the workbook (still in `hydraulics.py`)
-Peng-Robinson package properties / isenthalpic (JT) temperature, tees & branches,
-light output theme.
+Peng-Robinson package properties / isenthalpic (JT) temperature,
+light output theme. Tees: temperature mixing at a join is not applied (isothermal); a branch seeded from a split uses the circuit feed; a join of two *different* HMB streams is ported but only same-stream split / join was checked against Python.
 
 Note: a sub-cooled single-liquid stream has equal proxy K values, so (as in Python) it flashes all-or-nothing around its HMB pressure; keep the line above the HMB pressure or supply a stream that carries its own vapour split.
 
