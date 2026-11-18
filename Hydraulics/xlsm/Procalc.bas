@@ -18,6 +18,19 @@ Private Const PSIA_TO_PA As Double = 6894.757293
 Private Const ROUGH_M As Double = 0.0000457
 Private Const R_UNIV As Double = 8.314462618
 Private Const PI As Double = 3.14159265358979
+Private Type TPI
+    vsg As Double
+    vsl As Double
+    vm As Double
+    rg As Double
+    rl As Double
+    mug As Double
+    mul As Double
+    sig As Double
+    d As Double
+    th As Double
+    gvf As Double
+End Type
 
 '---- stream properties of the circuit being solved --------------------------
 Private sT As Double, sPst As Double, sVap As Double, sLiq As Double
@@ -43,7 +56,7 @@ Private fNm() As String, fZ() As Double, fKref() As Double, fMWc() As Double
 Private fTcR() As Double, fOm() As Double, fHasC As Boolean
 Private fPref As Double, fTref As Double, fTotMoles As Double, fBeta0 As Double, fSrc As String
 Private cN() As String, cMW() As Double, cTc() As Double, cPc() As Double, cOm() As Double, nCC As Long
-Private sVMW As Double, sLMW As Double
+Private sVMW As Double, sLMW As Double, sSig As Double
 Private eVap As Double, eLiq As Double, eMW As Double, eZ As Double, eMuG As Double, eMuL As Double
 Private eK() As Double, eX() As Double, csRow As Long, cdCol As Long, cdNew As Boolean, stnNo As Long
 Private ePhase As String, eBeta As Double, eGam As Double, eY() As Double, eNote As String
@@ -80,6 +93,7 @@ Public Sub RunHydraulics()
     Loop
     WriteOutputs
     WriteFivAiv
+    WriteRegime
     Worksheets("Control").Range("C8").Value = nCirc & " circuit(s), " & nOut & " rows  -  " & _
         Format(Timer - t0, "0.00") & " s  -  " & Format(Now, "yyyy-mm-dd hh:nn:ss")
     Worksheets("Control").Range("C8").Font.Color = RGB(0, 128, 0)
@@ -398,7 +412,7 @@ Private Function ReadStreamSheet(ByVal nm As String) As Boolean
         End Select
     Next j
     sT = 0: sPst = 0: sVap = 0: sLiq = 0: sMW = 0: sVMW = 0: sLMW = 0: sVrho = 0: sLrho = 0
-    sVmu = 0: sLmu = 0: sZ = 0: sGam = 0
+    sVmu = 0: sLmu = 0: sZ = 0: sGam = 0: sSig = 0
     Dim tm As Double, hvT As Boolean, hvV As Boolean, hvL As Boolean
     For i = 3 To lr
         lab = Trim$(CStr(v(i, 1)))
@@ -452,6 +466,7 @@ Private Function ReadStreamSheet(ByVal nm As String) As Boolean
         ElseIf InStr(sec, "LIQUID PHASE") > 0 Then
             If InStr(ll, "actual density") > 0 Then sLrho = PickCol(v, i, cL, cT, ok)
             If InStr(ll, "viscosity") > 0 And InStr(ll, "kin") = 0 Then sLmu = PickCol(v, i, cL, cT, ok)
+            If InStr(ll, "surface tension") > 0 Then sSig = PickCol(v, i, cL, cT, ok)
         End If
 NextI:
     Next i
@@ -772,7 +787,7 @@ Private Function LoadStream(ByVal r1 As Long, ByVal r2 As Long) As Boolean
         sVrho = SV2(sv, rr, hdr, "vap_density"): sLrho = SV2(sv, rr, hdr, "liq_density")
         sVmu = SV2(sv, rr, hdr, "vap_visc"): sLmu = SV2(sv, rr, hdr, "liq_visc")
         sZ = SV2(sv, rr, hdr, "vap_z"): If sZ = 0 Then sZ = SV2(sv, rr, hdr, "total_z")
-        sGam = SV2(sv, rr, hdr, "vap_cp_cv")
+        sGam = SV2(sv, rr, hdr, "vap_cp_cv"): sSig = SV2(sv, rr, hdr, "liq_surf_tens")
     Else
         ' manual properties - first row of the circuit that carries them
         r = r1
@@ -782,6 +797,7 @@ Private Function LoadStream(ByVal r1 As Long, ByVal r2 As Long) As Boolean
         sMW = GetN(r, "Vap MW", has): sVrho = GetN(r, "Vap Density (lb/ft3)", has): sLrho = GetN(r, "Liq Density (lb/ft3)", has)
         sVmu = GetN(r, "Vap Visc (cP)", has): sLmu = GetN(r, "Liq Visc (cP)", has)
         sZ = GetN(r, "Vap Z", has): sGam = GetN(r, "Vap Cp/Cv", has): sPst = 0: sPhase = ""
+        sSig = GetN(r, "Liq Surf Tension (N/m)", has) * 1000#
         sStream = "(manual)"
     End If
     If Len(nm) > 0 Then
@@ -977,7 +993,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             out(nOut, 25) = IIf(eVap + eLiq > 0, eVap / (eVap + eLiq), 0)
             out(nOut, 26) = eBeta: out(nOut, 27) = eVap: out(nOut, 28) = eLiq
             If flashOn Then WriteComp cid, fit, p, pOut
-            RecStn cid, r, fit, nps, idIn, cum, p, dPt, rho, v, stdRow
+            RecStn cid, r, fit, nps, idIn, cum, p, dPt, rho, v, stdRow, lenFt, dzFt
         End If
         p = pOut
 NextRow:
@@ -1079,7 +1095,8 @@ Private Sub InitStations()
     ReDim stOD(1 To n): ReDim stWall(1 To n): ReDim stID(1 To n): ReDim stRho(1 To n): ReDim stV(1 To n)
     ReDim stRg(1 To n): ReDim stRl(1 To n): ReDim stMg(1 To n): ReDim stMl(1 To n): ReDim stMu(1 To n)
     ReDim stMach(1 To n): ReDim stRv2V(1 To n): ReDim stRv2L(1 To n): ReDim stCum(1 To n): ReDim stPin(1 To n)
-    ReDim stDp(1 To n): ReDim stHasMom(1 To n)
+    ReDim stDp(1 To n): ReDim stHasMom(1 To n): ReDim stLen(1 To n): ReDim stDz(1 To n): ReDim stSig(1 To n): ReDim stMuL(1 To n)
+    ReDim regOut(1 To n, 1 To 19): nReg = 0
     ReDim fivOut(1 To n, 1 To 32): nFiv = 0
     ReDim aivOut(1 To n + 20, 1 To 14): nAiv = 0
     stN = 0
@@ -1087,7 +1104,7 @@ End Sub
 
 ' called from March on the write pass
 Private Sub RecStn(ByVal cid As String, ByVal r As Long, ByVal fit As String, ByVal nps As String, ByVal idIn As Double, _
-                   ByVal cum As Double, ByVal pIn As Double, ByVal dPt As Double, ByVal rho As Double, ByVal v As Double, ByVal std As Boolean)
+                   ByVal cum As Double, ByVal pIn As Double, ByVal dPt As Double, ByVal rho As Double, ByVal v As Double, ByVal std As Boolean, ByVal lenFt As Double, ByVal dzFt As Double)
     Dim area As Double, vm As Double, lm As Double, rg As Double, rl As Double, c As Double, k As Double
     stN = stN + 1
     stCid(stN) = cid: stFit(stN) = fit: stNps(stN) = nps: stComp(stN) = GetS(r, "Comp ID")
@@ -1095,7 +1112,8 @@ Private Sub RecStn(ByVal cid As String, ByVal r As Long, ByVal fit As String, By
     stOD(stN) = lastOD * 25.4: stWall(stN) = lastWall * 25.4: stID(stN) = idIn
     stRho(stN) = rho / LBFT3_TO_KGM3: stV(stN) = v / FT_TO_M
     stCum(stN) = cum: stPin(stN) = pIn: stDp(stN) = dPt
-    stMg(stN) = eVap: stMl(stN) = eLiq: stMu(stN) = eMuG
+    stMg(stN) = eVap: stMl(stN) = eLiq: stMu(stN) = eMuG: stMuL(stN) = eMuL: stSig(stN) = sSig
+    stLen(stN) = lenFt: stDz(stN) = dzFt
     rg = GasRho(pIn) / LBFT3_TO_KGM3: rl = sLrho
     stRg(stN) = rg: stRl(stN) = rl
     stHasMom(stN) = False
@@ -1297,6 +1315,7 @@ NextF:
         aivOut(nAiv, 8) = lwl: aivOut(nAiv, 9) = cmp: aivOut(nAiv, 10) = cmS: aivOut(nAiv, 11) = eil
         aivOut(nAiv, 12) = eiS: aivOut(nAiv, 13) = dyn
     Next i
+    RegimeRows cid
     stN = 0
 End Sub
 Private Function FitLoss(ByVal fit As String) As Double
@@ -1356,6 +1375,263 @@ Private Sub WriteFivAiv()
     End If
     ws.Columns("A:M").ColumnWidth = 13: ws.Columns("C").ColumnWidth = 26
     ws.Range("A" & nAiv + 4).Value = "AIV: source = largest dP; W = 1e-4*mdot*dP/rho; PWL = 10log10(W/1e-12); 0.2 dB/m + 2 dB elbow / 5 tee / 2 reducer; Carucci-Mueller and EI likelihood screens. Valve rows use the nearest upstream density. VERIFY eta and source."
+End Sub
+
+
+'==========================================================================
+'  Two-phase flow-regime maps (ports of the six correlations in hydraulics.py)
+'==========================================================================
+Private regOut() As Variant, nReg As Long
+Private stLen() As Double, stDz() As Double, stSig() As Double, stMuL() As Double
+
+Private Sub TdGeom(ByVal hd As Double, ByRef al As Double, ByRef ag As Double, ByRef sl As Double, ByRef sg As Double, ByRef si As Double)
+    Dim g As Double, ac As Double, rt As Double
+    g = 2# * hd - 1#
+    If g > 0.999999 Then g = 0.999999
+    If g < -0.999999 Then g = -0.999999
+    ac = ACosF(g): rt = Sqr(1# - g * g)
+    al = 0.25 * (PI - ac + g * rt): ag = 0.25 * (ac - g * rt)
+    sl = PI - ac: sg = ac: si = rt
+End Sub
+Private Function ACosF(ByVal x As Double) As Double
+    ACosF = Atn(-x / Sqr(-x * x + 1#)) + 2# * Atn(1#)
+End Function
+Private Function TdF(ByVal hd As Double, ByVal x2 As Double, ByRef ok As Boolean) As Double
+    Dim al As Double, ag As Double, sl As Double, sg As Double, si As Double, A As Double
+    Dim ul As Double, ug As Double, dl As Double, dg As Double, liq As Double, gas As Double
+    TdGeom hd, al, ag, sl, sg, si
+    ok = False
+    If al < 0.000000001 Or ag < 0.000000001 Then Exit Function
+    A = PI / 4#: ul = A / al: ug = A / ag: dl = 4# * al / sl: dg = 4# * ag / (sg + si)
+    liq = x2 * (ul * dl) ^ (-0.2) * ul ^ 2 * (sl / al)
+    gas = (ug * dg) ^ (-0.2) * ug ^ 2 * (sg / ag + si / al + si / ag)
+    TdF = liq - gas: ok = True
+End Function
+Private Function TdEquil(ByVal x2 As Double) As Double
+    Dim lo As Double, hi As Double, flo As Double, fhi As Double, fm As Double, mdp As Double
+    Dim o1 As Boolean, o2 As Boolean, o3 As Boolean, i As Long, best As Double, ba As Double, v As Double
+    lo = 0.0001: hi = 0.9999
+    flo = TdF(lo, x2, o1): fhi = TdF(hi, x2, o2)
+    If (Not o1) Or (Not o2) Or flo * fhi > 0 Then
+        best = 0.5: ba = 1E+30
+        For i = 1 To 999
+            v = TdF(i / 1000#, x2, o3)
+            If o3 Then
+                If Abs(v) < ba Then ba = Abs(v): best = i / 1000#
+            End If
+        Next i
+        TdEquil = best: Exit Function
+    End If
+    For i = 1 To 80
+        mdp = 0.5 * (lo + hi)
+        fm = TdF(mdp, x2, o3)
+        If Not o3 Then
+            lo = mdp
+        ElseIf flo * fm <= 0 Then
+            hi = mdp: fhi = fm
+        Else
+            lo = mdp: flo = fm
+        End If
+    Next i
+    TdEquil = 0.5 * (lo + hi)
+End Function
+Private Function DpdlF(ByRef t As TPI, ByVal v As Double, ByVal rho As Double, ByVal mu As Double) As Double
+    Dim Re As Double, ff As Double
+    If v <= 0 Then DpdlF = 1E-12: Exit Function
+    Re = rho * Abs(v) * t.d / mu
+    If Re > 0 Then ff = 0.046 * Re ^ -0.2 Else ff = 0.046
+    DpdlF = 4# * ff * rho * v * v / (2# * t.d)
+End Function
+Private Function TaitelDukler(ByRef t As TPI) As String
+    Dim cs As Double, dpl As Double, dpg As Double, X As Double, F As Double, nul As Double, resl As Double, K As Double, tg As Double
+    Dim hd As Double, al As Double, ag As Double, sl As Double, sg As Double, si As Double, A As Double, ug As Double, ul As Double
+    Dim f2c As Double, kc As Double, tc As Double, dr As Double
+    cs = Cos(t.th * PI / 180#): If cs < 0.05 Then cs = 0.05
+    dpl = DpdlF(t, t.vsl, t.rl, t.mul): dpg = DpdlF(t, t.vsg, t.rg, t.mug)
+    If dpg > 0 Then X = Sqr(dpl / dpg) Else X = 1000000#
+    dr = t.rl - t.rg: If dr < 0.000000001 Then dr = 0.000000001
+    F = Sqr(t.rg / dr) * t.vsg / Sqr(t.d * G_SI * cs)
+    nul = t.mul / t.rl
+    If nul > 0 Then resl = t.vsl * t.d / nul
+    If resl > 0 Then K = F * Sqr(resl)
+    tg = Sqr(Abs(dpl) / (dr * G_SI * cs))
+    hd = TdEquil(X * X)
+    TdGeom hd, al, ag, sl, sg, si
+    A = PI / 4#: ug = A / ag: ul = A / al
+    f2c = (1# - hd) ^ 2 * ag / (ug ^ 2 * (si / A))
+    If F * F <= f2c Then
+        If t.vsg > 0 Then
+            kc = Sqr(4# * nul * dr * G_SI * cs / (0.01 * t.rg * IIf(t.vsg > 0.000000001, t.vsg, 0.000000001) ^ 2))
+        Else
+            kc = 1000000000#
+        End If
+        If K >= kc Then TaitelDukler = "Stratified Wavy" Else TaitelDukler = "Stratified Smooth"
+    ElseIf hd >= 0.35 Then
+        tc = Sqr(8# * ag / (si * ul ^ 2 * (ul * 4# * al / sl) ^ -0.2))
+        If tg >= tc Then TaitelDukler = "Dispersed Bubble" Else TaitelDukler = "Intermittent"
+    Else
+        TaitelDukler = "Annular"
+    End If
+End Function
+Private Function TaitelBarnea(ByRef t As TPI) As String
+    Dim dr As Double, u0 As Double, va As Double, vdb As Double, vbs As Double
+    dr = t.rl - t.rg: If dr < 0.000000001 Then dr = 0.000000001
+    u0 = 1.53 * (G_SI * t.sig * dr / t.rl ^ 2) ^ 0.25
+    va = 3.1 * (G_SI * t.sig * dr / t.rg ^ 2) ^ 0.25
+    If t.vsg >= va Then TaitelBarnea = "Annular": Exit Function
+    If t.d > 0 Then vdb = 4# * (t.d * G_SI * dr / t.rl) ^ 0.5 * (t.sig / (dr * G_SI * t.d ^ 2)) ^ 0.1 Else vdb = 1000000000#
+    If t.vm >= vdb And t.gvf < 0.52 Then TaitelBarnea = "Dispersed Bubble": Exit Function
+    vbs = 3# * t.vsg - 1.15 * u0
+    If t.vsl > vbs And t.gvf < 0.25 Then TaitelBarnea = "Bubble": Exit Function
+    If t.vsg > 0.5 And t.gvf > 0.35 Then TaitelBarnea = "Churn": Exit Function
+    TaitelBarnea = "Slug"
+End Function
+Private Function BakerF(ByRef t As TPI) As String
+    Dim gg As Double, gl As Double, lam As Double, psi As Double, by As Double, bx As Double
+    gg = t.rg * t.vsg: gl = t.rl * t.vsl
+    lam = Sqr((t.rg / 1.225) * (t.rl / 1000#))
+    psi = (0.072 / t.sig) * ((t.mul / 0.001) * (1000# / t.rl) ^ 2) ^ (1# / 3#)
+    If lam > 0 Then by = gg / lam
+    If gg > 0 Then bx = gl / gg * lam * psi Else bx = 1000000000#
+    If by > 80 Then
+        If bx < 1 Then BakerF = "Dispersed" Else BakerF = "Annular"
+    ElseIf by > 3 Then
+        If bx < 0.3 Then
+            BakerF = "Annular"
+        ElseIf bx < 6 Then
+            BakerF = "Slug"
+        Else
+            BakerF = "Bubble"
+        End If
+    Else
+        If bx < 0.5 Then
+            BakerF = "Stratified"
+        ElseIf bx < 5 Then
+            BakerF = "Wave"
+        ElseIf bx < 50 Then
+            BakerF = "Plug"
+        Else
+            BakerF = "Bubble"
+        End If
+    End If
+End Function
+Private Function HewittRoberts(ByRef t As TPI) As String
+    Dim jl As Double, jg As Double
+    jl = t.rl * t.vsl ^ 2: jg = t.rg * t.vsg ^ 2
+    If jg > 1000 And jl > 10000 Then
+        HewittRoberts = "Wispy Annular"
+    ElseIf jg > 1000 Then
+        HewittRoberts = "Annular"
+    ElseIf jg > 10 Then
+        If jl < 1000 Then HewittRoberts = "Churn" Else HewittRoberts = "Bubbly-Slug"
+    ElseIf jl > 1000 Then
+        HewittRoberts = "Bubbly"
+    Else
+        HewittRoberts = "Slug"
+    End If
+End Function
+Private Function BarneaUnified(ByRef t As TPI) As String
+    Dim ang As Double, dr As Double, ff As Double, vdb As Double, re As Double
+    ang = Abs(t.th)
+    dr = t.rl - t.rg: If dr < 0.000000001 Then dr = 0.000000001
+    re = t.rl * t.vm * t.d / t.mul: If re < 1 Then re = 1
+    ff = 0.046 * re ^ -0.2
+    If t.d > 0 Then
+        vdb = 2# * (0.4 * t.sig / (dr * G_SI)) ^ 0.5 * (t.rl / t.sig) ^ 0.6 * (2# * ff / t.d) ^ 0.4
+    Else
+        vdb = 1000000000#
+    End If
+    If t.vm >= vdb And t.gvf < 0.52 Then BarneaUnified = "Dispersed Bubble": Exit Function
+    If ang >= 60 Then BarneaUnified = TaitelBarnea(t) Else BarneaUnified = TaitelDukler(t)
+End Function
+Private Function ShellBB(ByRef t As TPI) As String
+    Dim lam As Double, fr As Double, l1 As Double, l2 As Double, l3 As Double, l4 As Double
+    If t.vm > 0 Then lam = t.vsl / t.vm
+    If lam > 1 Then lam = 1
+    If lam < 0.000001 Then lam = 0.000001
+    If t.d > 0 Then fr = t.vm ^ 2 / (G_SI * t.d)
+    l1 = 316# * lam ^ 0.302: l2 = 0.0009252 * lam ^ -2.4684: l3 = 0.1 * lam ^ -1.4516: l4 = 0.5 * lam ^ -6.738
+    If (lam < 0.01 And fr < l1) Or (lam >= 0.01 And fr < l2) Then
+        ShellBB = "Stratified"
+    ElseIf lam >= 0.01 And fr >= l2 And fr <= l3 Then
+        ShellBB = "Transition"
+    ElseIf (lam >= 0.01 And lam < 0.4 And fr > l3 And fr <= l1) Or (lam >= 0.4 And fr > l3 And fr <= l4) Then
+        ShellBB = "Intermittent"
+    Else
+        ShellBB = "Distributed"
+    End If
+End Function
+
+Private Sub RegimeRows(ByVal cid As String)
+    Dim i As Long, t As TPI, qg As Double, ql As Double, area As Double, sp1 As String, ln As Double
+    Dim fz As Double, hls As Double, rs As Double, force As Double, inner As Double
+    For i = 1 To stN
+        If stID(i) <= 0 Then GoTo NextR
+        nReg = nReg + 1
+        t.d = stID(i) * IN_TO_M: area = PI * 0.25 * t.d * t.d
+        t.rg = stRg(i) * LBFT3_TO_KGM3: t.rl = stRl(i) * LBFT3_TO_KGM3
+        t.mug = IIf(stMu(i) > 0, stMu(i), 0.01) * 0.001: t.mul = IIf(stMuL(i) > 0, stMuL(i), 0.5) * 0.001
+        t.sig = IIf(stSig(i) > 0, stSig(i), 20#) * 0.001
+        qg = 0: ql = 0
+        If t.rg > 0 Then qg = stMg(i) * LBHR_TO_KGS / t.rg
+        If t.rl > 0 Then ql = stMl(i) * LBHR_TO_KGS / t.rl
+        t.vsg = qg / area: t.vsl = ql / area: t.vm = t.vsg + t.vsl
+        If qg + ql > 0 Then t.gvf = qg / (qg + ql) Else t.gvf = 1#
+        ln = stLen(i)
+        If ln > 0.000000001 Then
+            fz = stDz(i) / ln
+            If fz >= 1 Then
+                t.th = 90
+            ElseIf fz <= -1 Then
+                t.th = -90
+            Else
+                t.th = Atn(fz / Sqr(1# - fz * fz)) * 180# / PI
+            End If
+        Else
+            t.th = 0
+        End If
+        regOut(nReg, 1) = cid: regOut(nReg, 2) = stSeq(i): regOut(nReg, 3) = stComp(i): regOut(nReg, 4) = stFit(i)
+        regOut(nReg, 5) = stID(i): regOut(nReg, 6) = t.th: regOut(nReg, 7) = t.vsg: regOut(nReg, 8) = t.vsl
+        regOut(nReg, 9) = t.vm: regOut(nReg, 10) = t.gvf
+        sp1 = ""
+        If t.vsl <= 0.000000001 Or t.gvf >= 0.99999 Then
+            sp1 = "Single-phase gas"
+        ElseIf t.vsg <= 0.000000001 Or t.gvf <= 0.00001 Then
+            sp1 = "Single-phase liquid"
+        End If
+        If Len(sp1) > 0 Then
+            regOut(nReg, 11) = sp1
+        Else
+            regOut(nReg, 11) = TaitelDukler(t): regOut(nReg, 12) = TaitelBarnea(t): regOut(nReg, 13) = BakerF(t)
+            regOut(nReg, 14) = HewittRoberts(t): regOut(nReg, 15) = BarneaUnified(t): regOut(nReg, 16) = ShellBB(t)
+            If t.d > 0 And t.vm > 0 Then
+                inner = t.vsl / (G_SI * t.d) * (19.75 / t.vm + t.vm)
+                If inner > 0 Then fz = 0.0226 * inner ^ 1.2 Else fz = 0
+            Else
+                fz = 0
+            End If
+            hls = 1# / (1# + (t.vm / 8.66) ^ 1.39)
+            rs = t.rl * hls + t.rg * (1# - hls)
+            force = Sqr(2#) * rs * t.vm * t.vm * area
+            regOut(nReg, 17) = fz * 60#: regOut(nReg, 18) = hls: regOut(nReg, 19) = force
+        End If
+NextR:
+    Next i
+End Sub
+
+Private Sub WriteRegime()
+    Dim ws As Worksheet, h As Variant
+    h = Array("Circuit", "Seq", "Comp ID", "Fitting", "ID (in)", "Incl (deg)", "Vsg (m/s)", "Vsl (m/s)", "Vm (m/s)", "GVF", _
+        "Taitel-Dukler (horiz)", "Taitel-Barnea (vert)", "Baker (horiz)", "Hewitt-Roberts (vert)", "Barnea unified", "Shell DEP / Beggs-Brill", _
+        "Slug freq (/min)", "Slug holdup", "Slug force @bend (N)")
+    Set ws = FreshSheet("Two_Phase_Regime")
+    ws.Range("A1").Resize(1, 19).Value = h: StyleHeader ws.Range("A1").Resize(1, 19)
+    If nReg > 0 Then
+        ws.Range("A2").Resize(nReg, 19).Value = regOut
+        ws.Range("E2:J" & nReg + 1).NumberFormat = "0.000"
+    End If
+    ws.Columns("A:S").ColumnWidth = 14: ws.Columns("D").ColumnWidth = 22: ws.Columns("K:P").ColumnWidth = 20
+    ws.Range("A" & nReg + 3).Value = "Six flow-pattern correlations per station (Taitel-Dukler, Taitel-Barnea, Baker, Hewitt-Roberts, Barnea unified, Shell/Beggs-Brill) + Gregory slug frequency / holdup / bend force. VERIFY against a multiphase simulator before design use."
 End Sub
 
 
