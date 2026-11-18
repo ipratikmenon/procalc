@@ -45,6 +45,7 @@ Private fPref As Double, fTref As Double, fTotMoles As Double, fBeta0 As Double,
 Private cN() As String, cMW() As Double, cTc() As Double, cPc() As Double, cOm() As Double, nCC As Long
 Private sVMW As Double, sLMW As Double
 Private eVap As Double, eLiq As Double, eMW As Double, eZ As Double, eMuG As Double, eMuL As Double
+Private eK() As Double, eX() As Double, csRow As Long, cdCol As Long, cdNew As Boolean, stnNo As Long
 Private ePhase As String, eBeta As Double, eGam As Double, eY() As Double, eNote As String
 
 '==========================================================================
@@ -59,6 +60,7 @@ Public Sub RunHydraulics()
     gMult = Val(Worksheets("Control").Range("C4").Value) / 100#
     useFlash = (UCase$(Trim$(CStr(Worksheets("Control").Range("C7").Value))) <> "OFF")
     ReadConstants
+    InitCompSheets
     If gMult <= 0 Then gMult = 1#
     ReDim out(1 To nRow + 10, 1 To 28): nOut = 0
     ReDim cvOut(1 To nRow + 10, 1 To 14): nCV = 0
@@ -599,7 +601,7 @@ Private Sub FlashAt(ByVal pPsia As Double)
     Dim i As Long, n As Long, ratio As Double, t_r As Double, tref_r As Double, inv As Double, w As Double
     Dim k() As Double, beta As Double, sx As Double, sy As Double, vmw As Double, lmw As Double
     Dim x() As Double, y() As Double, vmol As Double, lmol As Double
-    n = fN: ReDim k(1 To n): ReDim x(1 To n): ReDim y(1 To n): ReDim eY(1 To n)
+    n = fN: ReDim k(1 To n): ReDim x(1 To n): ReDim y(1 To n): ReDim eY(1 To n): ReDim eX(1 To n): ReDim eK(1 To n)
     If pPsia < 0.000001 Then pPsia = 0.000001
     ratio = fPref / pPsia
     t_r = sT + 459.67: tref_r = fTref + 459.67
@@ -623,7 +625,7 @@ Private Sub FlashAt(ByVal pPsia As Double)
     If sx = 0 Then sx = 1
     If sy = 0 Then sy = 1
     For i = 1 To n
-        x(i) = x(i) / sx: y(i) = y(i) / sy: eY(i) = y(i)
+        x(i) = x(i) / sx: y(i) = y(i) / sy: eY(i) = y(i): eX(i) = x(i): eK(i) = k(i)
         vmw = vmw + y(i) * fMWc(i): lmw = lmw + x(i) * fMWc(i)
     Next i
     vmol = beta * fTotMoles: lmol = (1# - beta) * fTotMoles
@@ -840,6 +842,7 @@ Private Sub SolveCircuit(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String
         If Not typed Then startP = sPst
     End If
     Dim nStart As Long: nStart = nOut
+    cdNew = True: stnNo = 0
     If Not srcSet And hasDst Then
         ' ---- back-calculate the source / pump-discharge pressure --------------
         guess = dstP + 25
@@ -968,6 +971,7 @@ Private Function March(ByVal r1 As Long, ByVal r2 As Long, ByVal cid As String, 
             out(nOut, 21) = dPt: out(nOut, 22) = ePhase: out(nOut, 23) = sStream: out(nOut, 24) = note
             out(nOut, 25) = IIf(eVap + eLiq > 0, eVap / (eVap + eLiq), 0)
             out(nOut, 26) = eBeta: out(nOut, 27) = eVap: out(nOut, 28) = eLiq
+            If flashOn Then WriteComp cid, fit, p, pOut
         End If
         p = pOut
 NextRow:
@@ -1008,6 +1012,49 @@ End Sub
 
 '==========================================================================
 '  Output sheets
+
+'==========================================================================
+'  Composition_Splits (long list) and Component_Detail (components x stations)
+'==========================================================================
+Private Sub InitCompSheets()
+    Dim ws As Worksheet
+    Set ws = FreshSheet("Composition_Splits")
+    ws.Range("A1").Resize(1, 11).Value = Array("Circuit", "Stn", "Fitting", "P in (psia)", "Component", "z", "K", "y (vap)", "x (liq)", "Vapour (lbmol/h)", "Liquid (lbmol/h)")
+    StyleHeader ws.Range("A1").Resize(1, 11)
+    Set ws = FreshSheet("Component_Detail")
+    ws.Range("A1").Value = "Component mole flows (lbmol/h): Vapour | Liquid per station, one block per circuit"
+    csRow = 2: cdCol = 1
+End Sub
+
+Private Sub WriteComp(ByVal cid As String, ByVal fit As String, ByVal pIn As Double, ByVal pOut As Double)
+    Dim wsS As Worksheet, wsD As Worksheet, i As Long, a() As Variant, d() As Variant
+    Dim fm As Double, fl As Double
+    Set wsS = Worksheets("Composition_Splits"): Set wsD = Worksheets("Component_Detail")
+    stnNo = stnNo + 1
+    fm = eBeta * fTotMoles * gMult: fl = (1# - eBeta) * fTotMoles * gMult
+    ReDim a(1 To fN, 1 To 11): ReDim d(1 To fN, 1 To 2)
+    For i = 1 To fN
+        a(i, 1) = cid: a(i, 2) = stnNo: a(i, 3) = fit: a(i, 4) = pIn: a(i, 5) = fNm(i)
+        a(i, 6) = fZ(i): a(i, 7) = eK(i): a(i, 8) = eY(i): a(i, 9) = eX(i)
+        a(i, 10) = eY(i) * fm: a(i, 11) = eX(i) * fl
+        d(i, 1) = a(i, 10): d(i, 2) = a(i, 11)
+    Next i
+    wsS.Range(wsS.Cells(csRow, 1), wsS.Cells(csRow + fN - 1, 11)).Value = a
+    csRow = csRow + fN
+    If cdNew Then
+        Dim nmv() As Variant: ReDim nmv(1 To fN, 1 To 1)
+        For i = 1 To fN: nmv(i, 1) = fNm(i): Next i
+        If cdCol > 1 Then cdCol = cdCol + 1
+        wsD.Cells(3, cdCol).Value = "Component (" & cid & ")"
+        wsD.Range(wsD.Cells(4, cdCol), wsD.Cells(3 + fN, cdCol)).Value = nmv
+        cdCol = cdCol + 1: cdNew = False
+    End If
+    wsD.Cells(2, cdCol).Value = stnNo & " " & fit
+    wsD.Cells(3, cdCol).Value = "Vapour": wsD.Cells(3, cdCol + 1).Value = "Liquid"
+    wsD.Range(wsD.Cells(4, cdCol), wsD.Cells(3 + fN, cdCol + 1)).Value = d
+    cdCol = cdCol + 2
+End Sub
+
 '==========================================================================
 Private Sub WriteOutputs()
     Dim ws As Worksheet, hdr As Variant, i As Long, nc As Long

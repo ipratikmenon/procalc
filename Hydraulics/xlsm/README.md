@@ -12,7 +12,7 @@ No Python needed. Total size ≈ 55 KB (≈ 100 KB with all 440 streams of the s
 | Component_Constants | Paste the HMB `COMP_CONSTANTS` sheet as is (B Name, E MW, I Tc, J Pc, M ω) — used by the flash (Wilson T-correction) and for vapour µ / Z |
 | Streams | Fallback property table (no composition → no flash). Row 1 = `Stream` + HMB keys |
 | Data_K / Data_OD / Data_Pipe / Data_PMS | Fitting K, ASME B36.10 OD/walls, PMS class → schedule (edit class names / schedules here) |
-| Pressure_Profile, CV_Summary | Outputs (generated) |
+| Pressure_Profile, CV_Summary, Composition_Splits, Component_Detail | Outputs (generated; the last two when a stream is flashed): per-station z / K / y / x and vapour / liquid lbmol/h per component |
 
 ## What it does (v1 + phase 2)
 * Darcy-Weisbach (Swamee-Jain), K-method fittings, elevation, ID from PMS class + bore (same tables as `hydraulics.py`)
@@ -28,7 +28,7 @@ case gives 246.632 psia (same as Python).
 
 ## Not in v1 (phase 2 — still in `hydraulics.py`)
 Peng-Robinson package properties / isenthalpic (JT) temperature, tees & branches, FIV / AIV / flow-regime maps,
-Component_Detail / Composition_Splits, thermowell / inline instrument datasheets, light output theme.
+thermowell / inline instrument datasheets, light output theme.
 
 Note: a sub-cooled single-liquid stream has equal proxy K values, so (as in Python) it flashes all-or-nothing around its HMB pressure; keep the line above the HMB pressure or supply a stream that carries its own vapour split.
 
